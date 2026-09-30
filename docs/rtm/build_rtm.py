@@ -1,0 +1,302 @@
+"""Regenerate docs/rtm/AstraWMS_RTM.xlsx from the scope documents in docs/scope/*.md.
+
+Usage: python docs/rtm/build_rtm.py  (requires openpyxl)
+"""
+import re, glob, os
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
+from openpyxl.utils import get_column_letter
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DOCS = os.path.join(ROOT, "docs", "scope")
+OUT_DIR = os.path.join(ROOT, "docs", "rtm")
+OUT = os.path.join(OUT_DIR, "AstraWMS_RTM.xlsx")
+
+AREAS = {
+    "INB": "Inbound", "PUT": "Putaway & Storage", "OUT": "Outbound Order Mgmt",
+    "PCK": "Picking", "SHP": "Packing, Staging & Shipping", "INV": "Inventory Management",
+    "RPL": "Replenishment", "RET": "Returns", "XDK": "Cross-Docking", "VAS": "Value-Added Services",
+    "KIT": "Kitting / Light Mfg", "QM": "Quality Management", "MWH": "Multi-WH & 3PL",
+    "CCH": "Cold Chain & HazMat", "ADV": "Advanced Features", "INT": "ERP Integration",
+    "IF": "ERP Interfaces", "NFR": "Non-Functional",
+}
+AREA_ORDER = list(AREAS.values())
+
+def clean(s):
+    s = s.replace("\\|", "|")
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"`([^`]*)`", r"\1", s)
+    return s.strip()
+
+def split_row(line):
+    parts = re.split(r"(?<!\\)\|", line.strip())[1:-1]
+    return [clean(p) for p in parts]
+
+PERF_RX = re.compile(r"(p9[59]|≤\s*\d+\s*(ms|s\b|min)|readings/s|≤ 5 min\b)", re.I)
+
+def test_profile(prefix, num, kind, text):
+    if kind == "Exception":
+        return "Negative / exception scenario", "SIT; UAT"
+    if kind == "Interface":
+        return "Interface test per ISD (positive, negative, idempotency, ordering)", "SIT"
+    if prefix == "INT":
+        return "Integration (component) + end-to-end SIT", "SIT"
+    if prefix == "NFR":
+        if num <= 5:   return "Performance / scalability", "PERF"
+        if num <= 30:  return "Resilience / DR", "PERF; DR"
+        if num <= 47:  return "Configuration verification", "SIT"
+        if num <= 66:  return "Security & audit", "SIT; UAT"
+        if num == 81:  return "Accessibility (WCAG 2.2 AA)", "UAT"
+        if num == 82:  return "Operability / production readiness", "PERF"
+        return "Usability", "UAT"
+    if PERF_RX.search(text):
+        return "Performance", "PERF"
+    if prefix == "ADV" and 50 <= num <= 53:
+        return "Automation / MHE (emulator, FAT/SAT)", "SIT; Site"
+    t = "Functional (rule test harness + E2E scenario)"
+    if re.search(r"e-signature|Part 11", text, re.I):
+        t += "; Regulated validation (OQ)"
+    return t, "SIT; UAT"
+
+rows, seen = [], set()
+for path in sorted(glob.glob(os.path.join(DOCS, "*.md"))):
+    fname = os.path.basename(path)
+    section = ""
+    for line in open(path, encoding="utf-8"):
+        h = re.match(r"^(#{2,3})\s+(.*)", line)
+        if h:
+            if re.match(r"^([A-Z]\.)?\d", clean(h.group(2))):
+                section = clean(h.group(2))
+            continue
+        # table rows: requirements & exceptions
+        m = re.match(r"^\|\s*([A-Z]{2,4})-(EX-)?(\d{2,3})\s*\|", line)
+        if m:
+            prefix, ex, num = m.group(1), m.group(2), int(m.group(3))
+            if prefix not in AREAS: continue
+            c = split_row(line)
+            rid = c[0]
+            if ex:
+                kind = "Exception"
+                desc = c[1]
+                if len(c) >= 5:
+                    acc = f"Detection: {c[2]} | Resolution: {c[3]} | ERP impact: {c[4]}"
+                elif len(c) == 4:
+                    acc = f"Detection: {c[2]} | Resolution: {c[3]}"
+                else:
+                    acc = f"Resolution: {c[2]}"
+                pri_raw = "M"
+                note = "Priority defaulted to M (exception flow; see Legend)"
+            else:
+                kind = "Requirement"
+                desc = c[1]
+                third = c[2] if len(c) > 2 else ""
+                if re.match(r"^[MSCW]\b", third):
+                    pri_raw, acc, note = third, "Rule/requirement enforced as stated (positive + negative case)", ""
+                else:  # e.g. NFR-020..030: third column is the target
+                    pri_raw, acc = "M", f"Target: {third}"
+                    note = "Priority defaulted to M (HA/DR target; see Legend)"
+            pri = pri_raw[0]
+            extra = pri_raw[1:].strip(" ()")
+            if extra: note = (note + "; " if note else "") + f"Priority qualifier: {extra}"
+        else:
+            # bullet requirements: "- INT-001 (M): text"
+            b = re.match(r"^- ([A-Z]{2,4})-(\d{3}) \(([MSCW])\):\s*(.*)", line)
+            i = re.match(r"^\|\s*(IF-[A-Z]+-\d{3})\s*\|", line)
+            if b:
+                prefix, num = b.group(1), int(b.group(2))
+                rid, kind, pri, desc = f"{prefix}-{b.group(2)}", "Requirement", b.group(3), clean(b.group(4))
+                acc, note = "Rule/requirement enforced as stated (positive + negative case)", ""
+            elif i:
+                c = split_row(line)
+                prefix, num, rid, kind, pri = "IF", 0, c[0], "Interface", "M"
+                desc = f"{c[2]} ({c[1]}), trigger: {c[5]}"
+                acc = f"SAP: {c[3]} | Oracle: {c[4]} | Design peak: {c[6]} | Latency SLA: {c[7]}"
+                note = "Priority defaulted to M (interface in catalogue D.4.2)"
+            else:
+                continue
+        if rid in seen: continue
+        seen.add(rid)
+        ttype, phase = test_profile(prefix, num, kind, desc + " " + acc)
+        rows.append(dict(id=rid, kind=kind, area=AREAS[prefix], section=section, doc=f"docs/scope/{fname}",
+                         desc=desc, acc=acc, pri=pri, tc=f"TC-{rid}-01", ttype=ttype, phase=phase, note=note))
+
+rows.sort(key=lambda r: (AREA_ORDER.index(r["area"]), {"Requirement": 0, "Interface": 1, "Exception": 2}[r["kind"]], r["id"]))
+
+# ---------------- workbook ----------------
+F = "Arial"
+thin = Side(style="thin", color="BFBFBF")
+border = Border(left=thin, right=thin, top=thin, bottom=thin)
+hdr_fill = PatternFill("solid", fgColor="1F3864")
+input_fill = PatternFill("solid", fgColor="FFFF00")
+hdr_font = Font(name=F, bold=True, color="FFFFFF", size=10)
+input_hdr_font = Font(name=F, bold=True, color="000000", size=10)
+body = Font(name=F, size=9)
+wrap_top = Alignment(wrap_text=True, vertical="top")
+
+wb = Workbook()
+
+# ---- RTM sheet
+ws = wb.active
+ws.title = "RTM"
+cols = [
+    ("Req ID", 13, False), ("Type", 12, False), ("Area", 20, False), ("Section", 26, False),
+    ("Source Document", 30, False), ("Requirement / Exception", 55, False),
+    ("Acceptance Criteria / Expected Behaviour", 55, False), ("Priority", 9, False),
+    ("Fit-Gap Disposition", 16, True), ("Design Reference", 18, True),
+    ("Test Case ID", 18, False), ("Test Type", 30, False), ("Test Phase", 12, False),
+    ("Test Status", 13, True), ("Defect ID(s)", 14, True), ("Owner", 16, True), ("Notes", 40, False),
+]
+for ci, (name, width, is_input) in enumerate(cols, 1):
+    cell = ws.cell(row=1, column=ci, value=name)
+    cell.font = input_hdr_font if is_input else hdr_font
+    cell.fill = input_fill if is_input else hdr_fill
+    cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    cell.border = border
+    ws.column_dimensions[get_column_letter(ci)].width = width
+ws.row_dimensions[1].height = 32
+
+for ri, r in enumerate(rows, 2):
+    vals = [r["id"], r["kind"], r["area"], r["section"], r["doc"], r["desc"], r["acc"], r["pri"],
+            None, None, r["tc"], r["ttype"], r["phase"], "Not Started", None, None, r["note"]]
+    for ci, v in enumerate(vals, 1):
+        c = ws.cell(row=ri, column=ci, value=v)
+        c.font = body
+        c.alignment = wrap_top
+        c.border = border
+last = len(rows) + 1
+ws.freeze_panes = "B2"
+ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{last}"
+
+dv_status = DataValidation(type="list", formula1='"Not Started,In Progress,Passed,Failed,Blocked,Deferred,N/A"', allow_blank=True)
+dv_fit = DataValidation(type="list", formula1='"Fit - Standard,Fit - Configuration,Gap - Extension,Gap - Process Change,Rejected,Deferred"', allow_blank=True)
+dv_pri = DataValidation(type="list", formula1='"M,S,C,W"', allow_blank=False)
+for dv, col in ((dv_status, "N"), (dv_fit, "I"), (dv_pri, "H")):
+    ws.add_data_validation(dv)
+    dv.add(f"{col}2:{col}{last}")
+
+status_colors = {"Passed": "C6EFCE", "Failed": "FFC7CE", "Blocked": "FFC7CE", "In Progress": "FFEB9C", "Deferred": "D9D9D9", "N/A": "D9D9D9"}
+for val, color in status_colors.items():
+    ws.conditional_formatting.add(f"N2:N{last}", CellIsRule(operator="equal", formula=[f'"{val}"'], fill=PatternFill("solid", fgColor=color)))
+ws.conditional_formatting.add(f"H2:H{last}", CellIsRule(operator="equal", formula=['"M"'], font=Font(name=F, bold=True, color="C00000")))
+
+# ---- Summary sheet
+sm = wb.create_sheet("Summary")
+sm["A1"] = "AstraWMS: Requirements Traceability Summary"
+sm["A1"].font = Font(name=F, bold=True, size=14)
+sm["A2"] = "All figures are formulas over the RTM sheet and update as Test Status / Fit-Gap Disposition are maintained."
+sm["A2"].font = Font(name=F, italic=True, size=9, color="595959")
+heads = ["Area", "Total Items", "Requirements", "Interfaces", "Exceptions", "Must (M)", "Should (S)", "Could (C)",
+         "Fit-Gap Assessed", "Passed", "Failed / Blocked", "In Progress", "Not Started", "% Passed", "% Fit-Gap Assessed"]
+HR = 4
+for ci, h in enumerate(heads, 1):
+    c = sm.cell(row=HR, column=ci, value=h)
+    c.font = hdr_font; c.fill = hdr_fill; c.border = border
+    c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+    sm.column_dimensions[get_column_letter(ci)].width = 26 if ci == 1 else 12
+sm.row_dimensions[HR].height = 32
+
+rng = lambda col: f"RTM!${col}$2:${col}${last}"
+areas_present = [a for a in AREA_ORDER if any(r["area"] == a for r in rows)]
+for i, area in enumerate(areas_present):
+    r = HR + 1 + i
+    a = f"$A{r}"
+    f = {
+        2: f"=COUNTIFS({rng('C')},{a})",
+        3: f'=COUNTIFS({rng("C")},{a},{rng("B")},"Requirement")',
+        4: f'=COUNTIFS({rng("C")},{a},{rng("B")},"Interface")',
+        5: f'=COUNTIFS({rng("C")},{a},{rng("B")},"Exception")',
+        6: f'=COUNTIFS({rng("C")},{a},{rng("H")},"M")',
+        7: f'=COUNTIFS({rng("C")},{a},{rng("H")},"S")',
+        8: f'=COUNTIFS({rng("C")},{a},{rng("H")},"C")',
+        9: f'=COUNTIFS({rng("C")},{a},{rng("I")},"?*")',
+        10: f'=COUNTIFS({rng("C")},{a},{rng("N")},"Passed")',
+        11: f'=COUNTIFS({rng("C")},{a},{rng("N")},"Failed")+COUNTIFS({rng("C")},{a},{rng("N")},"Blocked")',
+        12: f'=COUNTIFS({rng("C")},{a},{rng("N")},"In Progress")',
+        13: f'=COUNTIFS({rng("C")},{a},{rng("N")},"Not Started")',
+        14: f"=IFERROR(J{r}/B{r},0)",
+        15: f"=IFERROR(I{r}/B{r},0)",
+    }
+    sm.cell(row=r, column=1, value=area)
+    for ci, formula in f.items():
+        sm.cell(row=r, column=ci, value=formula)
+tr = HR + 1 + len(areas_present)
+sm.cell(row=tr, column=1, value="TOTAL")
+for ci in range(2, 14):
+    L = get_column_letter(ci)
+    sm.cell(row=tr, column=ci, value=f"=SUM({L}{HR+1}:{L}{tr-1})")
+sm.cell(row=tr, column=14, value=f"=IFERROR(J{tr}/B{tr},0)")
+sm.cell(row=tr, column=15, value=f"=IFERROR(I{tr}/B{tr},0)")
+for r in range(HR + 1, tr + 1):
+    for ci in range(1, 16):
+        c = sm.cell(row=r, column=ci)
+        c.font = Font(name=F, size=10, bold=(r == tr))
+        c.border = border
+        if ci >= 14: c.number_format = "0.0%;-0.0%;-"
+        elif ci >= 2: c.number_format = "#,##0;-#,##0;-"
+        if r == tr: c.fill = PatternFill("solid", fgColor="D9E1F2")
+sm.cell(row=tr + 2, column=1, value="Check: RTM row count").font = Font(name=F, size=9, italic=True)
+sm.cell(row=tr + 2, column=2, value=f"=COUNTA({rng('A')})").font = Font(name=F, size=9, italic=True)
+sm.cell(row=tr + 2, column=3, value=f'=IF(B{tr+2}=B{tr},"OK - all rows mapped to an area","MISMATCH")').font = Font(name=F, size=9, italic=True)
+sm.freeze_panes = f"B{HR+1}"
+
+# ---- Legend sheet
+lg = wb.create_sheet("Legend")
+lg.column_dimensions["A"].width = 30
+lg.column_dimensions["B"].width = 110
+lines = [
+    ("AstraWMS Requirements Traceability Matrix", None, "title"),
+    ("Source", "AstraWMS Scope & Solution Definition v1.0 (docs/scope/*.md), baseline 2026-09-30. Every requirement ID, exception code and interface ID in the document set is one row on the RTM sheet.", None),
+    ("How to use", "Maintain only the yellow-header columns on the RTM sheet (Fit-Gap Disposition, Design Reference, Test Status, Defect ID(s), Owner). Summary recalculates automatically. Add further test cases for a requirement as extra rows with the same Req ID and TC suffix -02, -03 …", None),
+    ("", None, None),
+    ("Column", "Meaning", "head"),
+    ("Req ID", "Identifier from the scope documents: <AREA>-<NNN> requirement, <AREA>-EX-<NN> exception flow, IF-<FLOW>-<NNN> ERP interface."),
+    ("Type", "Requirement | Exception | Interface."),
+    ("Area / Section / Source Document", "Functional area (from the ID prefix), the heading it appears under, and the Markdown file that defines it."),
+    ("Requirement / Exception", "Requirement text, exception name, or interface object/direction/trigger as written in the scope."),
+    ("Acceptance Criteria", "Rules: enforced as stated (positive + negative case). Exceptions: detection, resolution and ERP impact from the exception table. Interfaces: SAP/Oracle technology, design peak volume and latency SLA. HA/DR NFRs: the stated target."),
+    ("Priority", "MoSCoW: M Must, S Should, C Could, W Won't (document §0.4)."),
+    ("Fit-Gap Disposition (input)", "Blueprint outcome (§I.1.2): Fit - Standard, Fit - Configuration, Gap - Extension, Gap - Process Change, Rejected, Deferred."),
+    ("Design Reference (input)", "Process Design Document (PDD) or Interface Specification Document (ISD) reference."),
+    ("Test Case ID", "Generated placeholder TC-<ReqID>-01; replace/extend with IDs from the test management tool."),
+    ("Test Type / Test Phase", "Proposed from the Testing Strategy (§I.2): functional, exception, integration, interface, performance, resilience/DR, security & audit, automation, regulated validation."),
+    ("Test Status (input)", "Not Started, In Progress, Passed, Failed, Blocked, Deferred, N/A."),
+    ("", None, None),
+    ("Example (filled row)", "Req ID INB-002 · Fit-Gap Disposition: Fit - Configuration · Design Reference: PDD-INB-01 §3.2 · Test Status: Passed · Defect ID(s): DEF-0142 (closed) · Owner: Receiving Process Owner", None),
+    ("", None, None),
+    ("Assumptions", None, "head"),
+    ("A1", "Exception codes carry no priority in the scope; they are set to M because §I.2 requires every exception code to be covered by a test case."),
+    ("A2", "NFR-020 to NFR-030 (HA/DR) list a target instead of a priority; they are set to M."),
+    ("A3", "Interfaces IF-* are set to M; drop to S/C per site if an interface is not used (e.g. kitting IF-KIT-001 at sites without kitting)."),
+    ("A4", "Where a priority carries a qualifier (e.g. 'M (if sorter in scope)'), the letter is used and the qualifier is kept in Notes."),
+    ("A5", "Test Type and Phase are proposals derived from the requirement wording (latency/throughput targets → Performance; e-signature/Part 11 → Regulated validation). Confirm during test planning."),
+    ("Coverage gap", "Tables without requirement IDs are not in the RTM: §E.4 Security & Compliance, §E.6 API Governance, §D.5 Integration Security, §G.2 Web UI modules, §H KPI definitions and reports. Assign IDs in the scope document to trace them."),
+]
+r = 1
+for item in lines:
+    k, v = item[0], item[1]
+    style = item[2] if len(item) > 2 else None
+    ca = lg.cell(row=r, column=1, value=k or None)
+    cb = lg.cell(row=r, column=2, value=v)
+    if style == "title":
+        ca.font = Font(name=F, bold=True, size=14)
+    elif style == "head":
+        for c in (ca, cb):
+            c.font = hdr_font; c.fill = hdr_fill
+    else:
+        ca.font = Font(name=F, bold=True, size=10)
+        cb.font = Font(name=F, size=10)
+    cb.alignment = Alignment(wrap_text=True, vertical="top")
+    ca.alignment = Alignment(vertical="top")
+    r += 1
+
+wb.move_sheet("Summary", offset=-1)
+wb.move_sheet("Legend", offset=-2)
+wb.active = 0
+os.makedirs(OUT_DIR, exist_ok=True)
+from openpyxl.workbook.properties import CalcProperties
+wb.calculation = CalcProperties(fullCalcOnLoad=True)
+wb.save(OUT)
+from collections import Counter
+print(len(rows), Counter(r["kind"] for r in rows), Counter(r["pri"] for r in rows))

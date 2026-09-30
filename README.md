@@ -22,6 +22,7 @@ This repository currently contains the **Scope & Solution Definition** document 
 | H | [Reporting & Analytics](docs/scope/11-reporting-analytics.md) | Dashboards, inventory/labor KPIs, management reports, data warehouse |
 | I | [Implementation Roadmap](docs/scope/12-implementation-roadmap.md) | Phases, testing, training/OCM, go-live, hypercare, optimisation |
 | Z | [Glossary](docs/scope/13-glossary.md) | Terms and acronyms |
+| RTM | [Requirements Traceability Matrix](docs/rtm/AstraWMS_RTM.xlsx) | All 246 requirement, exception and interface IDs with fit-gap and test tracking; regenerate with `python docs/rtm/build_rtm.py` |
 
 ## Core Principle
 
