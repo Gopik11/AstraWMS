@@ -46,7 +46,7 @@ public class OutboxRelay {
     }
 
     private record Row(long id, UUID messageId, String topic, String messageKey, String messageType, String tenantId,
-                       String envelope) {
+                       String sourceSystem, String envelope) {
     }
 
     @Scheduled(fixedDelayString = "${astra.outbox.relay-interval-ms:500}")
@@ -67,12 +67,13 @@ public class OutboxRelay {
                 return 0;
             }
             List<Row> rows = jdbc.sql("""
-                            select id, message_id, topic, message_key, message_type, tenant_id, envelope::text as envelope
+                            select id, message_id, topic, message_key, message_type, tenant_id,
+                                   envelope->>'sourceSystem' as source_system, envelope::text as envelope
                             from outbox where published_at is null order by id limit :limit""")
                     .param("limit", batchSize)
                     .query((rs, n) -> new Row(rs.getLong("id"), rs.getObject("message_id", UUID.class),
                             rs.getString("topic"), rs.getString("message_key"), rs.getString("message_type"),
-                            rs.getString("tenant_id"), rs.getString("envelope")))
+                            rs.getString("tenant_id"), rs.getString("source_system"), rs.getString("envelope")))
                     .list();
             for (Row row : rows) {
                 send(row);
@@ -90,7 +91,7 @@ public class OutboxRelay {
                 .add("ce_specversion", bytes("1.0"))
                 .add("ce_id", bytes(row.messageId().toString()))
                 .add("ce_type", bytes(row.messageType()))
-                .add("ce_source", bytes(OutboxWriter.SOURCE_SYSTEM))
+                .add("ce_source", bytes(row.sourceSystem() != null ? row.sourceSystem() : OutboxWriter.SOURCE_SYSTEM))
                 .add("tenantid", bytes(row.tenantId()));
         try {
             kafka.send(record).get(sendTimeout.toMillis(), TimeUnit.MILLISECONDS);

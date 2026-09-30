@@ -12,7 +12,7 @@ import com.astrawms.inventory.api.InventoryDtos.StatusChangeRequest;
 import com.astrawms.inventory.domain.ErpMovementType;
 import com.astrawms.inventory.domain.StockStatus;
 import com.astrawms.inventory.domain.TxnType;
-import com.astrawms.inventory.events.InventoryEvents.GoodsMovement;
+import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.inventory.events.InventoryEvents.InventoryChanged;
 import com.astrawms.inventory.events.InventoryEvents.Topics;
 import com.astrawms.inventory.persistence.InventoryRepository;
@@ -516,7 +516,7 @@ public class InventoryCommandService {
             String txnId = first ? ctx.wmsTxnId : WmsTxnId.next(clock);
             first = false;
             repo.insertErpMovement(txnId, ctx.operationId, ctx.siteId, m.itemNo(), m.type().name(), ctx.now);
-            outbox.append(new OutboxWriter.Message(topics.goodsMovements(), "GoodsMovement", "2.0", "ERP",
+            outbox.append(new OutboxWriter.Message(topics.goodsMovements(), GoodsMovement.TYPE, GoodsMovement.VERSION, "ERP",
                     ctx.siteId, m.ownerId(), ctx.siteId + ":" + m.itemNo(),
                     new GoodsMovement(txnId, m.type().name(), ctx.reasonCode, ctx.now, ctx.approvedBy, m.items())));
             erpMovements.add(new OperationResult.ErpMovement(txnId, m.type().name(), m.itemNo()));

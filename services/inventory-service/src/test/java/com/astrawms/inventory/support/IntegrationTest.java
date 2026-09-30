@@ -20,8 +20,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
-import org.testcontainers.kafka.KafkaContainer;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.astrawms.test.AstraContainers;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
@@ -33,23 +32,11 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 @SpringBootTest(properties = "astra.outbox.relay-interval-ms=200")
 public abstract class IntegrationTest {
 
-    protected static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:16-alpine")
-            .withInitScript("db/init-roles.sql");
-    protected static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka-native:3.8.0");
-
-    static {
-        POSTGRES.start();
-        KAFKA.start();
-    }
+    protected static final org.testcontainers.kafka.KafkaContainer KAFKA = AstraContainers.KAFKA;
 
     @DynamicPropertySource
     static void infrastructure(DynamicPropertyRegistry r) {
-        r.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        r.add("spring.datasource.username", () -> "astra_app");
-        r.add("spring.datasource.password", () -> "astra_app_test");
-        r.add("spring.flyway.user", POSTGRES::getUsername);
-        r.add("spring.flyway.password", POSTGRES::getPassword);
-        r.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        AstraContainers.register(r);
     }
 
     protected static final String SITE = "DC1";

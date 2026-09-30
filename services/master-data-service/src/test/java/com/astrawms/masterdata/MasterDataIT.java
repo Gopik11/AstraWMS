@@ -29,31 +29,16 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
-import org.testcontainers.kafka.KafkaContainer;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.astrawms.test.AstraContainers;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 @SpringBootTest(properties = "astra.outbox.relay-enabled=false")
 class MasterDataIT {
 
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:16-alpine")
-            .withInitScript("db/init-roles.sql");
-    static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka-native:3.8.0");
-
-    static {
-        POSTGRES.start();
-        KAFKA.start();
-    }
-
     @DynamicPropertySource
     static void infrastructure(DynamicPropertyRegistry r) {
-        r.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        r.add("spring.datasource.username", () -> "astra_app");
-        r.add("spring.datasource.password", () -> "astra_app_test");
-        r.add("spring.flyway.user", POSTGRES::getUsername);
-        r.add("spring.flyway.password", POSTGRES::getPassword);
-        r.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        AstraContainers.register(r);
     }
 
     @Autowired

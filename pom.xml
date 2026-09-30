@@ -20,8 +20,11 @@
 
     <modules>
         <module>platform/astra-common</module>
+        <module>platform/astra-test-support</module>
         <module>services/master-data-service</module>
         <module>services/inventory-service</module>
+        <module>services/inbound-service</module>
+        <module>adapters/sap-adapter</module>
     </modules>
 
     <properties>
@@ -35,6 +38,11 @@
             <dependency>
                 <groupId>com.astrawms</groupId>
                 <artifactId>astra-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.astrawms</groupId>
+                <artifactId>astra-test-support</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>
