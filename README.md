@@ -2,7 +2,37 @@
 
 AstraWMS is an enterprise Warehouse Management System (WMS). It is the **warehouse execution system** that sits under an ERP **system of record** (SAP ECC / S/4HANA, Oracle E-Business Suite, Oracle Fusion Cloud SCM).
 
-This repository currently contains the **Scope & Solution Definition** document set. It is written to be used directly as the basis for an RFP response, a Software Requirements Specification (SRS), and the target architecture design.
+This repository contains:
+- the **Scope & Solution Definition** document set, written to be used directly as the basis for an RFP response, an SRS and the target architecture design;
+- the **platform code**, starting with release 0.1: the platform library, Master Data and Inventory services.
+
+## Platform (release 0.1)
+
+| Module | Purpose |
+|---|---|
+| [`platform/astra-common`](platform/astra-common) | Tenancy + Postgres RLS binding, RFC 9457 errors, transactional outbox/relay, inbox de-duplication, 16-char `WmsTxnId`, shared event contracts |
+| [`services/master-data-service`](services/master-data-service) | Items (UoMs, GTINs, site control data), sites, zones, locations with zone inheritance and bulk generation; publishes `ItemUpserted` / `LocationUpserted` |
+| [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
+
+Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/README.md).
+
+**Build and test.** No local JDK is needed; Maven runs in Docker, and Testcontainers starts Postgres 16 and Kafka:
+
+```bash
+scripts/mvn-docker.sh -B verify
+```
+
+**Run locally and smoke test.** This starts Postgres, Kafka and both services. The smoke test runs the whole flow: master data, then Kafka, then the inventory projection, receipt, move and adjustment, and finally the ERP goods movements.
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+```bash
+scripts/smoke-test.sh
+```
+
+**APIs.** Master data runs on port 8081 under `/api/v1/items`, `/api/v1/sites/...`. Inventory runs on port 8082 under `/api/v1/sites/{siteId}/inventory/...`. Every request needs an `X-Tenant-Id` header; in deployed environments the API gateway sets it from the token. Inventory POSTs also need `Idempotency-Key`.
 
 ## Document Set
 

@@ -1,0 +1,10 @@
+# Architecture Decision Records
+
+| ADR | Decision |
+|---|---|
+| [0001](0001-service-stack.md) | Java 21, Spring Boot 4.1, PostgreSQL (JdbcClient, no JPA), Kafka, Maven monorepo, Testcontainers |
+| [0002](0002-transactional-outbox-and-inbox.md) | Transactional outbox with per-key sequences, single ordered relay, inbox de-duplication |
+| [0003](0003-tenant-isolation-with-row-level-security.md) | Tenant isolation with Postgres RLS and a non-owner application role |
+| [0004](0004-idempotent-commands-and-wms-transaction-ids.md) | Idempotency-Key on all commands; 16-char time-ordered WMS transaction IDs for ERP de-duplication |
+
+New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.
