@@ -20,8 +20,10 @@ AREAS = {
     "RPL": "Replenishment", "RET": "Returns", "XDK": "Cross-Docking", "VAS": "Value-Added Services",
     "KIT": "Kitting / Light Mfg", "QM": "Quality Management", "MWH": "Multi-WH & 3PL",
     "CCH": "Cold Chain & HazMat", "ADV": "Advanced Features", "INT": "ERP Integration",
-    "IF": "ERP Interfaces", "NFR": "Non-Functional",
+    "IF": "ERP Interfaces", "NFR": "Non-Functional", "UX": "UI/UX",
+    "RPT": "Reporting & Analytics",
 }
+LABEL_HEADERS = ("Area", "Aspect")  # tables where column 2 is a label and column 3 the requirement text
 AREA_ORDER = list(AREAS.values())
 
 def clean(s):
@@ -42,8 +44,16 @@ def test_profile(prefix, num, kind, text):
     if kind == "Interface":
         return "Interface test per ISD (positive, negative, idempotency, ordering)", "SIT"
     if prefix == "INT":
+        if num >= 20:  return "Integration security (authN/authZ, encryption, audit)", "SIT"
         return "Integration (component) + end-to-end SIT", "SIT"
+    if prefix == "UX":
+        return "UI functional + role-based access (per module)", "SIT; UAT"
+    if prefix == "RPT":
+        if num >= 60:  return "Report validation (content, schedule, security)", "UAT"
+        return "KPI validation (formula reconciled to source data)", "UAT"
     if prefix == "NFR":
+        if num >= 120: return "API contract & governance (lint, contract tests)", "SIT"
+        if num >= 100: return "Security & compliance", "SIT; UAT"
         if num <= 5:   return "Performance / scalability", "PERF"
         if num <= 30:  return "Resilience / DR", "PERF; DR"
         if num <= 47:  return "Configuration verification", "SIT"
@@ -63,8 +73,11 @@ def test_profile(prefix, num, kind, text):
 rows, seen = [], set()
 for path in sorted(glob.glob(os.path.join(DOCS, "*.md"))):
     fname = os.path.basename(path)
-    section = ""
+    section, header, prev = "", [], ""
     for line in open(path, encoding="utf-8"):
+        if re.match(r"^\|[-| :]+\|\s*$", line):
+            header = split_row(prev)
+        prev = line
         h = re.match(r"^(#{2,3})\s+(.*)", line)
         if h:
             if re.match(r"^([A-Z]\.)?\d", clean(h.group(2))):
@@ -92,7 +105,16 @@ for path in sorted(glob.glob(os.path.join(DOCS, "*.md"))):
                 kind = "Requirement"
                 desc = c[1]
                 third = c[2] if len(c) > 2 else ""
-                if re.match(r"^[MSCW]\b", third):
+                if header and header[-1] == "Pri" and len(c) > 3:
+                    # multi-column table with explicit Pri column (e.g. E.4, G.2, H.3)
+                    pri_raw, mid, hmid, note = c[-1], c[1:-1], header[1:-1], ""
+                    if hmid[0] in LABEL_HEADERS:
+                        desc = f"{mid[0]}: {mid[1]}"
+                        acc = "Rule/requirement enforced as stated (positive + negative case)"
+                    else:
+                        desc = f"{hmid[0]}: {mid[0]}"
+                        acc = " | ".join(f"{hh}: {v}" for hh, v in zip(hmid[1:], mid[1:]))
+                elif re.match(r"^[MSCW]\b", third):
                     pri_raw, acc, note = third, "Rule/requirement enforced as stated (positive + negative case)", ""
                 else:  # e.g. NFR-020..030: third column is the target
                     pri_raw, acc = "M", f"Target: {third}"
@@ -271,7 +293,8 @@ lines = [
     ("A3", "Interfaces IF-* are set to M; drop to S/C per site if an interface is not used (e.g. kitting IF-KIT-001 at sites without kitting)."),
     ("A4", "Where a priority carries a qualifier (e.g. 'M (if sorter in scope)'), the letter is used and the qualifier is kept in Notes."),
     ("A5", "Test Type and Phase are proposals derived from the requirement wording (latency/throughput targets → Performance; e-signature/Part 11 → Regulated validation). Confirm during test planning."),
-    ("Coverage gap", "Tables without requirement IDs are not in the RTM: §E.4 Security & Compliance, §E.6 API Governance, §D.5 Integration Security, §G.2 Web UI modules, §H KPI definitions and reports. Assign IDs in the scope document to trace them."),
+    ("A6", "KPI and report rows (RPT-*) take the KPI formula, target and grain, or the report frequency, audience and contents, as acceptance criteria. Web UI module rows (UX-*) take the key screens and primary roles."),
+    ("Coverage", "Traced: every numbered requirement, exception code and interface, plus §D.5 Integration Security (INT-020–027), §E.4 Security & Compliance (NFR-100–109), §E.6 API Governance (NFR-120–129), §G.2 Web UI Modules (UX-001–017), §H.3–H.6 KPIs and reports (RPT-001–070). Not traced as separate rows: descriptive design tables (§F architecture, §D.1–D.4 mappings, §G.3–G.6 RF flows/voice/RBAC/dashboards, §H.7 data warehouse), which are verified through the requirements that reference them."),
 ]
 r = 1
 for item in lines:

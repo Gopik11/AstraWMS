@@ -63,18 +63,18 @@ Measurement is server-side at the API gateway, excluding network and device time
 
 ## E.4 Security & Compliance
 
-| Area | Requirement |
-|---|---|
-| Identity | SSO via SAML 2.0 / OIDC with customer IdP (Entra ID, Okta, Ping); SCIM 2.0 user provisioning; MFA enforced for web; RF login via badge scan + PIN, backed by IdP-issued device session |
-| Authorisation | RBAC with attribute-based constraints (site, owner, zone, function) (§G.5); least privilege; segregation-of-duties rules enforced (e.g., count vs approve) |
-| Encryption | TLS 1.2+ in transit; AES-256 at rest; customer-managed keys (BYOK/HYOK via cloud KMS) option |
-| Data isolation | Tenant isolation at the data layer (row-level security + tenant-scoped encryption keys); dedicated-cell option |
-| Application security | OWASP ASVS Level 2; SAST/DAST/SCA in CI; SBOM (CycloneDX) per release; critical vulnerabilities remediated ≤ 7 days, high ≤ 30 days; annual third-party penetration test |
-| Certifications | SOC 2 Type II, ISO/IEC 27001 (and 27017/27018); GDPR compliance with DPA; data residency per region (EU, US, APAC) |
-| Privacy | PII minimisation (ship-to data only as needed), retention & deletion policies, subject access/erasure support for consignee data, pseudonymised labor analytics option |
-| Regulated industries | 21 CFR Part 11 / EU Annex 11 support: validated release process, audit trail, e-signatures, validation package (IQ/OQ scripts, traceability matrix) delivered per release |
-| Devices | MDM-managed RF devices (Intune / SOTI / Zebra StageNow); kiosk mode; certificate-based Wi-Fi (WPA2/3-Enterprise EAP-TLS) |
-| Logging for security | Security events to customer SIEM (syslog / CEF / API); login failures, privilege changes, data exports |
+| ID | Area | Requirement | Pri |
+|---|---|---|---|
+| NFR-100 | Identity | SSO via SAML 2.0 / OIDC with customer IdP (Entra ID, Okta, Ping); SCIM 2.0 user provisioning; MFA enforced for web; RF login via badge scan + PIN, backed by IdP-issued device session | M |
+| NFR-101 | Authorisation | RBAC with attribute-based constraints (site, owner, zone, function) (§G.5); least privilege; segregation-of-duties rules enforced (e.g., count vs approve) | M |
+| NFR-102 | Encryption | TLS 1.2+ in transit; AES-256 at rest; customer-managed keys (BYOK/HYOK via cloud KMS) option | M |
+| NFR-103 | Data isolation | Tenant isolation at the data layer (row-level security + tenant-scoped encryption keys); dedicated-cell option | M |
+| NFR-104 | Application security | OWASP ASVS Level 2; SAST/DAST/SCA in CI; SBOM (CycloneDX) per release; critical vulnerabilities remediated ≤ 7 days, high ≤ 30 days; annual third-party penetration test | M |
+| NFR-105 | Certifications | SOC 2 Type II, ISO/IEC 27001 (and 27017/27018); GDPR compliance with DPA; data residency per region (EU, US, APAC) | M |
+| NFR-106 | Privacy | PII minimisation (ship-to data only as needed), retention & deletion policies, subject access/erasure support for consignee data, pseudonymised labor analytics option | M |
+| NFR-107 | Regulated industries | 21 CFR Part 11 / EU Annex 11 support: validated release process, audit trail, e-signatures, validation package (IQ/OQ scripts, traceability matrix) delivered per release | M (regulated tenants) |
+| NFR-108 | Devices | MDM-managed RF devices (Intune / SOTI / Zebra StageNow); kiosk mode; certificate-based Wi-Fi (WPA2/3-Enterprise EAP-TLS) | M |
+| NFR-109 | Logging for security | Security events to customer SIEM (syslog / CEF / API); login failures, privilege changes, data exports | M |
 
 ## E.5 Configurability & Extensibility
 
@@ -91,18 +91,18 @@ Measurement is server-side at the API gateway, excluding network and device time
 
 ## E.6 API Governance
 
-| Aspect | Standard |
-|---|---|
-| API style | REST (JSON) with OpenAPI 3.1 specs; async events documented with AsyncAPI 2.x/3.x; GraphQL read API optional for UI aggregation |
-| Versioning | URI major version (`/v1/`); additive changes non-breaking; breaking changes only in new major; deprecation notice ≥ 12 months; `Sunset` headers |
-| Naming & design | Resource-oriented, plural nouns, consistent error model (RFC 9457 Problem Details), pagination (cursor-based), filtering, sparse fieldsets |
-| Idempotency | `Idempotency-Key` header required on all POST that create transactions; 24-h dedupe window |
-| Concurrency | Optimistic concurrency via `ETag`/`If-Match` on mutable resources |
-| Rate limiting | Per client & tenant; 429 with `Retry-After`; burst and sustained quotas published |
-| Security | OAuth 2.0 (client credentials, auth code + PKCE for UIs); scopes per domain; mTLS for B2B |
-| Lifecycle | API review board: design review, linting (Spectral rules), contract tests (consumer-driven with Pact), changelog |
-| Developer experience | Developer portal, sandbox tenant, SDKs (Java, TypeScript, Python, C#), Postman collections, webhooks with signed payloads (HMAC-SHA256) and replay |
-| Observability | Every request carries W3C `traceparent`; correlation ID propagated to ERP messages |
+| ID | Aspect | Standard | Pri |
+|---|---|---|---|
+| NFR-120 | API style | REST (JSON) with OpenAPI 3.1 specs; async events documented with AsyncAPI 2.x/3.x; GraphQL read API optional for UI aggregation | M |
+| NFR-121 | Versioning | URI major version (`/v1/`); additive changes non-breaking; breaking changes only in new major; deprecation notice ≥ 12 months; `Sunset` headers | M |
+| NFR-122 | Naming & design | Resource-oriented, plural nouns, consistent error model (RFC 9457 Problem Details), pagination (cursor-based), filtering, sparse fieldsets | S |
+| NFR-123 | Idempotency | `Idempotency-Key` header required on all POST that create transactions; 24-h dedupe window | M |
+| NFR-124 | Concurrency | Optimistic concurrency via `ETag`/`If-Match` on mutable resources | M |
+| NFR-125 | Rate limiting | Per client & tenant; 429 with `Retry-After`; burst and sustained quotas published | M |
+| NFR-126 | Security | OAuth 2.0 (client credentials, auth code + PKCE for UIs); scopes per domain; mTLS for B2B | M |
+| NFR-127 | Lifecycle | API review board: design review, linting (Spectral rules), contract tests (consumer-driven with Pact), changelog | S |
+| NFR-128 | Developer experience | Developer portal, sandbox tenant, SDKs (Java, TypeScript, Python, C#), Postman collections, webhooks with signed payloads (HMAC-SHA256) and replay | S |
+| NFR-129 | Observability | Every request carries W3C `traceparent`; correlation ID propagated to ERP messages | M |
 
 ## E.7 Logging & Audit Trails
 

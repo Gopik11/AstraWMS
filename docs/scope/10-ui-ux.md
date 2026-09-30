@@ -17,25 +17,25 @@
 
 ## G.2 Web UI Modules
 
-| Module | Key Screens | Primary Roles |
-|---|---|---|
-| **Control Tower** | Site overview, backlog vs capacity by process, cut-off risk, alerts | Site Manager, Shift Supervisor |
-| **Inbound** | Appointment calendar (door × time grid, drag-drop), expectation list, receipt detail, discrepancy workbench | Dock Scheduler, Receiving Supervisor |
-| **Inventory** | Inventory inquiry (item/location/LPN/lot/serial), LPN history, holds manager, adjustment entry & approval, count planning & variance approval, reconciliation workbench | Inventory Control |
-| **Outbound** | Order pool with filters/facets, order detail timeline, allocation results, short list, wave planner (template, preview, simulate, release), waveless controller settings | Outbound Planner |
-| **Task Management** | Task queues, assignment board (operators × zones), priority changes, bulk reassign | Shift Supervisor |
-| **Pack & Ship** | Pack station UI (touch-optimised), load planning board, dock door status, manifest close | Packer, Shipping Clerk |
-| **Quality** | Inspection queue, usage decisions with e-signature, recall console (trace forward/backward graph) | QA |
-| **Returns** | Returns station UI, grading, disposition overrides | Returns Processor |
-| **VAS & Kitting** | Work order board, station instructions with media | VAS Lead |
-| **Labor** | Operator performance, indirect time, labor plan vs actual | Labor Manager |
-| **Slotting** | Proposals, what-if comparison, move plan tracking | Slotting Analyst |
-| **Configuration** | Location builder (bulk generation by pattern: aisle/bay/level/position), rules/strategies editor with test harness ("evaluate this rule for this LPN"), RF flow designer, label designer, UDFs, reason codes | Solution Admin |
-| **Integration Monitor** | §D.6.3 | Integration Analyst |
-| **Billing (3PL)** | Rate cards, billable events, invoice runs | Billing Analyst |
-| **Administration** | Users, roles, devices, printers, sites, audit log viewer | System Admin, Security Admin |
-| **Client Portal** (external) | Inventory, orders, ASN entry, shipment tracking, reports, invoices | 3PL client users |
-| **Carrier Portal** (external) | Appointment booking, check-in pre-registration | Carriers |
+| ID | Module | Key Screens | Primary Roles | Pri |
+|---|---|---|---|---|
+| UX-001 | **Control Tower** | Site overview, backlog vs capacity by process, cut-off risk, alerts | Site Manager, Shift Supervisor | M |
+| UX-002 | **Inbound** | Appointment calendar (door × time grid, drag-drop), expectation list, receipt detail, discrepancy workbench | Dock Scheduler, Receiving Supervisor | M |
+| UX-003 | **Inventory** | Inventory inquiry (item/location/LPN/lot/serial), LPN history, holds manager, adjustment entry & approval, count planning & variance approval, reconciliation workbench | Inventory Control | M |
+| UX-004 | **Outbound** | Order pool with filters/facets, order detail timeline, allocation results, short list, wave planner (template, preview, simulate, release), waveless controller settings | Outbound Planner | M |
+| UX-005 | **Task Management** | Task queues, assignment board (operators × zones), priority changes, bulk reassign | Shift Supervisor | M |
+| UX-006 | **Pack & Ship** | Pack station UI (touch-optimised), load planning board, dock door status, manifest close | Packer, Shipping Clerk | M |
+| UX-007 | **Quality** | Inspection queue, usage decisions with e-signature, recall console (trace forward/backward graph) | QA | M |
+| UX-008 | **Returns** | Returns station UI, grading, disposition overrides | Returns Processor | M |
+| UX-009 | **VAS & Kitting** | Work order board, station instructions with media | VAS Lead | S |
+| UX-010 | **Labor** | Operator performance, indirect time, labor plan vs actual | Labor Manager | S |
+| UX-011 | **Slotting** | Proposals, what-if comparison, move plan tracking | Slotting Analyst | S |
+| UX-012 | **Configuration** | Location builder (bulk generation by pattern: aisle/bay/level/position), rules/strategies editor with test harness ("evaluate this rule for this LPN"), RF flow designer, label designer, UDFs, reason codes | Solution Admin | M |
+| UX-013 | **Integration Monitor** | §D.6.3 | Integration Analyst | M |
+| UX-014 | **Billing (3PL)** | Rate cards, billable events, invoice runs | Billing Analyst | M (3PL tenants) |
+| UX-015 | **Administration** | Users, roles, devices, printers, sites, audit log viewer | System Admin, Security Admin | M |
+| UX-016 | **Client Portal** (external) | Inventory, orders, ASN entry, shipment tracking, reports, invoices | 3PL client users | S |
+| UX-017 | **Carrier Portal** (external) | Appointment booking, check-in pre-registration | Carriers | S |
 
 Common web capabilities: saved views and filters, column configuration, bulk actions with preview, export (CSV/XLSX), deep links, keyboard shortcuts, in-context audit history ("who changed this?"), and embedded help.
 

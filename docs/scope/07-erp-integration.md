@@ -275,16 +275,16 @@ Mapping specifications (field-level) per message are an SRS deliverable: *Interf
 
 ## D.5 Security & Audit Requirements for Integration
 
-| Area | Requirement |
-|---|---|
-| Transport | TLS 1.2+ (TLS 1.3 preferred); mTLS between middleware and AstraWMS; SAP Cloud Connector / private link / VPN for on-premise ERPs |
-| Authentication | OAuth 2.0 client credentials (JWT, short-lived ≤ 1 h) for REST/OData; X.509 client certificates for SOAP/IDoc-HTTP; RFC via SNC where direct |
-| Authorisation (ERP side) | Dedicated technical users (SAP `SYSTEM`/`COMMUNICATION` type; Oracle integration user) with least-privilege roles, e.g., SAP auth objects restricted to specific plants, movement types, delivery types |
-| Authorisation (WMS side) | Per-interface API scopes (`int.delivery.write`, `int.goodsmovement.read`); per-tenant/owner restriction |
-| Payload security | Field-level encryption for PII (ship-to names/addresses) at rest; PII masking in monitor for non-privileged roles |
-| Non-repudiation | All inbound/outbound messages stored with SHA-256 hash, timestamps, source IP/certificate subject; retention ≥ 7 years for financial-relevant flows (configurable to local statute: e.g., 10 years DE HGB/AO) |
-| Audit | Every reprocess/edit of a message logs user, reason, before/after payload diff |
-| Secrets | Credentials in managed vault (HSM-backed), rotated ≤ 90 days, no secrets in config files |
+| ID | Area | Requirement | Pri |
+|---|---|---|---|
+| INT-020 | Transport | TLS 1.2+ (TLS 1.3 preferred); mTLS between middleware and AstraWMS; SAP Cloud Connector / private link / VPN for on-premise ERPs | M |
+| INT-021 | Authentication | OAuth 2.0 client credentials (JWT, short-lived ≤ 1 h) for REST/OData; X.509 client certificates for SOAP/IDoc-HTTP; RFC via SNC where direct | M |
+| INT-022 | Authorisation (ERP side) | Dedicated technical users (SAP `SYSTEM`/`COMMUNICATION` type; Oracle integration user) with least-privilege roles, e.g., SAP auth objects restricted to specific plants, movement types, delivery types | M |
+| INT-023 | Authorisation (WMS side) | Per-interface API scopes (`int.delivery.write`, `int.goodsmovement.read`); per-tenant/owner restriction | M |
+| INT-024 | Payload security | Field-level encryption for PII (ship-to names/addresses) at rest; PII masking in monitor for non-privileged roles | M |
+| INT-025 | Non-repudiation | All inbound/outbound messages stored with SHA-256 hash, timestamps, source IP/certificate subject; retention ≥ 7 years for financial-relevant flows (configurable to local statute: e.g., 10 years DE HGB/AO) | M |
+| INT-026 | Audit | Every reprocess/edit of a message logs user, reason, before/after payload diff | M |
+| INT-027 | Secrets | Credentials in managed vault (HSM-backed), rotated ≤ 90 days, no secrets in config files | M |
 
 ---
 
