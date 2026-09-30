@@ -4,7 +4,7 @@
 |---|---|
 | Interface ID | IF-INV-001 |
 | Name | WMS-Initiated Goods Movements (WMS → ERP) |
-| Version / Status | 0.1 — Draft for design review |
+| Version / Status | 0.2 — Draft for design review |
 | Direction | Outbound from AstraWMS |
 | Source → Target | AstraWMS (Inventory) → Adapter → ERP |
 | Pattern | Asynchronous, guaranteed delivery; one ERP posting per WMS inventory transaction (or bundle) |
@@ -81,6 +81,7 @@ Card = cardinality; Req: M mandatory, C conditional, O optional. **PII** fields 
 | items[].fromBucket / toBucket | string(10) | 1 / 0..1 | M / C | ERP storage location / subinventory via bucket map |
 | items[].lotNo / toLotNo | string(40) | 0..1 | C | Lot-controlled items; toLotNo for LOT_CHANGE |
 | items[].toItemNo | string(40) | 0..1 | C | ITEM_CONVERT |
+| items[].stockType | code | 1 | M | ERP stock type of the source stock: UNRESTRICTED, QUALITY_INSPECTION, BLOCKED |
 | items[].serials[] | string(40) | 0..n | C | Serial items |
 | items[].costCenter | string(10) | 0..1 | C | SCRAP / SAMPLE (SAP) |
 | items[].fromOwner / toOwner | string(20) | 0..1 | C | OWNER_TRANSFER |
@@ -105,7 +106,7 @@ The movement catalogue (§5.1) defines the ERP transaction per `movementType`. F
 | items[].toItemNo | MOVE_MAT | Second (receipt) interface row | Second transaction |  |
 | items[].serials[] | GOODSMVT_SERIALNUMBER (MATDOC_ITM, SERIALNO) | MTL_SERIAL_NUMBERS_INTERFACE | serials child |  |
 | items[].costCenter | COSTCENTER | DISTRIBUTION_ACCOUNT_ID (from alias) | Alias account |  |
-| stock type | STCK_TYPE for postings from QI/blocked (e.g. 551 from blocked: 'S') | Source subinventory | Source subinventory |  |
+| items[].stockType | GOODSMVT_ITEM-STCK_TYPE (UNRESTRICTED → ' ', QUALITY_INSPECTION → 'X', BLOCKED → 'S') for postings from QI/blocked stock, e.g. 551 or 311 from blocked | Source subinventory (status-bearing) | Source subinventory |  |
 
 ### 5.1 Movement Catalogue
 
@@ -179,3 +180,4 @@ Error classes and default retry behaviour: ISD-00 §6.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-30 | Initial draft generated from scope §D |
+| 0.2 | 2026-09-30 | Added canonical field items[].stockType (needed for SAP STCK_TYPE); aligned with inventory-service GoodsMovement v2 |

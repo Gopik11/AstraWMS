@@ -1,0 +1,145 @@
+package com.astrawms.inventory;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.astrawms.inventory.support.IntegrationTest;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.kafka.core.KafkaTemplate;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+class MessagingIT extends IntegrationTest {
+
+    @Autowired
+    KafkaTemplate<String, String> kafka;
+    @Autowired
+    JsonMapper json;
+
+    @Test
+    void goodsMovementIsRelayedToKafkaInCanonicalEnvelope_IFINV001() throws Exception {
+        receive("SKU-EA", "10", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        post("/adjustments", """
+                {"ownerId":"ACME","itemNo":"SKU-EA","locationId":"A-01-01","qtyDelta":-1,"uom":"EA","reasonCode":"CC_TOL"}""")
+                .andExpect(status().isCreated());
+
+        ConsumerRecord<String, String> record = awaitRecord("wms.integration.outbound.goodsmovement.v1");
+        JsonNode envelope = json.readTree(record.value());
+        assertThat(record.key()).isEqualTo(tenant + ":DC1:SKU-EA");
+        assertThat(header(record, "ce_type")).isEqualTo("GoodsMovement");
+        assertThat(header(record, "tenantid")).isEqualTo(tenant);
+        assertThat(envelope.get("schemaVersion").asString()).isEqualTo("2.0");
+        assertThat(envelope.get("targetSystem").asString()).isEqualTo("ERP");
+        assertThat(envelope.get("businessKey").asString()).isEqualTo("DC1:SKU-EA");
+        assertThat(envelope.get("sequence").asLong()).isEqualTo(1);
+        JsonNode payload = envelope.get("payload");
+        assertThat(payload.get("wmsTxnId").asString()).hasSize(16);
+        assertThat(payload.get("movementType").asString()).isEqualTo("ADJ_NEG");
+        assertThat(payload.get("items").get(0).get("qty").decimalValue()).isEqualByComparingTo("1");
+
+        Integer unpublished = queryAsTenant(() -> jdbc.sql(
+                "select count(*) from outbox where tenant_id = :t and published_at is null")
+                .param("t", tenant).query(Integer.class).single());
+        assertThat(unpublished).isZero();
+    }
+
+    @Test
+    void sequenceIsGapFreePerBusinessKey() throws Exception {
+        receive("SKU-EA", "1", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        receive("SKU-EA", "1", "EA", "A-01-02", null, null).andExpect(status().isCreated());
+        receive("SKU-LOT", "1", "EA", "A-01-01", null, "L1").andExpect(status().isCreated());
+        List<Long> sequences = outboxEnvelopes("InventoryChanged").stream()
+                .map(e -> json.readTree(e))
+                .filter(e -> e.get("businessKey").asString().equals("DC1:SKU-EA"))
+                .map(e -> e.get("sequence").asLong())
+                .toList();
+        assertThat(sequences).containsExactly(1L, 2L);
+    }
+
+    @Test
+    void masterDataEventsAreProjectedDeduplicatedAndStaleSafe() throws Exception {
+        Instant now = Instant.now();
+        UUID messageId = UUID.randomUUID();
+        String current = itemEvent(messageId, "SKU-NEW", "EA", now);
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-NEW", current).get();
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-NEW", current).get();           // duplicate
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-NEW",
+                itemEvent(UUID.randomUUID(), "SKU-NEW", "KG", now.minusSeconds(3600))).get();  // stale
+
+        awaitCondition(() -> queryAsTenant(() -> jdbc.sql(
+                "select count(*) from inbox where message_type = 'ItemUpserted' and message_id <> :id")
+                .param("id", messageId.toString()).query(Integer.class).single()) >= 1);
+
+        String baseUom = queryAsTenant(() -> jdbc.sql("select base_uom from ref_item where item_no = 'SKU-NEW'")
+                .query(String.class).single());
+        assertThat(baseUom).isEqualTo("EA");
+        Integer processed = queryAsTenant(() -> jdbc.sql("select count(*) from inbox where message_id = :id")
+                .param("id", messageId.toString()).query(Integer.class).single());
+        assertThat(processed).isEqualTo(1);
+
+        // The projected item is immediately usable.
+        receive("SKU-NEW", "2", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+    }
+
+    private String itemEvent(UUID messageId, String itemNo, String baseUom, Instant changedAt) {
+        Map<String, Object> payload = Map.of(
+                "ownerId", OWNER, "itemNo", itemNo, "baseUom", baseUom, "status", "ACTIVE", "hazardous", false,
+                "sites", List.of(Map.of("siteId", SITE, "lotControlled", false, "serialControl", "NONE", "status", "ACTIVE")),
+                "uoms", List.of(), "sourceChangedAt", changedAt.toString());
+        Map<String, Object> envelope = Map.ofEntries(
+                Map.entry("messageId", messageId.toString()), Map.entry("messageType", "ItemUpserted"),
+                Map.entry("schemaVersion", "1.0"), Map.entry("sourceSystem", "ASTRAWMS"),
+                Map.entry("tenantId", tenant), Map.entry("siteId", SITE), Map.entry("ownerId", OWNER),
+                Map.entry("businessKey", OWNER + ":" + itemNo), Map.entry("correlationId", "test"),
+                Map.entry("sequence", 1), Map.entry("createdAtUtc", Instant.now().toString()),
+                Map.entry("payload", payload));
+        return json.writeValueAsString(envelope);
+    }
+
+    private ConsumerRecord<String, String> awaitRecord(String topic) {
+        Map<String, Object> config = Map.of(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
+                ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID(),
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+                ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+                ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(config)) {
+            consumer.subscribe(List.of(topic));
+            Instant deadline = Instant.now().plusSeconds(30);
+            while (Instant.now().isBefore(deadline)) {
+                for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofMillis(500))) {
+                    if (r.key().startsWith(tenant + ":")) {
+                        return r;
+                    }
+                }
+            }
+        }
+        throw new AssertionError("No record for tenant " + tenant + " on " + topic);
+    }
+
+    private static String header(ConsumerRecord<String, String> r, String name) {
+        return new String(r.headers().lastHeader(name).value(), StandardCharsets.UTF_8);
+    }
+
+    private static void awaitCondition(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(30);
+        while (Instant.now().isBefore(deadline)) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("Condition not met within 30 s");
+    }
+}
