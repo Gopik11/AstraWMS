@@ -21,6 +21,7 @@ import com.astrawms.inventory.persistence.InventoryRepository.BalanceKey;
 import com.astrawms.inventory.persistence.InventoryRepository.Reason;
 import com.astrawms.inventory.persistence.InventoryRepository.StoredOperation;
 import com.astrawms.inventory.persistence.InventoryRepository.TxnLine;
+import com.astrawms.inventory.persistence.SerialRepository;
 import com.astrawms.inventory.reference.ReferenceData.ItemRef;
 import com.astrawms.inventory.reference.ReferenceData.LocationRef;
 import com.astrawms.inventory.reference.ReferenceRepository;
@@ -56,15 +57,17 @@ public class InventoryCommandService {
     private static final int MAX_IDEMPOTENCY_KEY = 100;
 
     private final InventoryRepository repo;
+    private final SerialRepository serials;
     private final ReferenceRepository refs;
     private final OutboxWriter outbox;
     private final JsonMapper json;
     private final Clock clock;
     private final Topics topics;
 
-    public InventoryCommandService(InventoryRepository repo, ReferenceRepository refs, OutboxWriter outbox,
-                                   JsonMapper json, Clock clock, Topics topics) {
+    public InventoryCommandService(InventoryRepository repo, SerialRepository serials, ReferenceRepository refs,
+                                   OutboxWriter outbox, JsonMapper json, Clock clock, Topics topics) {
         this.repo = repo;
+        this.serials = serials;
         this.refs = refs;
         this.outbox = outbox;
         this.json = json;
@@ -91,9 +94,12 @@ public class InventoryCommandService {
             String lpn = ensureLpn(siteId, r.lpnId(), r.ownerId(), location.locationId());
             StockStatus status = r.status() == null ? StockStatus.AVAILABLE : r.status();
 
+            List<String> sn = serialsFor(item, qty, r.serials());
+            requireNotInStock(item, sn);
             BalanceKey key = new BalanceKey(siteId, r.ownerId(), r.itemNo(), lot, lpn, location.locationId(), status);
             BigDecimal after = repo.increment(key, qty, r.expiryDate(), ctx.now);
-            ctx.line(TxnType.RECEIPT, key, qty, after);
+            serials.place(key, sn, ctx.operationId, ctx.now);
+            ctx.line(TxnType.RECEIPT, key, qty, after, sn);
             ctx.sourceDoc = r.sourceDoc();
             // Receipt postings to the ERP go through the Inbound service (IF-IB-002), not IF-INV-001.
         });
@@ -130,14 +136,19 @@ public class InventoryCommandService {
             BalanceKey key = new BalanceKey(siteId, r.ownerId(), r.itemNo(), lot, lpn, location.locationId(), status);
             ctx.reasonCode = reason.code();
             ctx.approvedBy = r.approvedBy();
+            List<String> sn = serialsFor(item, qty, r.serials());
             if (positive) {
-                ctx.line(TxnType.ADJUST_POS, key, qty, repo.increment(key, qty, r.expiryDate(), ctx.now));
+                requireNotInStock(item, sn);
+                ctx.line(TxnType.ADJUST_POS, key, qty, repo.increment(key, qty, r.expiryDate(), ctx.now), sn);
+                serials.place(key, sn, ctx.operationId, ctx.now);
             } else {
-                ctx.line(TxnType.ADJUST_NEG, key, qty.negate(), decrementOrFail(key, qty));
+                requireSerialsAt(key, sn);
+                ctx.line(TxnType.ADJUST_NEG, key, qty.negate(), decrementOrFail(key, qty), sn);
+                serials.remove(key, sn, ctx.operationId, ctx.now);
             }
             if (reason.erpRelevant()) {
                 ctx.erp(positive ? ErpMovementType.ADJ_POS : ErpMovementType.ADJ_NEG, item, qty, lot, status,
-                        location.erpBucket(), null);
+                        location.erpBucket(), null, sn);
             }
         });
     }
@@ -161,11 +172,14 @@ public class InventoryCommandService {
             BalanceKey to = from.withStatus(r.toStatus());
             ctx.reasonCode = reason.code();
             ctx.approvedBy = r.approvedBy();
-            ctx.line(TxnType.STATUS_OUT, from, qty.negate(), decrementOrFail(from, qty));
-            ctx.line(TxnType.STATUS_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()));
+            List<String> sn = serialsFor(item, qty, r.serials());
+            requireSerialsAt(from, sn);
+            ctx.line(TxnType.STATUS_OUT, from, qty.negate(), decrementOrFail(from, qty), sn);
+            ctx.line(TxnType.STATUS_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()), sn);
+            serials.transfer(sn, to, ctx.operationId, ctx.now);
             if (reason.erpRelevant()) {
                 ErpMovementType.forStatusChange(r.fromStatus(), r.toStatus()).ifPresent(type ->
-                        ctx.erp(type, item, qty, lot, r.fromStatus(), location.erpBucket(), null));
+                        ctx.erp(type, item, qty, lot, r.fromStatus(), location.erpBucket(), null, sn));
             }
         });
     }
@@ -202,12 +216,20 @@ public class InventoryCommandService {
         requireActive(toLoc);
         repo.moveLpn(siteId, lpn.lpnId(), toLoc.locationId());
         repo.relocateLpnBalances(siteId, lpn.lpnId(), toLoc.locationId());
+        // Serials travel with the LPN; the ledger and the ERP movement list them per balance.
+        Map<String, List<String>> moved = new LinkedHashMap<>();
+        for (SerialRepository.MovedSerial m : serials.relocateLpn(siteId, lpn.lpnId(), toLoc.locationId(),
+                ctx.operationId, ctx.now)) {
+            moved.computeIfAbsent(m.balanceKey(), k -> new ArrayList<>()).add(m.serialNo());
+        }
         for (Balance b : contents) {
-            ctx.line(TxnType.MOVE_OUT, b.key(), b.qty().negate(), BigDecimal.ZERO);
-            ctx.line(TxnType.MOVE_IN, b.key().withLocation(toLoc.locationId(), lpn.lpnId()), b.qty(), b.qty());
+            List<String> sn = moved.getOrDefault(SerialRepository.balanceKey(b.key().itemNo(), b.key().lotNo(),
+                    b.key().status().name()), List.of());
+            ctx.line(TxnType.MOVE_OUT, b.key(), b.qty().negate(), BigDecimal.ZERO, sn);
+            ctx.line(TxnType.MOVE_IN, b.key().withLocation(toLoc.locationId(), lpn.lpnId()), b.qty(), b.qty(), sn);
             if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
                 ctx.erp(ErpMovementType.BUCKET_TRANSFER, items.get(b.key().itemNo()), b.qty(), b.key().lotNo(),
-                        b.key().status(), fromLoc.erpBucket(), toLoc.erpBucket());
+                        b.key().status(), fromLoc.erpBucket(), toLoc.erpBucket(), sn);
             }
         }
     }
@@ -235,10 +257,13 @@ public class InventoryCommandService {
         BalanceKey from = new BalanceKey(siteId, r.ownerId(), r.itemNo(), lot, fromLpn, fromLoc.locationId(), status);
         Balance source = repo.find(from).orElseThrow(() -> noStock(from));
         BalanceKey to = from.withLocation(toLoc.locationId(), toLpn);
-        ctx.line(TxnType.MOVE_OUT, from, qty.negate(), decrementOrFail(from, qty));
-        ctx.line(TxnType.MOVE_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()));
+        List<String> sn = serialsFor(item, qty, r.serials());
+        requireSerialsAt(from, sn);
+        ctx.line(TxnType.MOVE_OUT, from, qty.negate(), decrementOrFail(from, qty), sn);
+        ctx.line(TxnType.MOVE_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()), sn);
+        serials.transfer(sn, to, ctx.operationId, ctx.now);
         if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
-            ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, lot, status, fromLoc.erpBucket(), toLoc.erpBucket());
+            ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, lot, status, fromLoc.erpBucket(), toLoc.erpBucket(), sn);
         }
     }
 
@@ -246,17 +271,66 @@ public class InventoryCommandService {
     // Validation helpers
     // =====================================================================================================
 
+    /**
+     * Validates the serials of a command (INB-006): tracked items need exactly one distinct serial per base unit;
+     * untracked items must not carry serials.
+     */
+    private static List<String> serialsFor(ItemRef item, BigDecimal baseQty, List<String> requested) {
+        List<String> sn = requested == null ? List.of()
+                : requested.stream().map(v -> v == null ? "" : v.trim()).toList();
+        if (!item.serialTracked()) {
+            if (!sn.isEmpty()) {
+                throw ApiException.unprocessable("INV_SERIALS_NOT_ALLOWED",
+                        "Item " + item.itemNo() + " is not serial-tracked in inventory");
+            }
+            return List.of();
+        }
+        if (sn.isEmpty()) {
+            throw ApiException.unprocessable("INV_SERIALS_REQUIRED", "Item " + item.itemNo() + " requires serial numbers");
+        }
+        if (sn.stream().anyMatch(String::isEmpty)) {
+            throw ApiException.unprocessable("INV_SERIAL_INVALID", "Serial numbers must not be blank");
+        }
+        if (sn.stream().distinct().count() != sn.size()) {
+            throw ApiException.unprocessable("INV_SERIAL_DUPLICATE", "The request lists a serial number twice");
+        }
+        if (baseQty.stripTrailingZeros().scale() > 0 || baseQty.compareTo(BigDecimal.valueOf(sn.size())) != 0) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "INV_SERIAL_COUNT_MISMATCH",
+                    sn.size() + " serials for a quantity of " + baseQty.toPlainString() + " " + item.baseUom(),
+                    Map.of("serialCount", sn.size(), "baseQty", baseQty));
+        }
+        return sn;
+    }
+
+    private void requireNotInStock(ItemRef item, List<String> sn) {
+        if (sn.isEmpty()) {
+            return;
+        }
+        List<String> duplicates = serials.inStock(item.ownerId(), item.itemNo(), sn);
+        if (!duplicates.isEmpty()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "INV_SERIAL_DUPLICATE",
+                    "Serial numbers already in stock for " + item.itemNo(), Map.of("serials", duplicates));
+        }
+    }
+
+    private void requireSerialsAt(BalanceKey key, List<String> sn) {
+        if (sn.isEmpty()) {
+            return;
+        }
+        List<String> missing = serials.missingAt(key, sn);
+        if (!missing.isEmpty()) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "INV_SERIAL_NOT_AT_SOURCE",
+                    "Serial numbers are not in " + key.status() + " stock at " + key.locationId()
+                            + (key.lpnId().isEmpty() ? "" : " / " + key.lpnId()), Map.of("serials", missing));
+        }
+    }
+
     private ItemRef requireItem(String ownerId, String itemNo, String siteId) {
         return refs.item(ownerId, itemNo, siteId).orElseThrow(() -> ApiException.unprocessable("INV_ITEM_UNKNOWN",
                 "Item " + itemNo + " of owner " + ownerId + " is not known at site " + siteId));
     }
 
     private static void validateLot(ItemRef item, String lot, LocalDate expiry, boolean receipt) {
-        if (item.serialTracked()) {
-            // Serial tracking is delivered in the next slice; refuse rather than lose serial integrity.
-            throw ApiException.unprocessable("INV_SERIAL_NOT_SUPPORTED",
-                    "Serial-controlled items are not supported in release 0.1");
-        }
         if (item.lotControlled() && lot.isEmpty()) {
             throw ApiException.unprocessable("INV_LOT_REQUIRED", "Item " + item.itemNo() + " is lot-controlled");
         }
@@ -436,16 +510,16 @@ public class InventoryCommandService {
             this.now = now;
         }
 
-        void line(TxnType type, BalanceKey key, BigDecimal delta, BigDecimal after) {
-            lines.add(new TxnLine(type, key, delta, after));
+        void line(TxnType type, BalanceKey key, BigDecimal delta, BigDecimal after, List<String> serials) {
+            lines.add(new TxnLine(type, key, delta, after, serials));
         }
 
         void erp(ErpMovementType type, ItemRef item, BigDecimal qty, String lot, StockStatus status,
-                 String fromBucket, String toBucket) {
+                 String fromBucket, String toBucket, List<String> serials) {
             PendingMovement m = movements.computeIfAbsent(item.itemNo() + "|" + type,
                     k -> new PendingMovement(type, item.ownerId(), item.itemNo(), new ArrayList<>()));
             m.items().add(new GoodsMovement.Item(item.itemNo(), qty, item.baseUom(), fromBucket, toBucket,
-                    lot.isEmpty() ? null : lot, null, status.erpStockType().name(),
+                    lot.isEmpty() ? null : lot, null, serials.isEmpty() ? null : serials, status.erpStockType().name(),
                     sourceDoc != null ? sourceDoc : opType + " " + operationId));
         }
     }

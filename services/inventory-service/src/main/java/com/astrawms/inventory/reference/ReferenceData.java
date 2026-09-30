@@ -17,8 +17,9 @@ public final class ReferenceData {
             return "ACTIVE".equals(status) || "BLOCKED_PROCUREMENT".equals(status);
         }
 
+        /** Serials are tracked in inventory from receipt (INBOUND/FULL); OUTBOUND-only serials are captured at pack. */
         public boolean serialTracked() {
-            return !"NONE".equals(serialControl);
+            return "INBOUND".equals(serialControl) || "FULL".equals(serialControl);
         }
     }
 

@@ -147,6 +147,23 @@ class InboundIT {
         }
 
         @Test
+        void serialsFlowToInventoryAndIntoTheConfirmation_INB006_IFIB002() throws Exception {
+            receive("000010", "sn-1", """
+                    {"qty":2,"uom":"EA","lotNo":"B1","locationId":"DOCK-01","serials":["SN-1","SN-2"]}""")
+                    .andExpect(status().isCreated());
+            assertThat(inventory.callsWithKeyPrefix("INB-sn-1").getFirst().command().serials())
+                    .containsExactly("SN-1", "SN-2");
+            receive("000010", "sn-2", """
+                    {"qty":22,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""");
+            receive("000020", "sn-3", """
+                    {"qty":10,"uom":"CS","locationId":"DOCK-01"}""");
+            close("{}").andExpect(jsonPath("$.status", is("CLOSED")));
+            JsonNode lines = outbox(IntegrationContracts.ReceiptConfirmation.TYPE).getFirst().get("payload").get("lines");
+            assertThat(lines.get(0).get("serials").toString()).isEqualTo("[\"SN-1\",\"SN-2\"]");
+            assertThat(lines.get(1).get("serials").isNull()).isTrue();
+        }
+
+        @Test
         void lotAndUomMustMatchTheAsn() throws Exception {
             receive("000010", "rf-7", """
                     {"qty":1,"uom":"EA","lotNo":"OTHER","locationId":"DOCK-01"}""")

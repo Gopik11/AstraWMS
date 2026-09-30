@@ -29,7 +29,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  * connecting as the non-owner role {@code astra_app} so that row-level security is really enforced.
  * Every test gets its own tenant, which isolates test data without truncating tables.
  */
-@SpringBootTest(properties = "astra.outbox.relay-interval-ms=200")
+@SpringBootTest(properties = {"astra.outbox.relay-interval-ms=200", "astra.kafka.retry.initial-interval-ms=100",
+        "astra.kafka.retry.max-elapsed-ms=1000"})
 public abstract class IntegrationTest {
 
     protected static final org.testcontainers.kafka.KafkaContainer KAFKA = AstraContainers.KAFKA;
@@ -65,6 +66,8 @@ public abstract class IntegrationTest {
         item("SKU-LOT", true, 365, null, false);                   // lot + shelf-life controlled
         item("SKU-FROZEN", false, null, "FROZEN", false);
         item("SKU-HAZ", false, null, null, true);
+        item("SKU-SER", false, null, null, false, "FULL");         // serial-tracked from receipt
+        item("SKU-OUTSER", false, null, null, false, "OUTBOUND");  // serials captured at pack only
         location("A-01-01", "STOR", "0001", null, false, true, true);
         location("A-01-02", "STOR", "0001", null, false, true, true);
         location("A-02-01", "STOR", "0001", null, false, true, false);   // single lot per item
@@ -76,8 +79,13 @@ public abstract class IntegrationTest {
     // ------------------------------------------------------------------ reference data
 
     protected void item(String itemNo, boolean lot, Integer shelfLife, String temperature, boolean hazardous) {
+        item(itemNo, lot, shelfLife, temperature, hazardous, "NONE");
+    }
+
+    protected void item(String itemNo, boolean lot, Integer shelfLife, String temperature, boolean hazardous,
+                        String serialControl) {
         asTenant(() -> refs.upsertItem(new ItemUpserted(OWNER, itemNo, "EA", "ACTIVE", shelfLife, temperature,
-                hazardous, List.of(new ItemUpserted.Site(SITE, lot, "NONE", "ACTIVE")),
+                hazardous, List.of(new ItemUpserted.Site(SITE, lot, serialControl, "ACTIVE")),
                 List.of(new ItemUpserted.Uom("CS", 12, 1)), Instant.now())));
     }
 

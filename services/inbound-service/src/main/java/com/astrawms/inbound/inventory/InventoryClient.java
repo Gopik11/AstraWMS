@@ -2,13 +2,15 @@ package com.astrawms.inbound.inventory;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
 
 /** Commands the inbound service sends to the inventory service. */
 public interface InventoryClient {
 
     record ReceiveCommand(String ownerId, String itemNo, String lotNo, LocalDate expiryDate, BigDecimal qty,
-                          String uom, String lpnId, String locationId, String status, String sourceDoc) {
+                          String uom, String lpnId, String locationId, String status, String sourceDoc,
+                          List<String> serials) {
     }
 
     record ReceiveResult(UUID operationId, boolean replayed) {

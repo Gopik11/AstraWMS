@@ -34,6 +34,7 @@ public final class BapiMapper {
         String vbeln = c.erpDocNo();
         List<Bapi.ItemData> items = new ArrayList<>();
         List<Bapi.ItemControl> controls = new ArrayList<>();
+        List<Bapi.ItemSerialNo> serials = new ArrayList<>();
         int splitItem = BATCH_SPLIT_START;
         for (ReceiptConfirmation.Line line : c.lines()) {
             String unit = SapCodes.uomToSap(line.uom());
@@ -42,6 +43,9 @@ public final class BapiMapper {
             items.add(new Bapi.ItemData(vbeln, line.erpLineRef(), line.itemNo(), singleBatch, line.qtyReceived(),
                     unit, null, null));
             controls.add(new Bapi.ItemControl(vbeln, line.erpLineRef(), "X"));
+            if (line.serials() != null) {
+                line.serials().forEach(sn -> serials.add(new Bapi.ItemSerialNo(vbeln, line.erpLineRef(), sn)));
+            }
             if (splits.size() > 1) {
                 for (ReceiptConfirmation.LotSplit split : splits) {
                     String item = String.valueOf(splitItem++);
@@ -64,7 +68,7 @@ public final class BapiMapper {
                 new Bapi.HeaderControl(vbeln, "X"),
                 vbeln,
                 List.of(new Bapi.Deadline(vbeln, "WSHDRWADTI", UTC_STAMP.format(c.receiptCompletedUtc()))),
-                items, controls, huHeaders, huItems, c.wmsTxnId());
+                items, controls, huHeaders, huItems, serials, c.wmsTxnId());
     }
 
     /**
@@ -78,9 +82,17 @@ public final class BapiMapper {
         List<Bapi.GoodsmvtItem> items = m.items().stream().map(i -> new Bapi.GoodsmvtItem(
                 i.itemNo(), plant, i.fromBucket(), i.lotNo(), sap.moveType(), SapCodes.stckType(i.stockType()),
                 i.qty(), SapCodes.uomToSap(i.uom()), i.toBucket(), truncate(i.text(), 50))).toList();
+        List<Bapi.GoodsmvtSerial> serials = new ArrayList<>();
+        for (int n = 0; n < m.items().size(); n++) {
+            String position = String.format("%04d", n + 1);
+            List<String> itemSerials = m.items().get(n).serials();
+            if (itemSerials != null) {
+                itemSerials.forEach(sn -> serials.add(new Bapi.GoodsmvtSerial(position, sn)));
+            }
+        }
         return new Bapi.GoodsmvtCreate(
                 new Bapi.GoodsmvtHeader(date, date, m.wmsTxnId(), truncate("WMS " + m.movementType() + " " + nz(m.reasonCode()), 25)),
-                sap.gmCode(), items);
+                sap.gmCode(), items, serials);
     }
 
     private static String truncate(String v, int max) {

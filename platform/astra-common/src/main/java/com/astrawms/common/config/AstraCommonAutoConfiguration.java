@@ -2,6 +2,8 @@ package com.astrawms.common.config;
 
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.InboxGuard;
+import com.astrawms.common.messaging.KafkaErrorHandling;
+import com.astrawms.common.messaging.MessagingHousekeeping;
 import com.astrawms.common.messaging.OutboxRelay;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.tenancy.TenantAwareDataSource;
@@ -10,6 +12,7 @@ import com.astrawms.common.web.ProblemHandler;
 import java.time.Clock;
 import java.time.Duration;
 import javax.sql.DataSource;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -20,6 +23,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.CommonErrorHandler;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -89,6 +93,25 @@ public class AstraCommonAutoConfiguration {
     @Bean
     EnvelopeCodec envelopeCodec(JsonMapper json) {
         return new EnvelopeCodec(json);
+    }
+
+    /** Retry with backoff, then {@code <topic>.dlq} (KafkaErrorHandling). Boot wires it into every listener container. */
+    @Bean
+    @ConditionalOnBean(KafkaTemplate.class)
+    @ConditionalOnMissingBean(CommonErrorHandler.class)
+    CommonErrorHandler astraKafkaErrorHandler(KafkaTemplate<String, String> kafka,
+                                              @Value("${astra.kafka.retry.initial-interval-ms:1000}") long initial,
+                                              @Value("${astra.kafka.retry.max-interval-ms:30000}") long max,
+                                              @Value("${astra.kafka.retry.max-elapsed-ms:300000}") long elapsed) {
+        return KafkaErrorHandling.deadLetteringErrorHandler(kafka, initial, max, elapsed);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "astra.housekeeping.enabled", havingValue = "true", matchIfMissing = true)
+    MessagingHousekeeping messagingHousekeeping(JdbcClient jdbc, Clock clock,
+                                                @Value("${astra.housekeeping.outbox-retention:P7D}") Duration outboxRetention,
+                                                @Value("${astra.housekeeping.inbox-retention:P30D}") Duration inboxRetention) {
+        return new MessagingHousekeeping(jdbc, clock, outboxRetention, inboxRetention);
     }
 
     @Bean
