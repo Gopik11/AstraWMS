@@ -247,7 +247,7 @@ sequenceDiagram
 }
 ```
 
-Mapping specifications (field-level) per message are an SRS deliverable: *Interface Specification Documents (ISD)*, one per interface ID (`IF-SAP-OB-001`, …).
+Field-level mapping specifications are maintained as *Interface Specification Documents (ISD)*, one per interface ID in the catalogue below: see [docs/isd](../isd/README.md) and the shared [ISD-00 Common Interface Conventions](../isd/00-common-conventions.md).
 
 ### D.4.2 Interface Catalogue (Summary)
 

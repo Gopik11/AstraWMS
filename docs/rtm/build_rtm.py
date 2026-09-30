@@ -174,7 +174,7 @@ EXTRA_TC = "Additional Test Case"
 
 def gen_values(r):
     return dict(zip(HEADERS, [r["id"], r["kind"], r["area"], r["section"], r["doc"], r["desc"], r["acc"], r["pri"],
-                              None, None, r["tc"], r["ttype"], r["phase"], "Not Started", None, None, r["note"] or None]))
+                              None, (f"docs/isd/{r['id']}.md" if r["kind"] == "Interface" else None), r["tc"], r["ttype"], r["phase"], "Not Started", None, None, r["note"] or None]))
 
 def read_sheet(wbk, name):
     if name not in wbk.sheetnames:
