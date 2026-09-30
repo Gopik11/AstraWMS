@@ -1,0 +1,4 @@
+# RTM generator backups / temp files and Excel lock files
+docs/rtm/*.bak.xlsx
+docs/rtm/*.xlsx.tmp
+~$*
