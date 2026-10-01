@@ -41,6 +41,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - `smoke-counts.sh` covers cycle counting: tolerance auto-adjustment, an independent recount, blind views for counters, and manager approval posted to simulated SAP.
 - `smoke-replenishment.sh` covers min/max replenishment: an order picks a forward location below its minimum, then reserve stock is reserved and moved by an RF replenishment task.
 - `smoke-packing.sh` covers packing and loading: ship refused while unpacked, an SSCC carton with a carrier label, cross-loading refused, and a trailer closed with a seal that posts the goods issue.
+- `smoke-returns.sh` covers customer returns: a SAP returns delivery becomes an RMA, units graded A (restocked) and D (RTV, blocked), over-RMA refused, then close posts the 651 receipt and 453 restock in simulated SAP; plus a blind return.
 - `smoke-waves.sh` covers wave release: orders pooled in WAVE mode, wave plan / create / release, a short pick re-allocated to another location, a picked order cancelled from SAP and returned to stock by an RF return task (cancel acknowledged only then), and the other order shipped complete.
 
 ```bash

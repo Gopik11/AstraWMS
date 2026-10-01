@@ -18,5 +18,6 @@
 | [0014](0014-cycle-counting.md) | Cycle counts owned by inventory, executed as blind RF count tasks; tolerance auto-adjust, independent recounts, approval with SoD and value limits; counts after short picks |
 | [0015](0015-min-max-replenishment.md) | Min/max replenishment: inventory triggers on stock leaving forward locations, reserves reserve stock in rotation order, RF REPLEN tasks |
 | [0016](0016-packing-and-loading.md) | Packing records with GS1 SSCC cartons and carrier labels (simulated carrier); optional pack-before-ship per site; loads with cross-load check, closed with seal and BOL to ship |
+| [0017](0017-customer-returns.md) | Customer returns in the inbound service: RMAs from SAP returns deliveries and blind returns; units graded A–E with a suggested disposition; close posts 651 receipt then 453 restock under two transaction IDs |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

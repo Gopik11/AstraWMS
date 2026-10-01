@@ -61,4 +61,14 @@ public class InboundConfig {
     NewTopic acksTopic() {
         return TopicBuilder.name(IntegrationContracts.TOPIC_APPLICATION_ACKS).partitions(6).replicas(1).build();
     }
+
+    @Bean
+    NewTopic returnExpectationsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_EXPECTATIONS).partitions(6).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic returnConfirmationsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_CONFIRMATIONS).partitions(6).replicas(1).build();
+    }
 }

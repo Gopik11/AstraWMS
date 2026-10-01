@@ -132,6 +132,37 @@ public final class DelvryMapper {
         }
     }
 
+    /** Returns delivery (LFART LR, IF-RET-001 §5) → ReturnExpectation. Return reasons default until mapped (open point). */
+    public static boolean isReturn(Delvry07 idoc) {
+        return !idoc.outbound() && idoc.e1edl20() != null && "LR".equals(trimToNull(idoc.e1edl20().lfart()));
+    }
+
+    public static com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation mapReturn(Delvry07 idoc, Plant plant,
+                                                                                         Instant receivedAt) {
+        Delvry07.E1edl20 h = idoc.e1edl20();
+        String action = action(idoc);
+        String rmaAction = "DELETE".equals(action) ? "CANCEL" : action;
+        List<com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.Line> lines = new ArrayList<>();
+        for (Delvry07.E1edl24 item : nullSafe(idoc.e1edl24())) {
+            String uom = SapCodes.uomFromSap(item.vrkme()).orElseThrow(() -> new MappingException(
+                    "DELVRY_UOM_UNMAPPED", "Unit " + item.vrkme() + " of item " + item.posnr() + " has no canonical mapping"));
+            lines.add(new com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.Line(item.posnr().trim(),
+                    plant.defaultOwner(), item.matnr().trim(), decimal(item.lfimg(), "LFIMG"), uom, "NOT_SPECIFIED",
+                    List.of(), true));
+        }
+        if (lines.isEmpty() && !"CANCEL".equals(rmaAction)) {
+            throw new MappingException("DELVRY_NO_ITEMS", "Returns delivery " + h.vbeln() + " has no E1EDL24 items");
+        }
+        Delvry07.E1adrm1 customer = nullSafe(idoc.e1adrm1()).stream()
+                .filter(p -> "AG".equals(trimToNull(p.partnerQ())) || "WE".equals(trimToNull(p.partnerQ())))
+                .findFirst().orElse(null);
+        return new com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation(h.vbeln().trim(), rmaAction,
+                revision(idoc), idoc.docnum(), "CUSTOMER", null,
+                customer == null ? null : new com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.Customer(
+                        trimToNull(customer.partnerId()), trimToNull(customer.name1())),
+                deliveryDate(idoc, plant.timeZone()).orElse(null), List.of(), lines, receivedAt);
+    }
+
     private static Optional<String> partner(Delvry07 idoc, String qualifier) {
         return nullSafe(idoc.e1adrm1()).stream().filter(p -> qualifier.equals(trimToNull(p.partnerQ())))
                 .map(p -> trimToNull(p.partnerId())).filter(v -> v != null).findFirst();

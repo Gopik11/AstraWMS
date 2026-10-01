@@ -23,14 +23,17 @@ public class IntegrationListeners {
     private final InboxGuard inbox;
     private final ExpectationService expectations;
     private final ReceivingService receiving;
+    private final com.astrawms.inbound.returns.ReturnsService returns;
     private final TransactionTemplate tx;
 
     public IntegrationListeners(EnvelopeCodec codec, InboxGuard inbox, ExpectationService expectations,
-                                ReceivingService receiving, TransactionTemplate tx) {
+                                ReceivingService receiving, com.astrawms.inbound.returns.ReturnsService returns,
+                                TransactionTemplate tx) {
         this.codec = codec;
         this.inbox = inbox;
         this.expectations = expectations;
         this.receiving = receiving;
+        this.returns = returns;
         this.tx = tx;
     }
 
@@ -44,10 +47,22 @@ public class IntegrationListeners {
     public void onPostingResult(ConsumerRecord<String, String> record) {
         EventEnvelope envelope = codec.read(record.value());
         ErpPostingResult result = codec.payload(envelope, ErpPostingResult.class);
+        if (com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation.TYPE.equals(result.sourceMessageType())) {
+            process(envelope, () -> returns.onPostingResult(result));
+            return;
+        }
         if (!ReceiptConfirmation.TYPE.equals(result.sourceMessageType())) {
             return; // results for other flows (e.g. goods movements) belong to other services
         }
         process(envelope, () -> receiving.onPostingResult(result));
+    }
+
+    @KafkaListener(topics = com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_EXPECTATIONS,
+                   groupId = "inbound-service.returns")
+    public void onReturnExpectation(ConsumerRecord<String, String> record) {
+        EventEnvelope envelope = codec.read(record.value());
+        process(envelope, () -> returns.apply(envelope,
+                codec.payload(envelope, com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.class)));
     }
 
     private void process(EventEnvelope envelope, Runnable work) {

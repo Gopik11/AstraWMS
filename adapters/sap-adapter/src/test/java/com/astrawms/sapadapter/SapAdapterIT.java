@@ -13,6 +13,7 @@ import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ApplicationAck;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
+import com.astrawms.common.contracts.ReturnsContracts;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.test.AstraContainers;
@@ -201,6 +202,32 @@ class SapAdapterIT {
     }
 
     @Test
+    void returnsDeliveryBecomesRmaAndConfirmationPostsReceiptThenRestock_IFRET001_IFRET002() throws Exception {
+        call(post("/api/v1/sap/idocs/delvry07"), """
+                {"DOCNUM":"0000000000000301","MESTYP":"SHP_IBDLV_SAVE_REPLICA",
+                 "E1EDL20":{"VBELN":"0060000301","LFART":"LR","WERKS":"1000"},
+                 "E1ADRM1":[{"PARTNER_Q":"AG","PARTNER_ID":"C-1","NAME1":"Customer One"}],
+                 "E1EDL24":[{"POSNR":"000010","MATNR":"SKU-1","LFIMG":"3","VRKME":"ST"}]}""")
+                .andExpect(status().isAccepted());
+        JsonNode rma = outbox(ReturnsContracts.ReturnExpectation.TYPE).getFirst();
+        assertThat(rma.get("businessKey").asString()).isEqualTo("DC1:0060000301");
+        assertThat(rma.get("payload").get("customer").get("name").asString()).isEqualTo("Customer One");
+        assertThat(rma.get("payload").get("lines").get(0).get("ownerId").asString()).isEqualTo("ACME");
+        assertThat(outbox(IntegrationContracts.ReceiptExpectation.TYPE)).isEmpty();
+
+        String receipt = "W1RETRCPT0000301";
+        String disposition = "W1RETDISP0000301";
+        send(ReturnsContracts.TOPIC_RETURN_CONFIRMATIONS, ReturnsContracts.ReturnConfirmation.TYPE, "DC1:0060000301",
+                "ASTRAWMS", new ReturnsContracts.ReturnConfirmation(receipt, disposition, "0060000301", Instant.now(),
+                        List.of(returnLine("A", "RESTOCK"), returnLine("D", "RTV"))));
+        JsonNode result = awaitResult(receipt, 1).getFirst();
+        assertThat(result.get("success").asBoolean()).isTrue();
+        assertThat(result.get("sourceMessageType").asString()).isEqualTo("ReturnConfirmation");
+        assertThat(movement(receipt)).isEqualTo("01:651:2");      // everything into returns stock
+        assertThat(movement(disposition)).isEqualTo("04:453:1");  // only the restocked unit to unrestricted
+    }
+
+    @Test
     void idocPortNeedsErpIntegrationRoleAndMockSapNeedsAdmin() throws Exception {
         mvc.perform(post("/api/v1/sap/idocs/delvry07").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"DOCNUM\":\"0000000000000999\"}"))
@@ -255,6 +282,20 @@ class SapAdapterIT {
     private String idocStatus(String docnum) {
         return queryAsTenant(() -> jdbc.sql("select status from idoc_status where idoc_number = :d")
                 .param("d", docnum).query(String.class).optional().orElse(null));
+    }
+
+    private static ReturnsContracts.ReturnConfirmation.Line returnLine(String grade, String disposition) {
+        return new ReturnsContracts.ReturnConfirmation.Line("000010", "SKU-1", BigDecimal.ONE, "EA", null, List.of(), grade,
+                "DEFECTIVE", disposition, false);
+    }
+
+    /** "gmCode:moveType:items" of the mock SAP document posted with this reference. */
+    private String movement(String xblnr) {
+        return queryAsTenant(() -> jdbc.sql("""
+                        select (payload->>'GOODSMVT_CODE') || ':' || (payload->'GOODSMVT_ITEM'->0->>'MOVE_TYPE') || ':'
+                               || jsonb_array_length(payload->'GOODSMVT_ITEM')
+                        from mock_sap_document where xblnr = :x""")
+                .param("x", xblnr).query(String.class).single());
     }
 
     private int documents(String xblnr) {

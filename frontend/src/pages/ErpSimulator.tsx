@@ -25,6 +25,7 @@ export default function ErpSimulator() {
       <div className="grid">
         <Delivery inbound />
         <Delivery inbound={false} />
+        <ReturnDelivery />
         <Cancel />
         <IdocStatus />
       </div>
@@ -82,6 +83,36 @@ function Delivery({ inbound }: { inbound: boolean }) {
       </div>
       <ErrorBox error={send.error} />
       <Success>{send.result && `IDoc ${String(send.result.idocNumber)} accepted (status ${String(send.result.status)})`}</Success>
+    </Card>
+  )
+}
+
+/** A returns delivery (LFART LR): becomes an RMA in AstraWMS (IF-RET-001). */
+function ReturnDelivery() {
+  const [f, setF] = useState({ vbeln: '', werks: '1000', customer: 'C-1', name: '', item: '', qty: '1', uom: 'EA' })
+  const send = useAction(() => post<Row>('/api/v1/sap/idocs/delvry07', {
+    DOCNUM: docnum(),
+    MESTYP: 'SHP_IBDLV_SAVE_REPLICA',
+    E1EDL20: { VBELN: f.vbeln, LFART: 'LR', WERKS: f.werks },
+    E1ADRM1: [{ PARTNER_Q: 'AG', PARTNER_ID: f.customer, NAME1: f.name || f.customer }],
+    E1EDL24: [{ POSNR: '000010', MATNR: f.item, LFIMG: f.qty, VRKME: SAP_UOM[f.uom] ?? f.uom }],
+  }))
+  return (
+    <Card title="Customer return (RMA)">
+      <div className="row">
+        <Field label="Returns delivery no."><input value={f.vbeln} onChange={(e) => setF({ ...f, vbeln: e.target.value })} placeholder="0060000001" size={11} /></Field>
+        <Field label="Plant"><input value={f.werks} onChange={(e) => setF({ ...f, werks: e.target.value })} size={5} /></Field>
+        <Field label="Customer"><input value={f.customer} onChange={(e) => setF({ ...f, customer: e.target.value })} size={8} /></Field>
+        <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+      </div>
+      <div className="row">
+        <Field label="Item"><input value={f.item} onChange={(e) => setF({ ...f, item: e.target.value.toUpperCase() })} size={10} /></Field>
+        <Field label="Qty"><input type="number" min="0" value={f.qty} onChange={(e) => setF({ ...f, qty: e.target.value })} size={5} /></Field>
+        <Field label="UoM"><select value={f.uom} onChange={(e) => setF({ ...f, uom: e.target.value })}>{Object.keys(SAP_UOM).map((u) => <option key={u}>{u}</option>)}</select></Field>
+      </div>
+      <button className="primary" disabled={send.busy || !f.vbeln || !f.item} onClick={() => void send.run()}>Send IDoc</button>
+      <ErrorBox error={send.error} />
+      <Success>{send.result && `IDoc ${String(send.result.idocNumber)} accepted; the RMA appears under Customer returns`}</Success>
     </Card>
   )
 }

@@ -6,6 +6,7 @@ import Home from './pages/Home'
 import RfWork from './pages/RfWork'
 import Receipts from './pages/Receipts'
 import ReceiptDetail from './pages/ReceiptDetail'
+import Returns from './pages/Returns'
 import Orders from './pages/Orders'
 import OrderDetail from './pages/OrderDetail'
 import Waves from './pages/Waves'
@@ -32,6 +33,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     items: [
       { to: '/', label: 'Overview' },
       { to: '/receipts', label: 'Receipts' },
+      { to: '/returns', label: 'Customer returns' },
       { to: '/orders', label: 'Outbound orders' },
       { to: '/waves', label: 'Waves', roles: ['SUPERVISOR'] },
       { to: '/pack', label: 'Pack station', roles: ['PICKER', 'SUPERVISOR'] },
@@ -112,6 +114,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/counts" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR']}><Counts /></Guard>} />
           <Route path="/receipts" element={<Receipts />} />
           <Route path="/receipts/:doc" element={<ReceiptDetail />} />
+          <Route path="/returns" element={<Returns />} />
           <Route path="/orders" element={<Orders />} />
           <Route path="/orders/:doc" element={<OrderDetail />} />
           <Route path="/waves" element={<Guard roles={['SUPERVISOR']}><Waves /></Guard>} />

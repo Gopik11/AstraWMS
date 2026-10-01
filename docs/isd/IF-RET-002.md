@@ -4,7 +4,7 @@
 |---|---|
 | Interface ID | IF-RET-002 |
 | Name | Returns Receipt and Disposition (WMS → ERP) |
-| Version / Status | 0.1 — Draft for design review |
+| Version / Status | 0.2 — Implemented for SAP (restock disposition); other dispositions open |
 | Direction | Outbound from AstraWMS |
 | Source → Target | AstraWMS (Returns) → Adapter → ERP |
 | Pattern | Asynchronous, guaranteed delivery: receipt confirmation, then disposition movements |
@@ -94,7 +94,7 @@ Card = cardinality; Req: M mandatory, C conditional, O optional. **PII** fields 
 
 | ID | Rule |
 |---|---|
-| RET002-R01 | Two-step posting: the receipt into returns stock first, then the disposition movement. Each step has its own wmsTxnId suffix (-R, -D) and is idempotent. |
+| RET002-R01 | Two-step posting: the receipt into returns stock first, then the disposition movement. Each step has its own 16-character transaction ID (`receiptTxnId`, `dispositionTxnId`; a suffix would not fit XBLNR) and is idempotent by it. |
 | RET002-R02 | A wrong item received (RET-EX-02) is confirmed as the actual item. For SAP, a new returns delivery item is required *(confirm approach: ERP adds line vs WMS reports discrepancy for credit adjustment)*; the discrepancy is always reported for credit adjustment. |
 | RET002-R03 | Regulated items (pharma, food) default to QUARANTINE regardless of grade until QA release (RET-003). |
 | RET002-R04 | E-commerce: units are confirmed in batches every 15 min per RMA to reduce ERP load, while grading is visible in WMS immediately. |
@@ -133,3 +133,4 @@ Error classes and default retry behaviour: ISD-00 §6.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-30 | Initial draft generated from scope §D |
+| 0.2 | 2026-10-02 | Two transaction IDs instead of -R/-D suffixes (XBLNR is 16 characters). Implemented in AstraWMS and the SAP adapter: step 1 = 651 into returns stock (GM code 01), step 2 = 453 for RESTOCK units (GM code 04). SCRAP (551) and the follow-ups of QUARANTINE/RTV/REFURBISH/LIQUIDATE are not posted yet (ADR-0017). |
