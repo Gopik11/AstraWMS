@@ -71,6 +71,13 @@ say "Stage 2: Keycloak (first start builds its runtime; can take a few minutes o
 dc up -d keycloak
 wait_healthy keycloak 600
 
+# The admin console signs in through the master realm, which the gateway does not expose: give that realm the
+# tunnel address (ssh -L 8181:127.0.0.1:8181) as its frontend URL. The astrawms realm keeps the public URL.
+docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
+  /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user admin     --password "$KCPW" --config /tmp/kcadm.cfg >/dev/null 2>&1 &&
+  /opt/keycloak/bin/kcadm.sh update realms/master -s attributes.frontendUrl=http://localhost:8181 --config /tmp/kcadm.cfg
+  rc=$?; rm -f /tmp/kcadm.cfg; exit $rc' || { echo "FAILED: could not set the master realm frontend URL" >&2; exit 1; }
+
 say "Stage 3: gateway, then the services one at a time"
 dc up -d gateway
 for svc in master-data-service inventory-service inbound-service task-service outbound-service sap-adapter; do
