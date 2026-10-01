@@ -170,8 +170,9 @@ function PlantMapping({ site }: { site: string }) {
 }
 
 function ReleaseMode({ site }: { site: string }) {
-  const current = useLoad(() => get<{ releaseMode: string }>(`/api/v1/sites/${site}/outbound/config`), [site])
+  const current = useLoad(() => get<{ releaseMode: string; packRequired: boolean }>(`/api/v1/sites/${site}/outbound/config`), [site])
   const save = useAction((mode: string) => put(`/api/v1/sites/${site}/outbound/config`, { releaseMode: mode }))
+  const savePack = useAction((required: boolean) => put(`/api/v1/sites/${site}/outbound/config`, { packRequired: required }))
   return (
     <Card title="Outbound release">
       <ErrorBox error={current.error ?? save.error} />
@@ -183,6 +184,12 @@ function ReleaseMode({ site }: { site: string }) {
                   onClick={async () => { await save.run(m); current.reload() }}>{m}</button>
         ))}
       </div>
+      <label className="check">
+        <input type="checkbox" checked={current.data?.packRequired ?? false} disabled={savePack.busy}
+               onChange={async (e) => { await savePack.run(e.target.checked); current.reload() }} />
+        Orders must be fully packed in closed cartons before loading / shipping
+      </label>
+      <ErrorBox error={savePack.error} />
     </Card>
   )
 }

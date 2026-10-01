@@ -379,6 +379,66 @@ class OutboundIT {
     }
 
     @Test
+    void packingWithSsccAndLabelsThenLoadCloseShips_SHP001_SHP002_SHP003() throws Exception {
+        order(1, "CREATE", "3", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
+        for (JsonNode pick : outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList()) {
+            completed(UUID.fromString(pick.get("allocationId").asString()), pick.get("orderLineRef").asString(),
+                    pick.get("qty").decimalValue(), BigDecimal.ZERO);
+        }
+        await(() -> "PICKED".equals(orderStatus()));
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"packRequired":true}""").andExpect(jsonPath("$.packRequired", is(true)))
+                .andExpect(jsonPath("$.releaseMode", is("WAVELESS")));
+        call(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/ship"), "{}")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_NOT_PACKED")));
+
+        String box1 = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/cartons"), "{}")
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.sscc");
+        assertThat(box1).hasSize(18).startsWith("00614141");
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box1 + "/items"), """
+                {"erpLineRef":"000010","qty":3}""").andExpect(status().isOk());
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box1 + "/items"), """
+                {"erpLineRef":"000010","qty":1}""")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_PACK_EXCEEDS_PICKED")));
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box1 + "/close"), """
+                {"weightKg":4.2}""")
+                .andExpect(jsonPath("$.status", is("CLOSED")))
+                .andExpect(jsonPath("$.carrier_scac", is("UPSN")));
+        String box2 = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/cartons"), "{}")
+                .andReturn().getResponse().getContentAsString(), "$.sscc");
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box2 + "/close"), "{}")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_CARTON_EMPTY")));
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box2 + "/items"), """
+                {"erpLineRef":"000020","qty":1}""").andExpect(status().isOk());
+
+        String wrongLoad = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/loads"), """
+                {"carrierScac":"DHLX","door":"D1"}""").andReturn().getResponse().getContentAsString(), "$.load_no");
+        String load = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/loads"), """
+                {"carrierScac":"UPSN","door":"D2","trailerNo":"TR-9"}""").andReturn().getResponse().getContentAsString(), "$.load_no");
+        call(post("/api/v1/sites/DC1/outbound/loads/" + load + "/orders"), "{\"sscc\":\"" + box1 + "\"}")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_NOT_PACKED")));   // box2 open
+        call(post("/api/v1/sites/DC1/outbound/cartons/" + box2 + "/close"), "{\"weightKg\":1.1}").andExpect(status().isOk());
+        call(post("/api/v1/sites/DC1/outbound/loads/" + wrongLoad + "/orders"), "{\"erpDocNo\":\"" + doc + "\"}")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_CROSS_LOAD")));
+        call(post("/api/v1/sites/DC1/outbound/loads/" + load + "/orders"), "{\"sscc\":\"(00)" + box1 + "\"}")
+                .andExpect(jsonPath("$.orders[0].erp_doc_no", is(doc)))
+                .andExpect(jsonPath("$.orders[0].cartons", is(2)));
+
+        call(post("/api/v1/sites/DC1/outbound/loads/" + load + "/close"), """
+                {"sealNo":"SEAL-77"}""")
+                .andExpect(jsonPath("$.status", is("CLOSED")))
+                .andExpect(jsonPath("$.bol_no", is("BOL-DC1-" + load)));
+        assertThat(orderStatus()).isEqualTo("SHIPPED");
+        JsonNode confirmation = outbox(OutboundContracts.ShipmentConfirmation.TYPE).getLast().get("payload");
+        assertThat(confirmation.get("billOfLading").asString()).isEqualTo("BOL-DC1-" + load);
+        assertThat(confirmation.get("trackingNo").asString()).startsWith("1Z");
+        String label = JsonPath.read(call(get("/api/v1/sites/DC1/outbound/cartons/" + box1), "")
+                .andReturn().getResponse().getContentAsString(), "$.label");
+        assertThat(label).contains("^XA", box1, "Customer One");
+    }
+
+    @Test
     void onlySupervisorsShip_G5() throws Exception {
         mvc.perform(post("/api/v1/sites/DC1/outbound/orders/0080009999/ship").with(TestTokens.as(tenant, "pete", Roles.PICKER))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"carrierScac\":\"UPSN\"}"))

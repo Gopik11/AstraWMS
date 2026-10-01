@@ -125,6 +125,10 @@ button.big { font-size: 1.1rem; padding: 12px 22px; }
 .count-line { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .approval { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px; border: 1px dashed var(--border); border-radius: 6px; }
 
+.label { border: 2px solid var(--text); padding: 12px; font-family: monospace; max-width: 360px; display: grid; gap: 6px; }
+.label-carrier { font-size: 1.6rem; font-weight: 700; }
+.label-barcode { font-size: 1.05rem; letter-spacing: .08em; border-top: 1px dashed var(--border); padding-top: 4px; }
+pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); padding: 8px; }
 .fatal { max-width: 520px; margin: 15vh auto; padding: 24px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border); }
 
 /* phones and handhelds */

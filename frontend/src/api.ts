@@ -59,6 +59,7 @@ export const post = <T>(path: string, body?: unknown, options: RequestOptions = 
   api<T>('POST', path, { ...options, body })
 export const put = <T>(path: string, body?: unknown, options: RequestOptions = {}) =>
   api<T>('PUT', path, { ...options, body })
+export const del = <T>(path: string) => api<T>('DELETE', path)
 
 export function query(params: Record<string, string | number | undefined | null>): string {
   const q = new URLSearchParams()

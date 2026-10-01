@@ -19,6 +19,13 @@ import tools.jackson.databind.json.JsonMapper;
 @Configuration
 public class OutboundConfig {
 
+    /** Carrier labels and tracking numbers; the simulated carrier until a multi-carrier platform is connected. */
+    @Bean
+    @org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
+    com.astrawms.outbound.packing.CarrierGateway carrierGateway(java.time.Clock clock) {
+        return new com.astrawms.outbound.packing.CarrierGateway.Simulated(clock);
+    }
+
     @Bean
     TransactionTemplate transactionTemplate(PlatformTransactionManager txManager) {
         return new TransactionTemplate(txManager);

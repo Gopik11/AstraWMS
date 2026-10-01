@@ -9,6 +9,8 @@ import ReceiptDetail from './pages/ReceiptDetail'
 import Orders from './pages/Orders'
 import OrderDetail from './pages/OrderDetail'
 import Waves from './pages/Waves'
+import PackStation from './pages/PackStation'
+import Loads from './pages/Loads'
 import Inventory from './pages/Inventory'
 import Adjust from './pages/Adjust'
 import Counts from './pages/Counts'
@@ -32,6 +34,8 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/receipts', label: 'Receipts' },
       { to: '/orders', label: 'Outbound orders' },
       { to: '/waves', label: 'Waves', roles: ['SUPERVISOR'] },
+      { to: '/pack', label: 'Pack station', roles: ['PICKER', 'SUPERVISOR'] },
+      { to: '/loads', label: 'Loads', roles: ['PICKER', 'SUPERVISOR'] },
       { to: '/tasks', label: 'Tasks' },
     ],
   },
@@ -112,6 +116,8 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/orders/:doc" element={<OrderDetail />} />
           <Route path="/waves" element={<Guard roles={['SUPERVISOR']}><Waves /></Guard>} />
           <Route path="/tasks" element={<Tasks />} />
+          <Route path="/pack" element={<Guard roles={['PICKER', 'SUPERVISOR']}><PackStation /></Guard>} />
+          <Route path="/loads" element={<Guard roles={['PICKER', 'SUPERVISOR']}><Loads /></Guard>} />
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/adjust" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER']}><Adjust /></Guard>} />
           <Route path="/master-data" element={<Guard roles={['SOLUTION_ADMIN']}><MasterData /></Guard>} />

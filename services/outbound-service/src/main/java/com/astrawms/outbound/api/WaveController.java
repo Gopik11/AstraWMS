@@ -4,7 +4,6 @@ import com.astrawms.outbound.service.OutboundService;
 import com.astrawms.outbound.service.WaveService;
 import com.astrawms.outbound.service.WaveService.WaveCriteria;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -32,18 +31,19 @@ public class WaveController {
         this.outbound = outbound;
     }
 
-    public record ReleaseModeRequest(@NotBlank String releaseMode) {
+    /** Either field may be omitted to keep its current value. */
+    public record SiteConfigRequest(String releaseMode, Boolean packRequired) {
     }
 
     @GetMapping("/config")
     public Map<String, Object> config(@PathVariable String siteId) {
-        return Map.of("siteId", siteId, "releaseMode", outbound.releaseMode(siteId));
+        return outbound.siteConfig(siteId);
     }
 
     @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PutMapping("/config")
-    public Map<String, Object> setConfig(@PathVariable String siteId, @Valid @RequestBody ReleaseModeRequest body) {
-        return outbound.setReleaseMode(siteId, body.releaseMode());
+    public Map<String, Object> setConfig(@PathVariable String siteId, @RequestBody SiteConfigRequest body) {
+        return outbound.setSiteConfig(siteId, body.releaseMode(), body.packRequired());
     }
 
     /** Preview only (ADV-030): which pooled orders a wave with these criteria would contain. */
