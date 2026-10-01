@@ -50,8 +50,10 @@ public class OutboundService {
     private final String stagingLocation;
     private final int pickPriority;
     private final int returnPriority;
+    private final com.astrawms.outbound.packing.PackingService packing;
 
     public OutboundService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, JsonMapper json, Clock clock,
+                           com.astrawms.outbound.packing.PackingService packing,
                            @Value("${astra.outbound.staging-location:STAGE-OUT}") String stagingLocation,
                            @Value("${astra.outbound.pick-priority:60}") int pickPriority,
                            @Value("${astra.outbound.return-priority:70}") int returnPriority) {
@@ -63,6 +65,7 @@ public class OutboundService {
         this.stagingLocation = stagingLocation;
         this.pickPriority = pickPriority;
         this.returnPriority = returnPriority;
+        this.packing = packing;
     }
 
     record Order(UUID id, String siteId, String erpDocNo, String status, long revision, String pickLpn,
@@ -391,6 +394,7 @@ public class OutboundService {
         if (!"PICKED".equals(o.status())) {
             throw ApiException.unprocessable("OUT_NOT_PICKED", "Order " + erpDocNo + " is " + o.status() + "; it must be PICKED");
         }
+        packing.requirePacked(o.id(), siteId, erpDocNo);                     // SHP-002
         List<InventoryClient.IssuedLine> issued = inventory.issue(siteId, "OUT-SHIP-" + erpDocNo, erpDocNo);
         Instant now = clock.instant();
         String txn = WmsTxnId.next(clock);
@@ -488,19 +492,30 @@ public class OutboundService {
                 .param("site", siteId).query(String.class).optional().orElse("WAVELESS");
     }
 
+    /** Site outbound settings: release mode, and whether orders must be fully packed before loading/shipping. */
+    public Map<String, Object> siteConfig(String siteId) {
+        boolean pack = jdbc.sql("select coalesce((select pack_required from outbound_site_config where site_id = :site), false)")
+                .param("site", siteId).query(Boolean.class).single();
+        return Map.of("siteId", siteId, "releaseMode", releaseMode(siteId), "packRequired", pack);
+    }
+
+    /** Changes the given settings; {@code null} keeps the current value. */
     @Transactional
-    public Map<String, Object> setReleaseMode(String siteId, String mode) {
-        if (!List.of("WAVE", "WAVELESS").contains(mode)) {
+    public Map<String, Object> setSiteConfig(String siteId, String mode, Boolean packRequired) {
+        String newMode = mode == null ? releaseMode(siteId) : mode;
+        if (!List.of("WAVE", "WAVELESS").contains(newMode)) {
             throw ApiException.badRequest("OUT_RELEASE_MODE_INVALID", "releaseMode must be WAVE or WAVELESS");
         }
+        boolean pack = packRequired != null ? packRequired : (Boolean) siteConfig(siteId).get("packRequired");
         jdbc.sql("""
-                        insert into outbound_site_config (tenant_id, site_id, release_mode, updated_by, updated_at)
-                        values (:t, :site, :mode, :user, :now)
+                        insert into outbound_site_config (tenant_id, site_id, release_mode, pack_required, updated_by, updated_at)
+                        values (:t, :site, :mode, :pack, :user, :now)
                         on conflict (tenant_id, site_id) do update set release_mode = excluded.release_mode,
-                            updated_by = excluded.updated_by, updated_at = excluded.updated_at""")
-                .param("t", TenantContext.tenantId()).param("site", siteId).param("mode", mode)
+                            pack_required = excluded.pack_required, updated_by = excluded.updated_by,
+                            updated_at = excluded.updated_at""")
+                .param("t", TenantContext.tenantId()).param("site", siteId).param("mode", newMode).param("pack", pack)
                 .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
-        return Map.of("siteId", siteId, "releaseMode", mode);
+        return siteConfig(siteId);
     }
 
     // =====================================================================================================

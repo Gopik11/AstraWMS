@@ -60,6 +60,15 @@ public class InboundDeliveryFlow {
                         plant.defaultOwner(), plant.siteId() + ":" + order.erpDocNo(), order));
                 return saveStatus(idoc, vbeln, "03", "Passed to AstraWMS", envelope.messageId());
             }
+            if (DelvryMapper.isReturn(idoc)) {
+                var rma = DelvryMapper.mapReturn(idoc, plant, clock.instant());
+                EventEnvelope envelope = outbox.append(new OutboxWriter.Message(
+                        com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_EXPECTATIONS,
+                        com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.TYPE,
+                        com.astrawms.common.contracts.ReturnsContracts.ReturnExpectation.VERSION, sap.logicalSystem(),
+                        "ASTRAWMS", plant.siteId(), plant.defaultOwner(), plant.siteId() + ":" + rma.rmaNo(), rma));
+                return saveStatus(idoc, vbeln, "03", "Passed to AstraWMS", envelope.messageId());
+            }
             DelvryMapper.Mapped mapped = DelvryMapper.map(idoc, plant, clock.instant());
             EventEnvelope envelope = outbox.append(new OutboxWriter.Message(
                     IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS, ReceiptExpectation.TYPE, ReceiptExpectation.VERSION,

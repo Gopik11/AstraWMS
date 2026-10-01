@@ -1,5 +1,6 @@
 package com.astrawms.common.messaging;
 
+import io.micrometer.core.instrument.Metrics;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +33,7 @@ public final class KafkaErrorHandling {
                                                                 long maxElapsedMs) {
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(template, (record, e) -> {
             log.error("Dead-lettering {}-{}@{}: {}", record.topic(), record.partition(), record.offset(), rootMessage(e));
+            Metrics.counter("astra.kafka.dead.lettered", "topic", record.topic()).increment();
             return new TopicPartition(record.topic() + DLQ_SUFFIX, -1);
         });
         ExponentialBackOff backOff = new ExponentialBackOff(initialIntervalMs, 2.0);

@@ -110,6 +110,8 @@ public class AstraSecurityAutoConfiguration {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                        // Scraped by Prometheus on the private network; the gateway never routes /actuator.
+                        .requestMatchers("/actuator/prometheus").permitAll()
                         .requestMatchers("/actuator/**").hasRole(Roles.SOLUTION_ADMIN)
                         .requestMatchers("/error").permitAll()
                         .anyRequest().authenticated())

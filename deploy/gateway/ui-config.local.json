@@ -1,0 +1,5 @@
+{
+  "authority": "http://localhost:8180/realms/astrawms",
+  "clientId": "astra-web",
+  "environment": "local"
+}

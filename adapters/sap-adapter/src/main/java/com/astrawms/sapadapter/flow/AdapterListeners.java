@@ -57,6 +57,14 @@ public class AdapterListeners {
         process(e, () -> postings.postGoodsMovement(e, codec.payload(e, GoodsMovement.class)));
     }
 
+    @KafkaListener(topics = com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_CONFIRMATIONS,
+                   groupId = "sap-adapter.return-confirmations")
+    public void onReturnConfirmation(ConsumerRecord<String, String> record) {
+        EventEnvelope e = codec.read(record.value());
+        process(e, () -> postings.confirmReturn(e,
+                codec.payload(e, com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation.class)));
+    }
+
     @KafkaListener(topics = IntegrationContracts.TOPIC_APPLICATION_ACKS, groupId = "sap-adapter.acks")
     public void onAck(ConsumerRecord<String, String> record) {
         EventEnvelope e = codec.read(record.value());

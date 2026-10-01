@@ -6,6 +6,10 @@ import com.astrawms.common.messaging.KafkaErrorHandling;
 import com.astrawms.common.messaging.MessagingHousekeeping;
 import com.astrawms.common.messaging.OutboxRelay;
 import com.astrawms.common.messaging.OutboxWriter;
+import com.astrawms.common.ops.DeadLetters;
+import com.astrawms.common.ops.MessagingMetrics;
+import com.astrawms.common.ops.OpsController;
+import com.astrawms.common.ops.ReplayRouting;
 import com.astrawms.common.tenancy.TenantAwareDataSource;
 import com.astrawms.common.web.ProblemHandler;
 import java.time.Clock;
@@ -15,12 +19,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
+import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.CommonErrorHandler;
+import org.springframework.kafka.listener.RecordInterceptor;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -110,5 +118,33 @@ public class AstraCommonAutoConfiguration {
     OutboxRelay outboxRelay(JdbcClient jdbc, PlatformTransactionManager txManager, KafkaTemplate<String, String> kafka,
                             Clock clock) {
         return new OutboxRelay(jdbc, new TransactionTemplate(txManager), kafka, clock, 200, Duration.ofSeconds(10));
+    }
+
+    /** Delivers a replayed dead letter only to the consumer group that failed it (ADR-0018). */
+    @Bean
+    @ConditionalOnBean(KafkaTemplate.class)
+    @ConditionalOnMissingBean(RecordInterceptor.class)
+    RecordInterceptor<Object, Object> astraReplayRouting() {
+        return new ReplayRouting();
+    }
+
+    @Bean
+    @ConditionalOnBean({KafkaTemplate.class, ConsumerFactory.class})
+    DeadLetters astraDeadLetters(@Value("${spring.application.name:service}") String service, ConsumerFactory<?, ?> consumers,
+                                 KafkaTemplate<String, String> kafka, KafkaListenerEndpointRegistry registry,
+                                 JdbcClient jdbc, PlatformTransactionManager txManager, JsonMapper json, Clock clock) {
+        return new DeadLetters(service, consumers, kafka, registry, jdbc, new TransactionTemplate(txManager), json, clock);
+    }
+
+    @Bean
+    @ConditionalOnBean(DeadLetters.class)
+    OpsController astraOpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock) {
+        return new OpsController(deadLetters, jdbc, clock);
+    }
+
+    @Bean
+    @ConditionalOnClass(name = "io.micrometer.core.instrument.binder.MeterBinder")
+    MessagingMetrics astraMessagingMetrics(JdbcClient jdbc, Clock clock) {
+        return new MessagingMetrics(jdbc, clock);
     }
 }

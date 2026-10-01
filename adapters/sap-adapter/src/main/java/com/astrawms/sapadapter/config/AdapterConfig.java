@@ -69,4 +69,14 @@ public class AdapterConfig {
     NewTopic postingResultsTopic() {
         return TopicBuilder.name(IntegrationContracts.TOPIC_ERP_POSTING_RESULTS).partitions(6).replicas(1).build();
     }
+
+    @Bean
+    NewTopic returnExpectationsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_EXPECTATIONS).partitions(6).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic returnConfirmationsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_CONFIRMATIONS).partitions(6).replicas(1).build();
+    }
 }

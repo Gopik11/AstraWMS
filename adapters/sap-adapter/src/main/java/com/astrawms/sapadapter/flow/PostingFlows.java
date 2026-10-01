@@ -11,9 +11,12 @@ import com.astrawms.sapadapter.config.SapProperties;
 import com.astrawms.sapadapter.mapping.BapiMapper;
 import com.astrawms.sapadapter.mapping.DelvryMapper;
 import com.astrawms.sapadapter.mapping.MappingException;
+import com.astrawms.sapadapter.mapping.SapCodes;
 import com.astrawms.sapadapter.sap.Bapi;
 import com.astrawms.sapadapter.sap.SapGateway;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,6 +89,61 @@ public class PostingFlows {
             result = mappingFailure(movement.wmsTxnId(), GoodsMovement.TYPE, null, e);
         }
         publish(envelope, result);
+    }
+
+    /**
+     * IF-RET-002, two steps (RET002-R01): (1) receipt of everything returned into blocked returns stock, movement 651,
+     * reference = receiptTxnId; (2) disposition: units to restock move to unrestricted stock, movement 453, reference =
+     * dispositionTxnId. Other dispositions stay in returns stock until their follow-up (refurbish, RTV, scrap, QA)
+     * posts. Both steps are idempotent in SAP by their reference, so a repost is safe.
+     */
+    @Transactional
+    public void confirmReturn(EventEnvelope envelope, com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation r) {
+        String type = com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation.TYPE;
+        String docNo = r.rmaNo();
+        ErpPostingResult result;
+        try {
+            DelvryMapper.Plant plant = sites.bySite(envelope.siteId()).orElseThrow(() -> new MappingException(
+                    "SITE_NOT_MAPPED", "Site " + envelope.siteId() + " has no SAP plant"));
+            String date = java.time.format.DateTimeFormatter.BASIC_ISO_DATE.format(
+                    r.receivedAtUtc().atZone(plant.timeZone()).toLocalDate());
+            Bapi.GoodsmvtCreate receipt = returnsMovement(r, r.lines(), r.receiptTxnId(), "01", "651", plant.werks(), date,
+                    "WMS RETURN RECEIPT");
+            SapGateway.Result step1 = gateway.createGoodsMovement(receipt);
+            result = toResult(r.receiptTxnId(), type, docNo, step1);
+            var restock = r.lines().stream().filter(l -> "RESTOCK".equals(l.disposition())).toList();
+            if (step1.success() && !restock.isEmpty()) {
+                Bapi.GoodsmvtCreate disposition = returnsMovement(r, restock, r.dispositionTxnId(), "04", "453",
+                        plant.werks(), date, "WMS RETURN RESTOCK");
+                SapGateway.Result step2 = gateway.createGoodsMovement(disposition);
+                if (!step2.success()) {
+                    result = toResult(r.receiptTxnId(), type, docNo, step2);
+                }
+            }
+        } catch (MappingException e) {
+            result = mappingFailure(r.receiptTxnId(), type, docNo, e);
+        }
+        publish(envelope, result);
+    }
+
+    private static Bapi.GoodsmvtCreate returnsMovement(com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation r,
+                                                       List<com.astrawms.common.contracts.ReturnsContracts.ReturnConfirmation.Line> lines,
+                                                       String reference, String gmCode, String moveType, String plant,
+                                                       String date, String text) {
+        List<Bapi.GoodsmvtItem> items = new ArrayList<>();
+        List<Bapi.GoodsmvtSerial> serials = new ArrayList<>();
+        for (int n = 0; n < lines.size(); n++) {
+            var l = lines.get(n);
+            items.add(new Bapi.GoodsmvtItem(l.itemNo(), plant, "0001", l.lotNo(), moveType, " ", l.qty(),
+                    SapCodes.uomToSap(l.uom()), null, (l.conditionGrade() + " " + l.disposition()).trim()));
+            String position = String.format("%04d", n + 1);
+            if (l.serials() != null) {
+                l.serials().forEach(sn -> serials.add(new Bapi.GoodsmvtSerial(position, sn)));
+            }
+        }
+        String header = r.rmaNo() == null ? text : (text + " " + r.rmaNo());
+        return new Bapi.GoodsmvtCreate(new Bapi.GoodsmvtHeader(date, date, reference,
+                header.length() > 25 ? header.substring(0, 25) : header), gmCode, items, serials);
     }
 
     private ErpPostingResult toResult(String wmsTxnId, String type, String docNo, SapGateway.Result r) {

@@ -63,8 +63,12 @@ for _ in $(seq 1 30); do
   [[ "$code" =~ ^20 ]] && break; sleep 1
 done
 [[ "$code" =~ ^20 ]] || fail "stock receipt not accepted (master data projection?)"
-expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/receipts" "${RCV[@]}" -H "Idempotency-Key: rcv-2" \
-  -d '{"ownerId":"ACME","itemNo":"SKU-SER","qty":3,"uom":"EA","locationId":"R-02","lpnId":"LPN-OB-2","serials":["SN-A","SN-B","SN-C"]}'
+for _ in $(seq 1 30); do   # the item reaches inventory through the master data event projection
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$INV/api/v1/sites/DC1/inventory/receipts" "${RCV[@]}" -H "Idempotency-Key: rcv-2" \
+    -d '{"ownerId":"ACME","itemNo":"SKU-SER","qty":3,"uom":"EA","locationId":"R-02","lpnId":"LPN-OB-2","serials":["SN-A","SN-B","SN-C"]}')"
+  [[ "$code" =~ ^20 ]] && break; sleep 1
+done
+[[ "$code" =~ ^20 ]] || fail "serialised stock receipt not accepted"
 
 step "SAP distributes outbound delivery 0080000001 (4 x SKU-1, 2 x SKU-SER)"
 expect 202 -X POST "$SAP/api/v1/sap/idocs/delvry07" "${SAPH[@]}" -d '{"DOCNUM":"0000000000002001","MESTYP":"SHP_OBDLV_SAVE_REPLICA",

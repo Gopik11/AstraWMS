@@ -14,5 +14,11 @@
 | [0010](0010-token-based-identity-and-api-gateway.md) | OAuth2 resource servers: tenant and user from the token, role checks on every write, approver proof, service-account tokens, Keycloak locally, nginx API gateway |
 | [0011](0011-waves-reallocation-and-reverse-picks.md) | Per-site wave or waveless release with wave plan/create/release; re-allocation after short picks; reverse picks for cancelled picked orders, ERP ack only when stock is back |
 | [0012](0012-attribute-scopes-on-roles.md) | Scope claims on roles: sites, owners (3PL clients), zones and approval value limits; deny when missing; item standard cost |
+| [0013](0013-web-ui.md) | React single-page web UI (RF, operations, inventory, admin, ERP simulator) with PKCE sign-in, served by the gateway image |
+| [0014](0014-cycle-counting.md) | Cycle counts owned by inventory, executed as blind RF count tasks; tolerance auto-adjust, independent recounts, approval with SoD and value limits; counts after short picks |
+| [0015](0015-min-max-replenishment.md) | Min/max replenishment: inventory triggers on stock leaving forward locations, reserves reserve stock in rotation order, RF REPLEN tasks |
+| [0016](0016-packing-and-loading.md) | Packing records with GS1 SSCC cartons and carrier labels (simulated carrier); optional pack-before-ship per site; loads with cross-load check, closed with seal and BOL to ship |
+| [0017](0017-customer-returns.md) | Customer returns in the inbound service: RMAs from SAP returns deliveries and blind returns; units graded A–E with a suggested disposition; close posts 651 receipt then 453 restock under two transaction IDs |
+| [0018](0018-production-hardening.md) | Production hardening: HTTPS via host nginx and Let's Encrypt (astrawms.cloud), Kafka SASL/PLAIN with one account per service, per-tenant dead-letter listing and group-targeted replay, Prometheus metrics and alert rules, Operations page |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

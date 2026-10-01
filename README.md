@@ -18,6 +18,7 @@ This repository contains:
 | [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; waveless release or waves (pool, plan preview, release); allocation and pick requests; re-allocation after short picks; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancellation with reverse picks of picked stock |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
 | [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) and a test token issuer |
+| [`frontend`](frontend) | Web UI (React + TypeScript): RF screens, receipts, orders and waves, tasks, stock inquiry and adjustments, master data, ERP simulator |
 | [`deploy`](deploy) | Docker Compose stack with Keycloak (`deploy/keycloak`, realm `astrawms`) and the nginx API gateway (`deploy/gateway`) |
 
 Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/README.md).
@@ -37,17 +38,26 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 - `smoke-outbound.sh` covers the outbound flow: SAP outbound delivery, then FEFO allocation, then RF picks (one short, one with serials), then ship, then goods issue posted in simulated SAP (order CONFIRMED).
+- `smoke-counts.sh` covers cycle counting: tolerance auto-adjustment, an independent recount, blind views for counters, and manager approval posted to simulated SAP.
+- `smoke-replenishment.sh` covers min/max replenishment: an order picks a forward location below its minimum, then reserve stock is reserved and moved by an RF replenishment task.
+- `smoke-packing.sh` covers packing and loading: ship refused while unpacked, an SSCC carton with a carrier label, cross-loading refused, and a trailer closed with a seal that posts the goods issue.
+- `smoke-returns.sh` covers customer returns: a SAP returns delivery becomes an RMA, units graded A (restocked) and D (RTV, blocked), over-RMA refused, then close posts the 651 receipt and 453 restock in simulated SAP; plus a blind return.
 - `smoke-waves.sh` covers wave release: orders pooled in WAVE mode, wave plan / create / release, a short pick re-allocated to another location, a picked order cancelled from SAP and returned to stock by an RF return task (cancel acknowledged only then), and the other order shipped complete.
 
 ```bash
-scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh
+scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh && scripts/smoke-counts.sh && scripts/smoke-replenishment.sh && scripts/smoke-packing.sh && scripts/smoke-returns.sh
 ```
 
-**Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, streams them over SSH and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.
+**Monitoring.** `docker compose -f deploy/docker-compose.yml --profile monitoring up -d` adds Prometheus at http://localhost:9090 with the alert rules in `deploy/monitoring/alerts.yml`. Dead letters, outbox backlog and service health are on the **Operations** page of the web UI (SOLUTION_ADMIN). See ADR-0018.
+
+**Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, uploads them over SSH in checksummed chunks and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.
 - Every container has hard memory and CPU limits (about 3.3 GB in total), so the stack can share a host with other applications.
 - Secrets are generated on the server (`/opt/astrawms/.env`, root-only).
-- Only the gateway is published. It also serves the `astrawms` realm's token endpoints. The Keycloak admin console is reachable only through an SSH tunnel to `127.0.0.1:8181`.
+- The application is served at https://astrawms.cloud: the host nginx terminates TLS (Let's Encrypt) and proxies to the gateway on `127.0.0.1:8088`. The gateway also serves the `astrawms` realm's token endpoints. The Keycloak admin console (`127.0.0.1:8181`) and Prometheus (`127.0.0.1:9090`) are reachable only through an SSH tunnel.
+- Kafka requires SASL authentication, with one generated account per service.
 - The smoke tests run against it with `GATEWAY_URL`, `KC_URL` (the tunnel), `PROVISIONER_SECRET` and `SMOKE_SKIP_DB_CHECKS=1`.
+
+**Web UI.** Open http://localhost:8080 and sign in with a Keycloak user (see below). `scripts/dev-user.sh` creates a local user with every role; its credentials go to the git-ignored `deploy/keycloak/.dev-user`. For UI development, run `npm run dev` in `frontend/`; it proxies the API to the local gateway and serves the app at http://localhost:5173.
 
 **APIs.** All APIs go through the gateway at http://localhost:8080:
 

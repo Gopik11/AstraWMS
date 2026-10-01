@@ -4,7 +4,7 @@
 |---|---|
 | Interface ID | IF-RET-001 |
 | Name | Returns Expectation / RMA (ERP → WMS) |
-| Version / Status | 0.1 — Draft for design review |
+| Version / Status | 0.2 — Implemented for SAP returns deliveries (LFART LR) |
 | Direction | Inbound to AstraWMS |
 | Source → Target | ERP → Middleware → AstraWMS (Returns service) |
 | Pattern | Asynchronous, document-driven |
@@ -134,3 +134,4 @@ Error classes and default retry behaviour: ISD-00 §6.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-30 | Initial draft generated from scope §D |
+| 0.2 | 2026-10-02 | Implemented: SAP DELVRY07 with LFART LR maps to `ReturnExpectation` (customer from partner AG/WE, owner from the plant's default owner). Return reasons are `NOT_SPECIFIED` until the SAP reason mapping is agreed (open point). |

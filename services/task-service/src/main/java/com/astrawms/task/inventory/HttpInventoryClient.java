@@ -69,10 +69,26 @@ public class HttpInventoryClient implements InventoryClient {
         return post("/api/v1/sites/{site}/inventory/allocations/" + allocationId + "/return", siteId, idempotencyKey, body);
     }
 
+    @Override
+    public UUID confirmReplenishment(String siteId, String idempotencyKey, UUID replenishmentId) {
+        return post("/api/v1/sites/{site}/inventory/replenishments/" + replenishmentId + "/confirm", siteId,
+                idempotencyKey, Map.of());
+    }
+
+    @Override
+    public String submitCount(String siteId, String idempotencyKey, UUID countId, java.util.List<?> lines) {
+        return postJson("/api/v1/sites/{site}/inventory/counts/" + countId + "/results", siteId, idempotencyKey,
+                Map.of("lines", lines)).get("status").asString();
+    }
+
     private UUID post(String path, String siteId, String idempotencyKey, Object payload) {
+        return UUID.fromString(postJson(path, siteId, idempotencyKey, payload).get("operationId").asString());
+    }
+
+    private JsonNode postJson(String path, String siteId, String idempotencyKey, Object payload) {
         TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {
-            JsonNode body = rest.post()
+            return rest.post()
                     .uri(path, siteId)
                     .contentType(MediaType.APPLICATION_JSON)
                     .header("Idempotency-Key", idempotencyKey)
@@ -82,7 +98,6 @@ public class HttpInventoryClient implements InventoryClient {
                         throw translate(response.getStatusCode(), response.getBody().readAllBytes());
                     })
                     .body(JsonNode.class);
-            return UUID.fromString(body.get("operationId").asString());
         } catch (ResourceAccessException e) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "TSK_INVENTORY_UNAVAILABLE",
                     "Inventory service unreachable; confirm again");

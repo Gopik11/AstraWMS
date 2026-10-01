@@ -108,6 +108,61 @@ class MessagingIT extends IntegrationTest {
     }
 
     @Test
+    void deadLettersAreListedPerTenantAndReplayedOnlyToTheFailingGroup_ADR0018() throws Exception {
+        // A readable envelope whose payload cannot be mapped: dead-lettered without retries.
+        String broken = itemEvent(UUID.randomUUID(), "SKU-BAD", "EA", Instant.now()).replace("\"payload\":{","\"payload\":\"oops\",\"x\":{");
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-BAD", broken).get();
+        awaitRecord("wms.masterdata.events.v1.dlq", tenant + ":SKU-BAD");
+
+        var admin = com.astrawms.test.TestTokens.as(tenant, "ada", com.astrawms.common.security.Roles.SOLUTION_ADMIN);
+        JsonNode listing = awaitDeadLetters(admin, 1);
+        JsonNode m = listing.get("messages").get(0);
+        assertThat(m.get("originalTopic").asString()).isEqualTo("wms.masterdata.events.v1");
+        assertThat(m.get("originalGroup").asString()).isEqualTo("inventory-service.reference");
+        assertThat(m.get("messageType").asString()).isEqualTo("ItemUpserted");
+        assertThat(m.get("error").asString()).isNotBlank();
+
+        // Other tenants and non-admins see nothing.
+        JsonNode other = json.readTree(mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .get("/api/v1/ops/dlq").with(com.astrawms.test.TestTokens.as("other-" + tenant, "ada",
+                                com.astrawms.common.security.Roles.SOLUTION_ADMIN)))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        assertThat(other.get("messages")).isEmpty();
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/v1/ops/dlq")
+                        .with(com.astrawms.test.TestTokens.as(tenant, "sue", com.astrawms.common.security.Roles.SUPERVISOR)))
+                .andExpect(status().isForbidden());
+
+        String replay = "{\"topic\":\"%s\",\"partition\":%d,\"offset\":%d}".formatted(m.get("dlqTopic").asString(),
+                m.get("partition").asInt(), m.get("offset").asLong());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/ops/dlq/replay").with(admin)
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(replay))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.replayedBy").value("ada"));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/ops/dlq/replay").with(admin)
+                        .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(replay))
+                .andExpect(status().isConflict());
+
+        // Still broken, so the failing group dead-letters it again: proof it was redelivered to that group.
+        JsonNode after = awaitDeadLetters(admin, 2);
+        assertThat(after.get("messages").get(0).get("replayedBy").asString()).isEqualTo("ada");
+    }
+
+    private JsonNode awaitDeadLetters(org.springframework.test.web.servlet.request.RequestPostProcessor auth, int count)
+            throws Exception {
+        Instant deadline = Instant.now().plusSeconds(30);
+        JsonNode listing = null;
+        while (Instant.now().isBefore(deadline)) {
+            listing = json.readTree(mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                    .get("/api/v1/ops/dlq").with(auth)).andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+            if (listing.get("messages").size() >= count) {
+                return listing;
+            }
+            Thread.sleep(300);
+        }
+        throw new AssertionError("Expected " + count + " dead letters, got " + listing);
+    }
+
+    @Test
     void housekeepingPurgesOldPublishedOutboxAndInboxRowsOnly() {
         Instant old = Instant.now().minus(Duration.ofDays(40));
         UUID oldPublished = UUID.randomUUID();

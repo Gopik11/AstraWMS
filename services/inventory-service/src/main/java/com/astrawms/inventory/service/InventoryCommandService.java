@@ -79,10 +79,14 @@ public class InventoryCommandService {
     private final JsonMapper json;
     private final Clock clock;
     private final Topics topics;
+    private final CountRequests countRequests;
+    private final Replenishments replenishments;
+    private final org.springframework.jdbc.core.simple.JdbcClient jdbc;
 
     public InventoryCommandService(InventoryRepository repo, SerialRepository serials, AllocationRepository allocations,
                                    ReferenceRepository refs, OutboxWriter outbox, JsonMapper json, Clock clock,
-                                   Topics topics) {
+                                   Topics topics, CountRequests countRequests, Replenishments replenishments,
+                                   org.springframework.jdbc.core.simple.JdbcClient jdbc) {
         this.repo = repo;
         this.serials = serials;
         this.allocations = allocations;
@@ -91,6 +95,9 @@ public class InventoryCommandService {
         this.json = json;
         this.clock = clock;
         this.topics = topics;
+        this.countRequests = countRequests;
+        this.replenishments = replenishments;
+        this.jdbc = jdbc;
     }
 
     // =====================================================================================================
@@ -295,6 +302,9 @@ public class InventoryCommandService {
             if (r.shortClose() && allocated.compareTo(picked) > 0) {
                 allocations.unreserve(from, allocated.subtract(picked));
                 allocated = picked;
+                // PCK-003 (b): the location came up short, so its stock record is suspect: count it.
+                countRequests.open(siteId, from.locationId(), "SHORT_PICK",
+                        "Short pick of " + a.itemNo() + " for " + a.orderRef() + "/" + a.orderLineRef());
             }
             String status = picked.signum() == 0 ? "RELEASED" : picked.compareTo(allocated) == 0 ? "PICKED" : "OPEN";
             allocations.recordPick(a.id(), picked, allocated, picked.signum() == 0 ? null : toLoc.locationId(),
@@ -671,6 +681,94 @@ public class InventoryCommandService {
     }
 
     /**
+     * Completes a replenishment (§7.2 step 4): the reserved stock leaves the reserve location and arrives unallocated
+     * at the forward location. Idempotent per key (the task service sends {@code TSK-<taskId>}).
+     */
+    @Transactional
+    public OperationResult confirmReplenishment(String siteId, UUID replenishmentId, String idempotencyKey) {
+        return idempotent(siteId, idempotencyKey, "REPLENISH", Map.of("replenishment", replenishmentId), ctx -> {
+            record Repl(String status, String location, UUID allocation) {
+            }
+            Repl r = jdbc.sql("select status, location_id, allocation_id from replenishment where site_id = :site and id = :id for update")
+                    .param("site", siteId).param("id", replenishmentId)
+                    .query((rs, n) -> new Repl(rs.getString(1), rs.getString(2), rs.getObject(3, UUID.class)))
+                    .optional().orElseThrow(() -> ApiException.notFound("INV_REPLEN_UNKNOWN", "Replenishment " + replenishmentId + " not found"));
+            if (!"OPEN".equals(r.status())) {
+                throw ApiException.unprocessable("INV_REPLEN_NOT_OPEN", "Replenishment is " + r.status());
+            }
+            Allocation a = allocations.lock(siteId, r.allocation()).orElseThrow();
+            AccessScope.current().requireOwner(a.ownerId());
+            ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+            BalanceKey from = a.sourceKey();
+            Map<String, LocationRef> locs = lockLocations(siteId, List.of(from.locationId(), r.location()));
+            LocationRef fromLoc = locs.get(from.locationId());
+            LocationRef toLoc = locs.get(r.location());
+            requireActive(toLoc);
+            BigDecimal qty = a.open();
+            List<String> sn = item.serialTracked() ? serials.atKey(from).stream().limit(qty.longValue()).toList() : List.of();
+            Balance source = repo.find(from).orElseThrow(() -> noStock(from));
+            BigDecimal after = allocations.takeAllocated(from, qty).orElseThrow(() ->
+                    ApiException.conflict("INV_ALLOCATION_INCONSISTENT", "Reserved stock no longer at " + from.locationId()));
+            ctx.line(TxnType.REPLEN_OUT, from, qty.negate(), after, sn);
+            BalanceKey to = from.withLocation(toLoc.locationId(), "");
+            ctx.line(TxnType.REPLEN_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()), sn);
+            serials.transfer(sn, to, ctx.operationId, ctx.now);
+            if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
+                ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, from.lotNo(), StockStatus.AVAILABLE,
+                        fromLoc.erpBucket(), toLoc.erpBucket(), sn);
+            }
+            allocations.recordPick(a.id(), a.qtyAllocated(), a.qtyAllocated(), toLoc.locationId(), "", "REPLENISHED", ctx.now);
+            jdbc.sql("update replenishment set status = 'DONE', operation_id = :op, completed_at = :now where id = :id")
+                    .param("op", ctx.operationId).param("now", java.sql.Timestamp.from(ctx.now)).param("id", replenishmentId)
+                    .update();
+            ctx.sourceDoc = "REPL " + replenishmentId;
+        });
+    }
+
+    /** One balance correction from a cycle count: {@code delta} = counted − system quantity (AVAILABLE stock). */
+    public record CountAdjustment(String ownerId, String itemNo, String lotNo, String lpnId, BigDecimal delta) {
+    }
+
+    /**
+     * Posts the variance of a cycle count as adjustments at the counted location (reason CC_TOL when auto-accepted
+     * within tolerance, CC_VAR when approved), with ERP goods movements where the reason is ERP-relevant.
+     */
+    @Transactional
+    public OperationResult applyCountVariance(String siteId, String locationId, String idempotencyKey, UUID countId,
+                                              String reasonCode, String approvedBy, List<CountAdjustment> adjustments) {
+        return idempotent(siteId, idempotencyKey, "COUNT_ADJUST", Map.of("count", countId, "reason", reasonCode), ctx -> {
+            Reason reason = repo.reason(reasonCode).orElseThrow(() ->
+                    ApiException.unprocessable("INV_REASON_UNKNOWN", "Reason code " + reasonCode + " is not defined"));
+            ctx.reasonCode = reason.code();
+            ctx.approvedBy = approvedBy;
+            ctx.sourceDoc = "COUNT " + countId;
+            LocationRef location = lockLocations(siteId, List.of(locationId)).get(locationId);
+            for (CountAdjustment a : adjustments) {
+                ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+                if (item.serialTracked()) {
+                    throw ApiException.unprocessable("INV_COUNT_SERIALS",
+                            "Item " + a.itemNo() + " is serial-tracked: adjust it with its serial numbers");
+                }
+                String lot = normalise(a.lotNo());
+                BigDecimal qty = a.delta().abs();
+                boolean positive = a.delta().signum() > 0;
+                String lpn = positive ? ensureLpn(siteId, blank(a.lpnId()) ? null : a.lpnId(), a.ownerId(), locationId)
+                        : normalise(a.lpnId());
+                BalanceKey key = new BalanceKey(siteId, a.ownerId(), a.itemNo(), lot, lpn, locationId, StockStatus.AVAILABLE);
+                if (positive) {
+                    ctx.line(TxnType.ADJUST_POS, key, qty, repo.increment(key, qty, null, ctx.now), List.of());
+                } else {
+                    ctx.line(TxnType.ADJUST_NEG, key, qty.negate(), decrementOrFail(key, qty), List.of());
+                }
+                if (reason.erpRelevant()) {
+                    ctx.erp(positive ? ErpMovementType.ADJ_POS : ErpMovementType.ADJ_NEG, item, qty, lot,
+                            StockStatus.AVAILABLE, location.erpBucket(), null, List.of());
+                }
+            }
+        });
+    }
+
+    /**
      * Approvals beyond the approver role (§G.5.1): the approver must be authorised for the site and owner, and the
      * value (standard cost × base quantity) must be within the approver's limit. {@code approver} is null when the
      * reason needs no approval or no approver was given (then {@link #requireReason} has already decided).
@@ -878,6 +976,11 @@ public class InventoryCommandService {
     }
 
     private OperationResult finish(OpContext ctx) {
+        // Stock left these locations: forward locations below their minimum get replenished (§7.1 min/max).
+        replenishments.onStockDecreased(ctx.siteId, ctx.lines.stream()
+                .filter(l -> l.qtyDelta().signum() < 0 && l.key().status() == StockStatus.AVAILABLE)
+                .map(l -> new String[] {l.key().locationId(), l.key().ownerId(), l.key().itemNo()})
+                .distinct().toList());
         List<OperationResult.Line> resultLines = new ArrayList<>();
         Map<String, List<InventoryChanged.Line>> eventLines = new LinkedHashMap<>();
         Map<String, String> owners = new LinkedHashMap<>();
