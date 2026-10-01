@@ -13,5 +13,7 @@ public enum TxnType {
     PICK_IN,
     ISSUE,
     RETURN_OUT,
-    RETURN_IN
+    RETURN_IN,
+    REPLEN_OUT,
+    REPLEN_IN
 }

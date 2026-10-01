@@ -80,6 +80,15 @@ class TaskIT {
         }
 
         final List<Count> counts = new CopyOnWriteArrayList<>();
+        final List<String> replenishments = new CopyOnWriteArrayList<>();
+
+        @Override
+        public UUID confirmReplenishment(String siteId, String key, UUID replenishmentId) {
+            if (!replenishments.contains(key + "|" + replenishmentId)) {
+                replenishments.add(key + "|" + replenishmentId);
+            }
+            return UUID.nameUUIDFromBytes(key.getBytes());
+        }
 
         @Override
         public String submitCount(String siteId, String key, UUID countId, List<?> lines) {
@@ -358,6 +367,27 @@ class TaskIT {
 
     private org.springframework.test.web.servlet.request.RequestPostProcessor picker(TestTokens.Builder token) {
         return TestTokens.bearer(token.tenant(tenant).user("zone-picker").roles(Roles.PICKER).sign());
+    }
+
+    @Test
+    void replenishmentTaskMovesReserveStockToTheForwardLocation() throws Exception {
+        UUID replen = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.InventoryContracts.ReplenRequested.TYPE,
+                "DC1:A-01", new com.astrawms.common.contracts.InventoryContracts.ReplenRequested(replen, "ACME", "SKU-1", "",
+                        new BigDecimal("8"), "EA", "A-02", "LPN-R", "A-01", 70));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from task where replenishment_id = :r").param("r", replen)
+                .query(Integer.class).single()) == 1);
+        String id = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        tasks(get("/api/v1/sites/DC1/tasks/" + id))
+                .andExpect(jsonPath("$.taskType", is("REPLEN")))
+                .andExpect(jsonPath("$.fromLocation", is("A-02")))
+                .andExpect(jsonPath("$.targetLocation", is("A-01")))
+                .andExpect(jsonPath("$.qty", is(8)));
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/replenish"), "{\"checkDigit\":\"22\"}")
+                .andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));          // A-02's digit, not A-01's
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/replenish"), "{\"checkDigit\":\"33\"}")
+                .andExpect(jsonPath("$.status", is("COMPLETED")));
+        assertThat(inventory.replenishments).contains("TSK-" + id + "|" + replen);
     }
 
     @Test

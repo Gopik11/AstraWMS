@@ -80,10 +80,13 @@ public class InventoryCommandService {
     private final Clock clock;
     private final Topics topics;
     private final CountRequests countRequests;
+    private final Replenishments replenishments;
+    private final org.springframework.jdbc.core.simple.JdbcClient jdbc;
 
     public InventoryCommandService(InventoryRepository repo, SerialRepository serials, AllocationRepository allocations,
                                    ReferenceRepository refs, OutboxWriter outbox, JsonMapper json, Clock clock,
-                                   Topics topics, CountRequests countRequests) {
+                                   Topics topics, CountRequests countRequests, Replenishments replenishments,
+                                   org.springframework.jdbc.core.simple.JdbcClient jdbc) {
         this.repo = repo;
         this.serials = serials;
         this.allocations = allocations;
@@ -93,6 +96,8 @@ public class InventoryCommandService {
         this.clock = clock;
         this.topics = topics;
         this.countRequests = countRequests;
+        this.replenishments = replenishments;
+        this.jdbc = jdbc;
     }
 
     // =====================================================================================================
@@ -675,6 +680,51 @@ public class InventoryCommandService {
         return reason;
     }
 
+    /**
+     * Completes a replenishment (§7.2 step 4): the reserved stock leaves the reserve location and arrives unallocated
+     * at the forward location. Idempotent per key (the task service sends {@code TSK-<taskId>}).
+     */
+    @Transactional
+    public OperationResult confirmReplenishment(String siteId, UUID replenishmentId, String idempotencyKey) {
+        return idempotent(siteId, idempotencyKey, "REPLENISH", Map.of("replenishment", replenishmentId), ctx -> {
+            record Repl(String status, String location, UUID allocation) {
+            }
+            Repl r = jdbc.sql("select status, location_id, allocation_id from replenishment where site_id = :site and id = :id for update")
+                    .param("site", siteId).param("id", replenishmentId)
+                    .query((rs, n) -> new Repl(rs.getString(1), rs.getString(2), rs.getObject(3, UUID.class)))
+                    .optional().orElseThrow(() -> ApiException.notFound("INV_REPLEN_UNKNOWN", "Replenishment " + replenishmentId + " not found"));
+            if (!"OPEN".equals(r.status())) {
+                throw ApiException.unprocessable("INV_REPLEN_NOT_OPEN", "Replenishment is " + r.status());
+            }
+            Allocation a = allocations.lock(siteId, r.allocation()).orElseThrow();
+            AccessScope.current().requireOwner(a.ownerId());
+            ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+            BalanceKey from = a.sourceKey();
+            Map<String, LocationRef> locs = lockLocations(siteId, List.of(from.locationId(), r.location()));
+            LocationRef fromLoc = locs.get(from.locationId());
+            LocationRef toLoc = locs.get(r.location());
+            requireActive(toLoc);
+            BigDecimal qty = a.open();
+            List<String> sn = item.serialTracked() ? serials.atKey(from).stream().limit(qty.longValue()).toList() : List.of();
+            Balance source = repo.find(from).orElseThrow(() -> noStock(from));
+            BigDecimal after = allocations.takeAllocated(from, qty).orElseThrow(() ->
+                    ApiException.conflict("INV_ALLOCATION_INCONSISTENT", "Reserved stock no longer at " + from.locationId()));
+            ctx.line(TxnType.REPLEN_OUT, from, qty.negate(), after, sn);
+            BalanceKey to = from.withLocation(toLoc.locationId(), "");
+            ctx.line(TxnType.REPLEN_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()), sn);
+            serials.transfer(sn, to, ctx.operationId, ctx.now);
+            if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
+                ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, from.lotNo(), StockStatus.AVAILABLE,
+                        fromLoc.erpBucket(), toLoc.erpBucket(), sn);
+            }
+            allocations.recordPick(a.id(), a.qtyAllocated(), a.qtyAllocated(), toLoc.locationId(), "", "REPLENISHED", ctx.now);
+            jdbc.sql("update replenishment set status = 'DONE', operation_id = :op, completed_at = :now where id = :id")
+                    .param("op", ctx.operationId).param("now", java.sql.Timestamp.from(ctx.now)).param("id", replenishmentId)
+                    .update();
+            ctx.sourceDoc = "REPL " + replenishmentId;
+        });
+    }
+
     /** One balance correction from a cycle count: {@code delta} = counted − system quantity (AVAILABLE stock). */
     public record CountAdjustment(String ownerId, String itemNo, String lotNo, String lpnId, BigDecimal delta) {
     }
@@ -926,6 +976,11 @@ public class InventoryCommandService {
     }
 
     private OperationResult finish(OpContext ctx) {
+        // Stock left these locations: forward locations below their minimum get replenished (§7.1 min/max).
+        replenishments.onStockDecreased(ctx.siteId, ctx.lines.stream()
+                .filter(l -> l.qtyDelta().signum() < 0 && l.key().status() == StockStatus.AVAILABLE)
+                .map(l -> new String[] {l.key().locationId(), l.key().ownerId(), l.key().itemNo()})
+                .distinct().toList());
         List<OperationResult.Line> resultLines = new ArrayList<>();
         Map<String, List<InventoryChanged.Line>> eventLines = new LinkedHashMap<>();
         Map<String, String> owners = new LinkedHashMap<>();

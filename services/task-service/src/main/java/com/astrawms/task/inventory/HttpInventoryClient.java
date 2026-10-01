@@ -70,6 +70,12 @@ public class HttpInventoryClient implements InventoryClient {
     }
 
     @Override
+    public UUID confirmReplenishment(String siteId, String idempotencyKey, UUID replenishmentId) {
+        return post("/api/v1/sites/{site}/inventory/replenishments/" + replenishmentId + "/confirm", siteId,
+                idempotencyKey, Map.of());
+    }
+
+    @Override
     public String submitCount(String siteId, String idempotencyKey, UUID countId, java.util.List<?> lines) {
         return postJson("/api/v1/sites/{site}/inventory/counts/" + countId + "/results", siteId, idempotencyKey,
                 Map.of("lines", lines)).get("status").asString();

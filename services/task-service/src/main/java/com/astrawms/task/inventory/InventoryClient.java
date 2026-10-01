@@ -17,6 +17,9 @@ public interface InventoryClient {
     UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,
               String toLpnId, java.util.List<String> serials, boolean shortClose);
 
+    /** Completes a replenishment: reserved stock moves from the reserve location to the forward location. */
+    UUID confirmReplenishment(String siteId, String idempotencyKey, UUID replenishmentId);
+
     /** Submits a blind count result; returns the count's new status (CLOSED, ADJUSTED, RECOUNT, PENDING_APPROVAL). */
     String submitCount(String siteId, String idempotencyKey, UUID countId, java.util.List<?> lines);
 

@@ -58,6 +58,13 @@ public class TaskController {
         return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.qty(), body.serials());
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
+    @PostMapping("/{taskId}/replenish")
+    public TaskView replenish(@PathVariable String siteId, @PathVariable UUID taskId,
+                              @Valid @RequestBody TaskDtos.ReplenConfirmRequest body) {
+        return tasks.confirmReplenishment(siteId, taskId, body.checkDigit());
+    }
+
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
     @PostMapping("/{taskId}/count")
     public TaskView count(@PathVariable String siteId, @PathVariable UUID taskId,

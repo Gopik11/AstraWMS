@@ -152,6 +152,68 @@ public class TaskService {
     }
 
     // =====================================================================================================
+    // REPLEN tasks (§7 replenishment)
+    // =====================================================================================================
+
+    @Transactional
+    public void onReplenRequested(String siteId, com.astrawms.common.contracts.InventoryContracts.ReplenRequested r) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, replenishment_id, item_no, lot_no,
+                                          qty, uom, created_at, updated_at)
+                        values (:id, :t, :site, 'REPLEN', 'RELEASED', :prio, :owner, :lpn, :from, :to, 'MIN_MAX', :repl,
+                                :item, :lot, :qty, :uom, :now, :now)
+                        on conflict (tenant_id, replenishment_id) where task_type = 'REPLEN' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", r.priority())
+                .param("owner", r.ownerId()).param("lpn", r.fromLpn() == null ? "" : r.fromLpn())
+                .param("from", r.fromLocation()).param("to", r.toLocation()).param("repl", r.replenishmentId())
+                .param("item", r.itemNo()).param("lot", r.lotNo()).param("qty", r.qty()).param("uom", r.uom())
+                .param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", "Replenish " + r.qty().toPlainString() + " " + r.itemNo() + " to " + r.toLocation());
+        }
+    }
+
+    /** RF replenishment: take the stock from reserve, drop it at the forward location, scan that location's check digit. */
+    @Transactional
+    public TaskView confirmReplenishment(String siteId, UUID taskId, String checkDigit) {
+        record Rep(String status, String type, String assignedTo, String to, UUID replenishment) {
+        }
+        Rep r = jdbc.sql("""
+                        select status, task_type, assigned_to, target_location, replenishment_id from task
+                        where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Rep(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getObject(5, UUID.class)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"REPLEN".equals(r.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + r.type() + " task");
+        }
+        if ("COMPLETED".equals(r.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(r.status()) || !user.equals(r.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + r.status() + " and not assigned to " + user);
+        }
+        Projections.Location target = projections.location(siteId, r.to()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + r.to() + " is not known"));
+        if (target.checkDigit() == null || !target.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + r.to());
+        }
+        UUID operation = inventory.confirmReplenishment(siteId, "TSK-" + taskId, r.replenishment());
+        Instant now = clock.instant();
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', qty_picked = qty, confirmed_location = target_location,
+                            inventory_operation_id = :op, completed_at = :now, updated_at = :now where id = :id""")
+                .param("op", operation).param("now", Timestamp.from(now)).param("id", taskId).update();
+        event(taskId, "COMPLETED", "replenished " + r.to());
+        return view(siteId, taskId);
+    }
+
+    // =====================================================================================================
     // COUNT tasks (§6.3 cycle counting)
     // =====================================================================================================
 

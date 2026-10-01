@@ -42,6 +42,10 @@ public final class TaskDtos {
     public record CountConfirmRequest(@NotBlank String checkDigit, List<@jakarta.validation.Valid CountedLine> lines) {
     }
 
+    /** RF replenishment confirmation: the check digit of the forward location the stock is dropped at. */
+    public record ReplenConfirmRequest(@NotBlank String checkDigit) {
+    }
+
     /** RF return confirmation: the check digit of the location the stock is put back to. */
     public record ReturnConfirmRequest(@NotBlank String checkDigit) {
     }
