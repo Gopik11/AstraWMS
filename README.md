@@ -18,6 +18,7 @@ This repository contains:
 | [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; waveless release or waves (pool, plan preview, release); allocation and pick requests; re-allocation after short picks; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancellation with reverse picks of picked stock |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
 | [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) and a test token issuer |
+| [`frontend`](frontend) | Web UI (React + TypeScript): RF screens, receipts, orders and waves, tasks, stock inquiry and adjustments, master data, ERP simulator |
 | [`deploy`](deploy) | Docker Compose stack with Keycloak (`deploy/keycloak`, realm `astrawms`) and the nginx API gateway (`deploy/gateway`) |
 
 Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/README.md).
@@ -48,6 +49,8 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh &
 - Secrets are generated on the server (`/opt/astrawms/.env`, root-only).
 - Only the gateway is published. It also serves the `astrawms` realm's token endpoints. The Keycloak admin console is reachable only through an SSH tunnel to `127.0.0.1:8181`.
 - The smoke tests run against it with `GATEWAY_URL`, `KC_URL` (the tunnel), `PROVISIONER_SECRET` and `SMOKE_SKIP_DB_CHECKS=1`.
+
+**Web UI.** Open http://localhost:8080 and sign in with a Keycloak user (see below). `scripts/dev-user.sh` creates a local user with every role; its credentials go to the git-ignored `deploy/keycloak/.dev-user`. For UI development, run `npm run dev` in `frontend/`; it proxies the API to the local gateway and serves the app at http://localhost:5173.
 
 **APIs.** All APIs go through the gateway at http://localhost:8080:
 

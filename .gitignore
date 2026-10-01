@@ -8,3 +8,6 @@ target/
 .idea/
 *.iml
 .vscode/
+
+# Local development credentials written by scripts/dev-user.sh
+deploy/keycloak/.dev-user

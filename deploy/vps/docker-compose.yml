@@ -2,7 +2,7 @@
 #
 # The host runs other production applications, so this stack is fenced in:
 #   - hard memory and CPU limits on every container (about 3.3 GB in total), small JVM heaps, log rotation;
-#   - one published port: the API gateway (${PUBLIC_PORT}); it also serves the Keycloak token endpoints under
+#   - one published port: the gateway (${PUBLIC_PORT}) with the web UI and API; it also serves the Keycloak endpoints under
 #     /realms/. Postgres, Kafka and the services stay on the private network; the Keycloak admin console is bound
 #     to 127.0.0.1:8181 (use an SSH tunnel);
 #   - all passwords and client secrets come from /opt/astrawms/.env, generated on the server and never committed.
@@ -116,13 +116,13 @@ services:
       retries: 60
 
   gateway:
-    image: nginx:1.27-alpine
+    image: astrawms/gateway:${IMAGE_TAG}
     restart: unless-stopped
     logging: *logging
     mem_limit: 48m
     cpus: 0.25
     volumes:
-      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./gateway/ui-config.json:/etc/astrawms/ui-config.json:ro
     ports:
       - "${PUBLIC_PORT}:8080"
 

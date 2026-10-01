@@ -26,19 +26,21 @@ for m in "${MODULES[@]}"; do
     -f "$ROOT/deploy/Dockerfile" "$ROOT" >/dev/null
   images+=("astrawms/$name:$TAG")
 done
+docker build -q -t "astrawms/gateway:$TAG" -f "$ROOT/deploy/gateway/Dockerfile" "$ROOT" >/dev/null
+images+=("astrawms/gateway:$TAG")
 
 echo "== Copying images to $VPS (layers shared between services are sent once)"
 docker save "${images[@]}" | gzip -1 | "${SSH[@]}" 'gunzip | docker load -q'
 
 echo "== Copying deployment files to /opt/astrawms"
-tar -C "$ROOT/deploy" -cf - vps/docker-compose.yml vps/postgres-init vps/remote-deploy.sh gateway/nginx.conf \
+tar -C "$ROOT/deploy" -cf - vps/docker-compose.yml vps/postgres-init vps/remote-deploy.sh \
     keycloak/astrawms-realm.json \
   | "${SSH[@]}" 'set -e; mkdir -p /opt/astrawms && chmod 711 /opt/astrawms && cd /opt/astrawms
       t=$(mktemp -d); tar -xf - -C "$t"
       cp "$t/vps/docker-compose.yml" "$t/vps/remote-deploy.sh" .
       rm -rf postgres-init && cp -r "$t/vps/postgres-init" postgres-init && chmod 755 postgres-init postgres-init/*.sh
       mkdir -p gateway keycloak-template && chmod 700 keycloak-template
-      cp "$t/gateway/nginx.conf" gateway/ && cp "$t/keycloak/astrawms-realm.json" keycloak-template/
+      cp "$t/keycloak/astrawms-realm.json" keycloak-template/
       chmod +x remote-deploy.sh; rm -rf "$t"'
 
 echo "== Starting on the server"

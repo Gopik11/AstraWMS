@@ -38,10 +38,16 @@ for c in realm["clients"]:
     if c["clientId"] == "astra-web":
         c["redirectUris"] = [os.environ["PUBLIC_URL"] + "/*"]
         c["webOrigins"] = [os.environ["PUBLIC_URL"]]
+        c.setdefault("attributes", {})["post.logout.redirect.uris"] = os.environ["PUBLIC_URL"] + "/*"
 realm["displayName"] = "AstraWMS (test environment)"
 json.dump(realm, open("keycloak/astrawms-realm.json", "w", encoding="utf-8"), indent=1)
 PY
 chown 1000:1000 keycloak/astrawms-realm.json && chmod 600 keycloak/astrawms-realm.json
+
+mkdir -p gateway
+printf '{"authority":"%s/realms/astrawms","clientId":"astra-web","environment":"test"}
+' "$PUBLIC_URL" > gateway/ui-config.json
+chmod 644 gateway/ui-config.json
 
 dc() { docker compose --env-file .env "$@"; }
 wait_healthy() { # wait_healthy <service> <seconds>
@@ -61,7 +67,7 @@ wait_up() { # wait_up <service> <seconds>: readiness through the gateway
 }
 
 say "Pulling infrastructure images"
-dc pull -q postgres kafka keycloak gateway
+dc pull -q postgres kafka keycloak
 
 say "Stage 1: Postgres and Kafka"
 dc up -d postgres kafka
@@ -77,6 +83,14 @@ docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
   /opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user admin     --password "$KCPW" --config /tmp/kcadm.cfg >/dev/null 2>&1 &&
   /opt/keycloak/bin/kcadm.sh update realms/master -s attributes.frontendUrl=http://localhost:8181 --config /tmp/kcadm.cfg
   rc=$?; rm -f /tmp/kcadm.cfg; exit $rc' || { echo "FAILED: could not set the master realm frontend URL" >&2; exit 1; }
+
+# The realm is imported only on the first start: keep the web client's addresses in line with PUBLIC_URL.
+docker exec -e KCPW="$KC_ADMIN_PASSWORD" -e PUBLIC_URL="$PUBLIC_URL" "$(dc ps -q keycloak)" sh -c '
+  K=/opt/keycloak/bin/kcadm.sh; C="--config /tmp/kcadm.cfg"
+  $K config credentials --server http://localhost:8080 --realm master --user admin --password "$KCPW" $C >/dev/null 2>&1 &&
+  id=$($K get clients -r astrawms -q clientId=astra-web --fields id $C | grep -o "[0-9a-f-]\{36\}") &&
+  $K update clients/$id -r astrawms -s "redirectUris=[\"$PUBLIC_URL/*\"]" -s "webOrigins=[\"$PUBLIC_URL\"]"     -s "attributes.\"post.logout.redirect.uris\"=$PUBLIC_URL/*" $C
+  rc=$?; rm -f /tmp/kcadm.cfg; exit $rc' || { echo "FAILED: could not update the astra-web client" >&2; exit 1; }
 
 say "Stage 3: gateway, then the services one at a time"
 dc up -d gateway
