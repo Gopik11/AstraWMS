@@ -152,6 +152,72 @@ public class TaskService {
     }
 
     // =====================================================================================================
+    // COUNT tasks (§6.3 cycle counting)
+    // =====================================================================================================
+
+    /** Creates the count task of a count sequence; recounts are offered only to users who have not counted yet. */
+    @Transactional
+    public void onCountRequested(String siteId, com.astrawms.common.contracts.InventoryContracts.CountRequested c) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, count_id, count_sequence,
+                                          excluded_users, created_at, updated_at)
+                        values (:id, :t, :site, 'COUNT', 'RELEASED', :prio, '', '', :loc, :loc, :strategy, :count, :seq,
+                                cast(:excluded as text[]), :now, :now)
+                        on conflict (tenant_id, count_id, count_sequence) where task_type = 'COUNT' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", c.priority())
+                .param("loc", c.locationId()).param("strategy", (c.sequence() > 1 ? "RECOUNT " : "COUNT ") + c.trigger())
+                .param("count", c.countId()).param("seq", c.sequence())
+                .param("excluded", "{" + String.join(",", c.excludedUsers().stream().map(u -> '"' + u.replace("\"", "") + '"').toList()) + "}")
+                .param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", "Count " + c.sequence() + " of " + c.locationId() + " (" + c.trigger() + ")");
+        }
+    }
+
+    /**
+     * RF count: the counter scans the location's check digit and enters what is there, blind. The result goes to
+     * the inventory service, which decides on tolerance, recount or approval. Idempotent via {@code TSK-<taskId>}.
+     */
+    @Transactional
+    public TaskView confirmCount(String siteId, UUID taskId, String checkDigit, List<?> lines) {
+        record Cnt(String status, String type, String assignedTo, String location, UUID countId) {
+        }
+        Cnt c = jdbc.sql("""
+                        select status, task_type, assigned_to, from_location, count_id from task
+                        where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Cnt(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getObject(5, UUID.class)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"COUNT".equals(c.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + c.type() + " task");
+        }
+        if ("COMPLETED".equals(c.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(c.status()) || !user.equals(c.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + c.status() + " and not assigned to " + user);
+        }
+        Projections.Location location = projections.location(siteId, c.location()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + c.location() + " is not known"));
+        if (location.checkDigit() == null || !location.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + c.location());
+        }
+        String result = inventory.submitCount(siteId, "TSK-" + taskId, c.countId(), lines);
+        Instant now = clock.instant();
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', confirmed_location = from_location, completed_at = :now,
+                            updated_at = :now where id = :id""")
+                .param("now", Timestamp.from(now)).param("id", taskId).update();
+        event(taskId, "COMPLETED", "counted " + lines.size() + " line(s); count is now " + result);
+        return view(siteId, taskId);
+    }
+
+    // =====================================================================================================
     // RETURN tasks (OUT-EX-02 reverse pick)
     // =====================================================================================================
 
@@ -352,10 +418,12 @@ public class TaskService {
         Optional<UUID> next = jdbc.sql("""
                         select t.id from task t where t.site_id = :site and t.status = 'RELEASED'
                           and (:ownersAll or t.owner_id in (:owners))
+                          and not (:user = any(t.excluded_users))
                           and (:zonesAll or exists (select 1 from ref_location l where l.site_id = t.site_id
                                  and l.location_id in (t.from_location, t.target_location) and l.zone_id in (:zones)))
                         order by t.priority desc, t.created_at limit 1 for update of t skip locked""")
-                .param("site", siteId).param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
+                .param("site", siteId).param("user", user)
+                .param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("zonesAll", scope.zonesAll()).param("zones", scope.zoneList())
                 .query(UUID.class).optional();
         next.ifPresent(id -> {
@@ -482,7 +550,7 @@ public class TaskService {
                         select id, task_type, status, priority, owner_id, lpn_id, from_location, target_location, strategy,
                                exception_reason, assigned_to, confirmed_location, inventory_operation_id, created_at,
                                completed_at, allocation_id, order_ref, order_line_ref, item_no, lot_no, qty, uom, to_lpn,
-                               qty_picked
+                               qty_picked, count_id, count_sequence
                         from task where site_id = :site and id = :id""")
                 .param("site", siteId).param("id", id)
                 .query((rs, n) -> new TaskView(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getInt(4),
@@ -490,18 +558,20 @@ public class TaskService {
                         rs.getString(10), rs.getString(11), rs.getString(12), rs.getObject(13, UUID.class), List.of(),
                         rs.getTimestamp(14).toInstant(), rs.getTimestamp(15) == null ? null : rs.getTimestamp(15).toInstant(),
                         rs.getObject(16, UUID.class), rs.getString(17), rs.getString(18), rs.getString(19), rs.getString(20),
-                        strip(rs.getBigDecimal(21)), rs.getString(22), rs.getString(23), strip(rs.getBigDecimal(24))))
+                        strip(rs.getBigDecimal(21)), rs.getString(22), rs.getString(23), strip(rs.getBigDecimal(24)),
+                        rs.getObject(25, UUID.class), (Integer) rs.getObject(26)))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
         String where = base.status().equals("COMPLETED") ? base.confirmedLocation() : base.fromLocation();
-        List<Content> contents = "PICK".equals(base.taskType()) ? List.of() : projections.lpnContents(siteId, base.lpnId(), where).stream()
+        // Only putaways show what is on the LPN; counts must stay blind (INV-003).
+        List<Content> contents = !"PUTAWAY".equals(base.taskType()) ? List.of() : projections.lpnContents(siteId, base.lpnId(), where).stream()
                 .map(s -> new Content(s.ownerId(), s.itemNo(), s.lotNo(), s.qty().stripTrailingZeros()))
                 .toList();
         return new TaskView(base.id(), base.taskType(), base.status(), base.priority(), base.ownerId(), base.lpnId(),
                 base.fromLocation(), base.targetLocation(), base.strategy(), base.exceptionReason(), base.assignedTo(),
                 base.confirmedLocation(), base.inventoryOperationId(), contents, base.createdAt(), base.completedAt(),
                 base.allocationId(), base.orderRef(), base.orderLineRef(), base.itemNo(), base.lotNo(), base.qty(),
-                base.uom(), base.toLpn(), base.qtyPicked());
+                base.uom(), base.toLpn(), base.qtyPicked(), base.countId(), base.countSequence());
     }
 
     private static java.math.BigDecimal strip(java.math.BigDecimal v) {

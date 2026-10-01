@@ -105,6 +105,15 @@ for _ in $(seq 1 10); do
   [[ "${out##*$'\n'}" == "200" ]] || break
   BODY="${out%$'\n'*}"
   task="$(json "['id']" <<<"$BODY")"; order="$(json "['orderRef']" <<<"$BODY")"; from="$(json "['fromLocation']" <<<"$BODY")"
+  if [[ "$(json "['taskType']" <<<"$BODY")" == "COUNT" ]]; then
+    # The short pick opened a cycle count of the location (PCK-003 b); count what the system expects there.
+    held="$(curl -sf "$GW/api/v1/sites/DC1/inventory/balances?locationId=$from" "${SUP[@]}" \
+      | python -c "import json,sys; print(sum(b['qty'] for b in json.load(sys.stdin)['items']))")"
+    expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/count" "${P[@]}" \
+      -d "{\"checkDigit\":\"$(check_digit "$from")\",\"lines\":[{\"ownerId\":\"ACME\",\"itemNo\":\"SKU-1\",\"qty\":$held}]}"
+    echo "Counted $from (count opened by the short pick): $held"
+    continue
+  fi
   qty="$(json "['qty']" <<<"$BODY")"
   [[ "$order" == "0080000101" && "$from" == "R-01" ]] && qty=3
   expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit "$from")\",\"qty\":$qty}"

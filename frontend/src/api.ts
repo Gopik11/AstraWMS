@@ -111,7 +111,7 @@ export interface Txn {
 
 export interface Task {
   id: string
-  taskType: 'PUTAWAY' | 'PICK' | 'RETURN'
+  taskType: 'PUTAWAY' | 'PICK' | 'RETURN' | 'COUNT'
   status: string
   priority: number
   ownerId: string
@@ -129,6 +129,8 @@ export interface Task {
   uom?: string | null
   toLpn?: string | null
   qtyPicked?: number | null
+  countId?: string | null
+  countSequence?: number | null
   contents?: { itemNo: string; lotNo: string; qty: number }[]
   createdAt: string
 }

@@ -39,7 +39,7 @@ public class TaskController {
     }
 
     /** 200 with the operator's task, or 204 when there is no work. */
-    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
     @PostMapping("/next")
     public ResponseEntity<TaskView> next(@PathVariable String siteId) {
         return tasks.next(siteId).map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.noContent().build());
@@ -56,6 +56,13 @@ public class TaskController {
     public TaskView pick(@PathVariable String siteId, @PathVariable UUID taskId,
                          @Valid @RequestBody TaskDtos.PickConfirmRequest body) {
         return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.qty(), body.serials());
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/{taskId}/count")
+    public TaskView count(@PathVariable String siteId, @PathVariable UUID taskId,
+                          @Valid @RequestBody TaskDtos.CountConfirmRequest body) {
+        return tasks.confirmCount(siteId, taskId, body.checkDigit(), body.lines() == null ? List.of() : body.lines());
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")

@@ -79,10 +79,11 @@ public class InventoryCommandService {
     private final JsonMapper json;
     private final Clock clock;
     private final Topics topics;
+    private final CountRequests countRequests;
 
     public InventoryCommandService(InventoryRepository repo, SerialRepository serials, AllocationRepository allocations,
                                    ReferenceRepository refs, OutboxWriter outbox, JsonMapper json, Clock clock,
-                                   Topics topics) {
+                                   Topics topics, CountRequests countRequests) {
         this.repo = repo;
         this.serials = serials;
         this.allocations = allocations;
@@ -91,6 +92,7 @@ public class InventoryCommandService {
         this.json = json;
         this.clock = clock;
         this.topics = topics;
+        this.countRequests = countRequests;
     }
 
     // =====================================================================================================
@@ -295,6 +297,9 @@ public class InventoryCommandService {
             if (r.shortClose() && allocated.compareTo(picked) > 0) {
                 allocations.unreserve(from, allocated.subtract(picked));
                 allocated = picked;
+                // PCK-003 (b): the location came up short, so its stock record is suspect: count it.
+                countRequests.open(siteId, from.locationId(), "SHORT_PICK",
+                        "Short pick of " + a.itemNo() + " for " + a.orderRef() + "/" + a.orderLineRef());
             }
             String status = picked.signum() == 0 ? "RELEASED" : picked.compareTo(allocated) == 0 ? "PICKED" : "OPEN";
             allocations.recordPick(a.id(), picked, allocated, picked.signum() == 0 ? null : toLoc.locationId(),
@@ -668,6 +673,49 @@ public class InventoryCommandService {
             }
         }
         return reason;
+    }
+
+    /** One balance correction from a cycle count: {@code delta} = counted − system quantity (AVAILABLE stock). */
+    public record CountAdjustment(String ownerId, String itemNo, String lotNo, String lpnId, BigDecimal delta) {
+    }
+
+    /**
+     * Posts the variance of a cycle count as adjustments at the counted location (reason CC_TOL when auto-accepted
+     * within tolerance, CC_VAR when approved), with ERP goods movements where the reason is ERP-relevant.
+     */
+    @Transactional
+    public OperationResult applyCountVariance(String siteId, String locationId, String idempotencyKey, UUID countId,
+                                              String reasonCode, String approvedBy, List<CountAdjustment> adjustments) {
+        return idempotent(siteId, idempotencyKey, "COUNT_ADJUST", Map.of("count", countId, "reason", reasonCode), ctx -> {
+            Reason reason = repo.reason(reasonCode).orElseThrow(() ->
+                    ApiException.unprocessable("INV_REASON_UNKNOWN", "Reason code " + reasonCode + " is not defined"));
+            ctx.reasonCode = reason.code();
+            ctx.approvedBy = approvedBy;
+            ctx.sourceDoc = "COUNT " + countId;
+            LocationRef location = lockLocations(siteId, List.of(locationId)).get(locationId);
+            for (CountAdjustment a : adjustments) {
+                ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+                if (item.serialTracked()) {
+                    throw ApiException.unprocessable("INV_COUNT_SERIALS",
+                            "Item " + a.itemNo() + " is serial-tracked: adjust it with its serial numbers");
+                }
+                String lot = normalise(a.lotNo());
+                BigDecimal qty = a.delta().abs();
+                boolean positive = a.delta().signum() > 0;
+                String lpn = positive ? ensureLpn(siteId, blank(a.lpnId()) ? null : a.lpnId(), a.ownerId(), locationId)
+                        : normalise(a.lpnId());
+                BalanceKey key = new BalanceKey(siteId, a.ownerId(), a.itemNo(), lot, lpn, locationId, StockStatus.AVAILABLE);
+                if (positive) {
+                    ctx.line(TxnType.ADJUST_POS, key, qty, repo.increment(key, qty, null, ctx.now), List.of());
+                } else {
+                    ctx.line(TxnType.ADJUST_NEG, key, qty.negate(), decrementOrFail(key, qty), List.of());
+                }
+                if (reason.erpRelevant()) {
+                    ctx.erp(positive ? ErpMovementType.ADJ_POS : ErpMovementType.ADJ_NEG, item, qty, lot,
+                            StockStatus.AVAILABLE, location.erpBucket(), null, List.of());
+                }
+            }
+        });
     }
 
     /**

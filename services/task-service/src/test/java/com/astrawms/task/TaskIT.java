@@ -76,6 +76,19 @@ class TaskIT {
         record Return(String key, UUID allocation, String to, String toLpn) {
         }
 
+        record Count(String key, UUID countId, List<?> lines) {
+        }
+
+        final List<Count> counts = new CopyOnWriteArrayList<>();
+
+        @Override
+        public String submitCount(String siteId, String key, UUID countId, List<?> lines) {
+            if (counts.stream().noneMatch(c -> c.key().equals(key))) {
+                counts.add(new Count(key, countId, lines));
+            }
+            return "RECOUNT";
+        }
+
         final List<Return> returns = new CopyOnWriteArrayList<>();
 
         @Override
@@ -345,6 +358,35 @@ class TaskIT {
 
     private org.springframework.test.web.servlet.request.RequestPostProcessor picker(TestTokens.Builder token) {
         return TestTokens.bearer(token.tenant(tenant).user("zone-picker").roles(Roles.PICKER).sign());
+    }
+
+    @Test
+    void countTaskIsBlindAndRecountsExcludeEarlierCounters_INV003() throws Exception {
+        UUID count = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.InventoryContracts.CountRequested.TYPE,
+                "DC1:A-01", new com.astrawms.common.contracts.InventoryContracts.CountRequested(count, "A-01", 2,
+                        List.of("cathy"), "ADHOC", 65));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from task where count_id = :c").param("c", count)
+                .query(Integer.class).single()) == 1);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "cathy", Roles.PICKER)))
+                .andExpect(status().isNoContent());                                   // cathy counted already
+        String body = mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "dave", Roles.INV_ANALYST)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.taskType", is("COUNT")))
+                .andExpect(jsonPath("$.countSequence", is(2)))
+                .andExpect(jsonPath("$.contents.length()", is(0)))                     // blind
+                .andReturn().getResponse().getContentAsString();
+        String id = JsonPath.read(body, "$.id");
+        String lines = "{\"checkDigit\":\"%s\",\"lines\":[{\"ownerId\":\"ACME\",\"itemNo\":\"SKU-1\",\"qty\":7}]}";
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/count").with(TestTokens.as(tenant, "dave", Roles.INV_ANALYST))
+                        .contentType(MediaType.APPLICATION_JSON).content(lines.formatted("22")))
+                .andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/count").with(TestTokens.as(tenant, "dave", Roles.INV_ANALYST))
+                        .contentType(MediaType.APPLICATION_JSON).content(lines.formatted("33")))
+                .andExpect(jsonPath("$.status", is("COMPLETED")));
+        StubInventory.Count c = inventory.counts.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow();
+        assertThat(c.countId()).isEqualTo(count);
+        assertThat(c.lines()).hasSize(1);
     }
 
     private void pickRequested(UUID allocation, String order, String from, String qty) throws Exception {

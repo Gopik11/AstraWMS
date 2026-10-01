@@ -67,6 +67,9 @@ public class ProjectionListeners {
             switch (e.messageType()) {
                 case OutboundContracts.PickRequested.TYPE ->
                         tasks.onPickRequested(e.siteId(), codec.payload(e, OutboundContracts.PickRequested.class));
+                case com.astrawms.common.contracts.InventoryContracts.CountRequested.TYPE ->
+                        tasks.onCountRequested(e.siteId(), codec.payload(e,
+                                com.astrawms.common.contracts.InventoryContracts.CountRequested.class));
                 case OutboundContracts.ReturnRequested.TYPE ->
                         tasks.onReturnRequested(e.siteId(), codec.payload(e, OutboundContracts.ReturnRequested.class));
                 case OutboundContracts.PickCancelled.TYPE ->

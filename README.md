@@ -38,10 +38,11 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 - `smoke-outbound.sh` covers the outbound flow: SAP outbound delivery, then FEFO allocation, then RF picks (one short, one with serials), then ship, then goods issue posted in simulated SAP (order CONFIRMED).
+- `smoke-counts.sh` covers cycle counting: tolerance auto-adjustment, an independent recount, blind views for counters, and manager approval posted to simulated SAP.
 - `smoke-waves.sh` covers wave release: orders pooled in WAVE mode, wave plan / create / release, a short pick re-allocated to another location, a picked order cancelled from SAP and returned to stock by an RF return task (cancel acknowledged only then), and the other order shipped complete.
 
 ```bash
-scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh
+scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh && scripts/smoke-counts.sh
 ```
 
 **Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, streams them over SSH and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.

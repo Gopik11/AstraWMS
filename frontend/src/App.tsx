@@ -11,6 +11,7 @@ import OrderDetail from './pages/OrderDetail'
 import Waves from './pages/Waves'
 import Inventory from './pages/Inventory'
 import Adjust from './pages/Adjust'
+import Counts from './pages/Counts'
 import Tasks from './pages/Tasks'
 import MasterData from './pages/MasterData'
 import ErpSimulator from './pages/ErpSimulator'
@@ -22,7 +23,7 @@ interface NavItem {
 }
 
 const NAV: { group: string; items: NavItem[] }[] = [
-  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'SUPERVISOR'] }] },
+  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'] }] },
   {
     group: 'Operations',
     items: [
@@ -37,6 +38,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: 'Inventory',
     items: [
       { to: '/inventory', label: 'Stock inquiry' },
+      { to: '/counts', label: 'Cycle counts', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR'] },
       { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'] },
     ],
   },
@@ -99,7 +101,8 @@ export default function App({ environment }: { environment?: string }) {
       <main className="content">
         <Routes>
           <Route path="/" element={<Home />} />
-          <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'SUPERVISOR']}><RfWork /></Guard>} />
+          <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
+          <Route path="/counts" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR']}><Counts /></Guard>} />
           <Route path="/receipts" element={<Receipts />} />
           <Route path="/receipts/:doc" element={<ReceiptDetail />} />
           <Route path="/orders" element={<Orders />} />

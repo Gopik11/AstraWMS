@@ -37,6 +37,7 @@ export default function RfWork() {
       {task && task.taskType === 'PUTAWAY' && <Putaway task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'PICK' && <Pick task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'RETURN' && <Return task={task} site={site} onDone={finished} />}
+      {task && task.taskType === 'COUNT' && <Count task={task} site={site} onDone={finished} />}
     </section>
   )
 }
@@ -167,6 +168,55 @@ function Return({ task, site, onDone }: { task: Task; site: string; onDone: (m: 
       </Field>
       <ErrorBox error={confirm.error} />
       <div className="actions"><button className="primary big" disabled={confirm.busy}>Confirm return</button></div>
+    </form>
+  )
+}
+
+interface CountedLine { ownerId: string; itemNo: string; lotNo: string; lpnId: string; qty: string }
+
+/** Blind cycle count (INV-003): the counter records what is in the location without seeing the system quantity. */
+function Count({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
+  const [checkDigit, setCheckDigit] = useState('')
+  const [lines, setLines] = useState<CountedLine[]>([{ ownerId: '', itemNo: '', lotNo: '', lpnId: '', qty: '' }])
+  const filled = lines.filter((l) => l.itemNo.trim() && l.qty !== '')
+  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/count`, {
+    checkDigit: checkDigit.trim(),
+    lines: filled.map((l) => ({ ownerId: l.ownerId.trim(), itemNo: l.itemNo.trim(), lotNo: l.lotNo.trim() || null,
+      lpnId: l.lpnId.trim() || null, qty: Number(l.qty) })),
+  }))
+  const set = (i: number, k: keyof CountedLine, v: string) => setLines(lines.map((l, j) => (j === i ? { ...l, [k]: v } : l)))
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (await confirm.run()) {
+      onDone(`Counted ${task.fromLocation}: ${filled.length === 0 ? 'empty' : `${filled.length} line(s)`}`)
+    }
+  }
+  return (
+    <form className="card task" onSubmit={submit}>
+      <TaskHead task={task} />
+      <p>{(task.countSequence ?? 1) > 1 ? `Recount ${task.countSequence}: count independently.` : 'Count everything in this location.'}</p>
+      <dl className="big-facts"><dt>Location</dt><dd className="target">{task.fromLocation}</dd></dl>
+      <Field label="Location check digit"><input autoFocus inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required /></Field>
+      {lines.map((l, i) => (
+        <div key={i} className="count-line">
+          <div className="row">
+            <Field label="Owner"><input value={l.ownerId} onChange={(e) => set(i, 'ownerId', e.target.value.toUpperCase())} size={6} required={!!l.itemNo} /></Field>
+            <Field label="Item"><input value={l.itemNo} onChange={(e) => set(i, 'itemNo', e.target.value.toUpperCase())} size={10} /></Field>
+            <Field label="Qty"><input type="number" min={0} step="any" value={l.qty} onChange={(e) => set(i, 'qty', e.target.value)} size={5} /></Field>
+          </div>
+          <div className="row">
+            <Field label="Lot"><input value={l.lotNo} onChange={(e) => set(i, 'lotNo', e.target.value)} size={8} /></Field>
+            <Field label="LPN"><input value={l.lpnId} onChange={(e) => set(i, 'lpnId', e.target.value)} size={12} /></Field>
+          </div>
+        </div>
+      ))}
+      <button type="button" onClick={() => setLines([...lines, { ownerId: lines[lines.length - 1]?.ownerId ?? '', itemNo: '', lotNo: '', lpnId: '', qty: '' }])}>
+        Add item
+      </button>
+      <ErrorBox error={confirm.error} />
+      <div className="actions">
+        <button className="primary big" disabled={confirm.busy}>{filled.length === 0 ? 'Location is empty' : 'Submit count'}</button>
+      </div>
     </form>
   )
 }

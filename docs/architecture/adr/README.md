@@ -15,5 +15,6 @@
 | [0011](0011-waves-reallocation-and-reverse-picks.md) | Per-site wave or waveless release with wave plan/create/release; re-allocation after short picks; reverse picks for cancelled picked orders, ERP ack only when stock is back |
 | [0012](0012-attribute-scopes-on-roles.md) | Scope claims on roles: sites, owners (3PL clients), zones and approval value limits; deny when missing; item standard cost |
 | [0013](0013-web-ui.md) | React single-page web UI (RF, operations, inventory, admin, ERP simulator) with PKCE sign-in, served by the gateway image |
+| [0014](0014-cycle-counting.md) | Cycle counts owned by inventory, executed as blind RF count tasks; tolerance auto-adjust, independent recounts, approval with SoD and value limits; counts after short picks |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

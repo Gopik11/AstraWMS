@@ -26,13 +26,22 @@ public final class TaskDtos {
                            UUID inventoryOperationId, List<Content> contents, Instant createdAt,
                            Instant completedAt, UUID allocationId, String orderRef, String orderLineRef,
                            String itemNo, String lotNo, BigDecimal qty, String uom, String toLpn,
-                           BigDecimal qtyPicked) {
+                           BigDecimal qtyPicked, UUID countId, Integer countSequence) {
     }
 
     /**
      * RF pick confirmation: the operator scans the source location label (check digit), picks {@code qty} (less than
      * requested = short pick, PCK-003) and scans serials for serial-tracked items.
      */
+    /** A counted line on RF: what the counter finds, never compared on screen (blind count, INV-003). */
+    public record CountedLine(@NotBlank String ownerId, @NotBlank String itemNo, String lotNo, String lpnId,
+                              @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.PositiveOrZero BigDecimal qty) {
+    }
+
+    /** RF count confirmation: the location's check digit and the lines found (empty = location empty). */
+    public record CountConfirmRequest(@NotBlank String checkDigit, List<@jakarta.validation.Valid CountedLine> lines) {
+    }
+
     /** RF return confirmation: the check digit of the location the stock is put back to. */
     public record ReturnConfirmRequest(@NotBlank String checkDigit) {
     }

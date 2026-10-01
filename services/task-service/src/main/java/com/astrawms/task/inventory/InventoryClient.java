@@ -17,6 +17,9 @@ public interface InventoryClient {
     UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,
               String toLpnId, java.util.List<String> serials, boolean shortClose);
 
+    /** Submits a blind count result; returns the count's new status (CLOSED, ADJUSTED, RECOUNT, PENDING_APPROVAL). */
+    String submitCount(String siteId, String idempotencyKey, UUID countId, java.util.List<?> lines);
+
     /** Returns the picked stock of an allocation from outbound staging to the given location and LPN. */
     UUID returnToStock(String siteId, String idempotencyKey, UUID allocationId, String toLocationId, String toLpnId);
 }
