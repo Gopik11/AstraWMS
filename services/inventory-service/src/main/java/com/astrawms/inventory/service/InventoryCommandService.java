@@ -2,6 +2,7 @@ package com.astrawms.inventory.service;
 
 import com.astrawms.common.ids.WmsTxnId;
 import com.astrawms.common.messaging.OutboxWriter;
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.api.InventoryDtos.AdjustRequest;
@@ -98,6 +99,7 @@ public class InventoryCommandService {
 
     @Transactional
     public OperationResult receive(String siteId, String idempotencyKey, ReceiveRequest r) {
+        AccessScope.current().requireOwner(r.ownerId());
         return idempotent(siteId, idempotencyKey, "RECEIPT", r, ctx -> {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             if (!item.receivable()) {
@@ -134,7 +136,8 @@ public class InventoryCommandService {
     }
 
     @Transactional
-    public OperationResult adjust(String siteId, String idempotencyKey, AdjustRequest r) {
+    public OperationResult adjust(String siteId, String idempotencyKey, AdjustRequest r, AccessScope approver) {
+        AccessScope.current().requireOwner(r.ownerId());
         return idempotent(siteId, idempotencyKey, "ADJUSTMENT", r, ctx -> {
             if (r.qtyDelta().signum() == 0) {
                 throw ApiException.unprocessable("INV_ZERO_QTY", "qtyDelta must not be zero");
@@ -145,6 +148,7 @@ public class InventoryCommandService {
             boolean positive = r.qtyDelta().signum() > 0;
             validateLot(item, lot, r.expiryDate(), false);
             BigDecimal qty = toBase(item, r.qtyDelta().abs(), r.uom());
+            checkApprover(reason, approver, siteId, item, qty);
             LocationRef location = lockLocations(siteId, List.of(r.locationId())).get(r.locationId());
             StockStatus status = r.status() == null ? StockStatus.AVAILABLE : r.status();
             String lpn = positive ? ensureLpn(siteId, r.lpnId(), r.ownerId(), location.locationId())
@@ -171,7 +175,9 @@ public class InventoryCommandService {
     }
 
     @Transactional
-    public OperationResult changeStatus(String siteId, String idempotencyKey, StatusChangeRequest r) {
+    public OperationResult changeStatus(String siteId, String idempotencyKey, StatusChangeRequest r,
+                                        AccessScope approver) {
+        AccessScope.current().requireOwner(r.ownerId());
         return idempotent(siteId, idempotencyKey, "STATUS_CHANGE", r, ctx -> {
             if (r.fromStatus() == r.toStatus()) {
                 throw ApiException.unprocessable("INV_STATUS_UNCHANGED", "fromStatus and toStatus are equal");
@@ -181,6 +187,7 @@ public class InventoryCommandService {
             String lot = normalise(r.lotNo());
             validateLot(item, lot, null, false);
             BigDecimal qty = toBase(item, r.qty(), r.uom());
+            checkApprover(reason, approver, siteId, item, qty);
             LocationRef location = lockLocations(siteId, List.of(r.locationId())).get(r.locationId());
             String lpn = requireLpnAt(siteId, r.lpnId(), location.locationId());
 
@@ -211,6 +218,7 @@ public class InventoryCommandService {
      */
     @Transactional
     public AllocationResult allocate(String siteId, String idempotencyKey, AllocateRequest r) {
+        AccessScope.current().requireOwner(r.ownerId());
         return idempotentValue(siteId, idempotencyKey, "ALLOCATE", r, AllocationResult.class, ctx -> {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             BigDecimal wanted = toBase(item, r.qty(), r.uom());
@@ -244,6 +252,7 @@ public class InventoryCommandService {
         return idempotent(siteId, idempotencyKey, "PICK", java.util.Map.of("allocation", allocationId, "request", r), ctx -> {
             Allocation a = allocations.lock(siteId, allocationId).orElseThrow(() ->
                     ApiException.notFound("INV_ALLOCATION_UNKNOWN", "Allocation " + allocationId + " not found"));
+            AccessScope.current().requireOwner(a.ownerId());
             if (!"OPEN".equals(a.status())) {
                 throw ApiException.unprocessable("INV_ALLOCATION_NOT_OPEN", "Allocation is " + a.status());
             }
@@ -299,6 +308,7 @@ public class InventoryCommandService {
     public IssueResult issue(String siteId, String idempotencyKey, IssueRequest r) {
         return idempotentValue(siteId, idempotencyKey, "ISSUE", r, IssueResult.class, ctx -> {
             List<Allocation> all = allocations.lockByOrder(siteId, r.orderRef());
+            all.forEach(a -> AccessScope.current().requireOwner(a.ownerId()));
             if (all.stream().anyMatch(a -> "OPEN".equals(a.status()))) {
                 throw ApiException.unprocessable("INV_ALLOCATIONS_OPEN",
                         "Order " + r.orderRef() + " still has open allocations; pick or release them first");
@@ -349,6 +359,7 @@ public class InventoryCommandService {
             int count = 0;
             BigDecimal qty = BigDecimal.ZERO;
             for (Allocation a : allocations.lockByOrder(siteId, r.orderRef())) {
+                AccessScope.current().requireOwner(a.ownerId());
                 if (!"OPEN".equals(a.status())) {
                     continue;
                 }
@@ -375,6 +386,7 @@ public class InventoryCommandService {
         return idempotent(siteId, idempotencyKey, "RETURN", java.util.Map.of("allocation", allocationId, "request", r), ctx -> {
             Allocation a = allocations.lock(siteId, allocationId).orElseThrow(() ->
                     ApiException.notFound("INV_ALLOCATION_UNKNOWN", "Allocation " + allocationId + " not found"));
+            AccessScope.current().requireOwner(a.ownerId());
             if (!"PICKED".equals(a.status())) {
                 throw ApiException.unprocessable("INV_ALLOCATION_NOT_PICKED",
                         "Only picked allocations can be returned to stock; allocation is " + a.status());
@@ -416,6 +428,7 @@ public class InventoryCommandService {
     private void moveLpn(String siteId, MoveRequest r, OpContext ctx) {
         InventoryRepository.Lpn lpn = repo.lockLpn(siteId, r.lpnId())
                 .orElseThrow(() -> ApiException.unprocessable("INV_LPN_UNKNOWN", "LPN " + r.lpnId() + " does not exist"));
+        AccessScope.current().requireOwner(lpn.ownerId());
         if (!lpn.locationId().equals(r.fromLocationId())) {
             throw ApiException.unprocessable("INV_LPN_LOCATION_MISMATCH",
                     "LPN " + lpn.lpnId() + " is at " + lpn.locationId() + ", not " + r.fromLocationId());
@@ -464,6 +477,7 @@ public class InventoryCommandService {
             throw ApiException.badRequest("INV_MOVE_FIELDS",
                     "ownerId, itemNo, qty and uom are required unless a whole LPN is moved");
         }
+        AccessScope.current().requireOwner(r.ownerId());
         ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
         String lot = normalise(r.lotNo());
         validateLot(item, lot, null, false);
@@ -654,6 +668,35 @@ public class InventoryCommandService {
             }
         }
         return reason;
+    }
+
+    /**
+     * Approvals beyond the approver role (§G.5.1): the approver must be authorised for the site and owner, and the
+     * value (standard cost × base quantity) must be within the approver's limit. {@code approver} is null when the
+     * reason needs no approval or no approver was given (then {@link #requireReason} has already decided).
+     */
+    private static void checkApprover(Reason reason, AccessScope approver, String siteId, ItemRef item, BigDecimal qty) {
+        if (!reason.requiresApproval() || approver == null) {
+            return;
+        }
+        if (!approver.allowsSite(siteId) || !approver.allowsOwner(item.ownerId())) {
+            throw new ApiException(org.springframework.http.HttpStatus.FORBIDDEN, "APPROVER_SCOPE_DENIED",
+                    "The approver is not authorised for site " + siteId + " / owner " + item.ownerId());
+        }
+        BigDecimal limit = approver.approvalLimit();
+        if (limit == null) {
+            return;
+        }
+        if (item.standardCost() == null) {
+            throw ApiException.unprocessable("APPROVAL_VALUE_UNKNOWN",
+                    "Item " + item.itemNo() + " has no standard cost, so the approver's value limit cannot be checked");
+        }
+        BigDecimal value = item.standardCost().multiply(qty).setScale(2, java.math.RoundingMode.HALF_UP);
+        if (value.compareTo(limit) > 0) {
+            throw new ApiException(org.springframework.http.HttpStatus.FORBIDDEN, "APPROVAL_LIMIT_EXCEEDED",
+                    "Value " + value.toPlainString() + " exceeds the approver's limit of " + limit.toPlainString(),
+                    Map.of("value", value, "approvalLimit", limit));
+        }
     }
 
     private BigDecimal toBase(ItemRef item, BigDecimal qty, String uom) {

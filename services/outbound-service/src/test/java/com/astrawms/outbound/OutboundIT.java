@@ -364,6 +364,21 @@ class OutboundIT {
     }
 
     @Test
+    void ordersOfOtherOwnersAreInvisibleAndNeverWaved_G5() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE"}""").andExpect(status().isOk());
+        order(1, "CREATE", "3", "1");
+        await(() -> "POOLED".equals(orderStatus()));
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-sup").roles(Roles.SUPERVISOR)
+                .owners("BETA").sign());
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders/" + doc).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders").with(beta)).andExpect(jsonPath("$.length()", is(0)));
+        mvc.perform(post("/api/v1/sites/DC1/outbound/waves/plan").with(beta).contentType(MediaType.APPLICATION_JSON)
+                .content("{}")).andExpect(jsonPath("$.orderCount", is(0)));
+        call(post("/api/v1/sites/DC1/outbound/waves/plan"), "{}").andExpect(jsonPath("$.orderCount", is(1)));
+    }
+
+    @Test
     void onlySupervisorsShip_G5() throws Exception {
         mvc.perform(post("/api/v1/sites/DC1/outbound/orders/0080009999/ship").with(TestTokens.as(tenant, "pete", Roles.PICKER))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"carrierScac\":\"UPSN\"}"))

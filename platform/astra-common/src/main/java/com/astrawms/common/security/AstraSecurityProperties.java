@@ -89,6 +89,54 @@ public class AstraSecurityProperties {
         private List<String> user = List.of("preferred_username");
         /** Dotted paths to string arrays; all are merged. Keycloak realm roles and Entra ID / Okta app roles. */
         private List<String> roles = List.of("realm_access.roles", "roles");
+        /** Access scope claims (§G.5.1): string arrays, {@code "*"} = all. */
+        private String sites = "wms_sites";
+        private String owners = "wms_owners";
+        private String zones = "wms_zones";
+        /** Maximum value the user may approve (number, tenant reporting currency); absent = no value limit. */
+        private String approvalLimit = "approval_limit";
+        /** A missing site/owner/zone claim grants nothing (NONE, least privilege) or everything (ALL). */
+        private String scopeWhenMissing = "NONE";
+
+        public String getSites() {
+            return sites;
+        }
+
+        public void setSites(String sites) {
+            this.sites = sites;
+        }
+
+        public String getOwners() {
+            return owners;
+        }
+
+        public void setOwners(String owners) {
+            this.owners = owners;
+        }
+
+        public String getZones() {
+            return zones;
+        }
+
+        public void setZones(String zones) {
+            this.zones = zones;
+        }
+
+        public String getApprovalLimit() {
+            return approvalLimit;
+        }
+
+        public void setApprovalLimit(String approvalLimit) {
+            this.approvalLimit = approvalLimit;
+        }
+
+        public String getScopeWhenMissing() {
+            return scopeWhenMissing;
+        }
+
+        public void setScopeWhenMissing(String scopeWhenMissing) {
+            this.scopeWhenMissing = scopeWhenMissing;
+        }
 
         public String getTenant() {
             return tenant;

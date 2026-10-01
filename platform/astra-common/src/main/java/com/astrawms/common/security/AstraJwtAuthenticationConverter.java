@@ -52,6 +52,49 @@ public class AstraJwtAuthenticationConverter implements Converter<Jwt, AbstractA
         return List.copyOf(result);
     }
 
+    /** The access scope (§G.5.1) a user token carries. */
+    public AccessScope accessScope(Jwt jwt) {
+        boolean allWhenMissing = "ALL".equalsIgnoreCase(claims.getScopeWhenMissing());
+        return new AccessScope(scopeSet(jwt, claims.getSites(), allWhenMissing),
+                scopeSet(jwt, claims.getOwners(), allWhenMissing),
+                scopeSet(jwt, claims.getZones(), allWhenMissing),
+                decimal(jwt.getClaims().get(claims.getApprovalLimit())));
+    }
+
+    /** {@code null} = unrestricted. A claim may be an array or a single (comma-separated) string. */
+    private static Set<String> scopeSet(Jwt jwt, String claim, boolean allWhenMissing) {
+        Object value = jwt.getClaims().get(claim);
+        if (value == null) {
+            return allWhenMissing ? null : Set.of();
+        }
+        List<String> values = value instanceof Collection<?> c
+                ? c.stream().map(String::valueOf).toList()
+                : List.of(String.valueOf(value).split(","));
+        Set<String> result = new LinkedHashSet<>();
+        for (String v : values) {
+            String t = v.trim();
+            if ("*".equals(t)) {
+                return null;
+            }
+            if (!t.isEmpty()) {
+                result.add(t);
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private static java.math.BigDecimal decimal(Object value) {
+        if (value == null) {
+            return null;
+        }
+        Object single = value instanceof Collection<?> c ? c.stream().findFirst().orElse(null) : value;
+        try {
+            return single == null || String.valueOf(single).isBlank() ? null : new java.math.BigDecimal(String.valueOf(single).trim());
+        } catch (NumberFormatException e) {
+            return java.math.BigDecimal.ZERO;   // unreadable limit: approves nothing
+        }
+    }
+
     private static Object resolve(Map<String, Object> claims, String dottedPath) {
         Object current = claims;
         for (String part : dottedPath.split("\\.")) {

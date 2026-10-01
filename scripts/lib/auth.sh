@@ -1,6 +1,7 @@
 # Sourced by the smoke tests. Provisions users of a fresh tenant in the local Keycloak (development realm only) and
 # signs them in, the way a customer IdP + SCIM provisioning would in a real environment (NFR-100).
-#   provision <tenant> <username> <role...>   creates the user with tenant_id and realm roles
+#   provision <tenant> <username> <role...>   creates the user with tenant_id and realm roles; access scope from
+#                                             SCOPE_SITES / SCOPE_OWNERS / SCOPE_ZONES (default *) and APPROVAL_LIMIT
 #   bearer <username>                         sets AUTH=(-H "Authorization: Bearer <token>")
 
 KC="${KC_URL:-http://localhost:8180}"
@@ -11,6 +12,15 @@ _kc_admin_token() {
   curl -sf -X POST "$REALM/protocol/openid-connect/token" \
     -d grant_type=client_credentials -d client_id=astra-provisioner -d client_secret=provisioner-dev-secret \
     | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+}
+
+_json_list() { python -c 'import json,sys; print(json.dumps([v.strip() for v in sys.argv[1].split(",") if v.strip()]))' "$1"; }
+
+_scope_attributes() {
+  local out
+  out="\"wms_sites\":$(_json_list "${SCOPE_SITES:-*}"),\"wms_owners\":$(_json_list "${SCOPE_OWNERS:-*}"),\"wms_zones\":$(_json_list "${SCOPE_ZONES:-*}")"
+  [[ -n "${APPROVAL_LIMIT:-}" ]] && out="$out,\"approval_limit\":[\"$APPROVAL_LIMIT\"]"
+  printf '%s' "$out"
 }
 
 wait_for_keycloak() {
@@ -25,7 +35,7 @@ provision() { # provision <tenant> <username> <role...>
   location="$(curl -s -D - -o /dev/null -X POST "$KC/admin/realms/astrawms/users" \
     -H "Authorization: Bearer $admin" -H "Content-Type: application/json" \
     -d "{\"username\":\"$user\",\"enabled\":true,\"emailVerified\":true,\"firstName\":\"Smoke\",\"lastName\":\"$user\",
-         \"email\":\"$user@smoke.astrawms.local\",\"attributes\":{\"tenant_id\":[\"$tenant\"]},
+         \"email\":\"$user@smoke.astrawms.local\",\"attributes\":{\"tenant_id\":[\"$tenant\"],$(_scope_attributes)},
          \"credentials\":[{\"type\":\"password\",\"value\":\"$SMOKE_PASSWORD\",\"temporary\":false}]}" \
     | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
   [[ -n "$location" ]] || { echo "FAILED: could not create user $user" >&2; exit 1; }

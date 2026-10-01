@@ -1,5 +1,6 @@
 package com.astrawms.inventory.service;
 
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.api.InventoryDtos.BalanceView;
 import com.astrawms.inventory.api.InventoryDtos.ItemSummary;
@@ -55,6 +56,7 @@ public class InventoryQueryService {
         params.put("site", siteId);
         params.put("after", after == null ? 0L : after);
         filter(sql, params, "owner_id", "owner", f.ownerId());
+        ownerScope(sql, params);
         filter(sql, params, "item_no", "item", f.itemNo());
         filter(sql, params, "lot_no", "lot", f.lotNo());
         filter(sql, params, "lpn_id", "lpn", f.lpnId());
@@ -87,6 +89,9 @@ public class InventoryQueryService {
                         rs.getString("location_id"), rs.getString("lpn_type"), List.of(), List.of()))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("INV_LPN_UNKNOWN", "LPN " + lpnId + " does not exist"));
+        if (!AccessScope.current().allowsOwner(header.ownerId())) {
+            throw ApiException.notFound("INV_LPN_UNKNOWN", "LPN " + lpnId + " does not exist");   // not visible to this user
+        }
         List<BalanceView> contents = jdbc.sql("""
                         select id, owner_id, item_no, lot_no, lpn_id, location_id, stock_status, qty, allocated_qty,
                                expiry_date, receipt_date
@@ -109,6 +114,7 @@ public class InventoryQueryService {
         Map<String, Object> params = new LinkedHashMap<>();
         params.put("site", siteId);
         params.put("after", after == null ? 0L : after);
+        ownerScope(sql, params);
         filter(sql, params, "item_no", "item", f.itemNo());
         filter(sql, params, "lpn_id", "lpn", f.lpnId());
         filter(sql, params, "location_id", "loc", f.locationId());
@@ -126,6 +132,15 @@ public class InventoryQueryService {
                 rs.getString("source_doc"), rs.getString("user_id"), rs.getString("channel"),
                 rs.getTimestamp("occurred_at").toInstant())).list();
         return page(rows, size, TxnView::id);
+    }
+
+    /** Owner scope of the user (§G.5.1): a 3PL client sees only its own stock. */
+    private static void ownerScope(StringBuilder sql, Map<String, Object> params) {
+        AccessScope scope = AccessScope.current();
+        if (!scope.ownersAll()) {
+            sql.append(" and owner_id in (:scopeOwners)");
+            params.put("scopeOwners", scope.ownerList());
+        }
     }
 
     private static BalanceView balance(ResultSet rs, int n) throws SQLException {

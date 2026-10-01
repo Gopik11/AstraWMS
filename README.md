@@ -59,10 +59,11 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh &
 - Every request needs `Authorization: Bearer <token>` from the identity provider (locally the Keycloak realm `astrawms`).
 - The tenant and user come from the token (`tenant_id` claim); a different `X-Tenant-Id` is rejected.
 - Endpoints that change data require roles (§G.5.2), e.g. `RECEIVER` to receive, `SUPERVISOR` to ship.
+- Roles are limited by scope claims ([ADR-0012](docs/architecture/adr/0012-attribute-scopes-on-roles.md)): `wms_sites`, `wms_owners` and `wms_zones` (`*` = all; missing = none), and `approval_limit` for approvers.
 - Approvals send the approver's own token in `X-Approval-Token`.
 - Commands also need `Idempotency-Key`.
 
-To create a user locally, use the Keycloak admin console (admin / admin): add a user in realm `astrawms` with the attribute `tenant_id` and realm roles. Or use `provision` from `scripts/lib/auth.sh`.
+To create a user locally, use the Keycloak admin console (admin / admin): add a user in realm `astrawms` with the attributes `tenant_id`, `wms_sites`, `wms_owners` and `wms_zones`, and realm roles. Or use `provision` from `scripts/lib/auth.sh`.
 
 ## Document Set
 

@@ -82,4 +82,39 @@ movements="$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d inventory -tAc
 echo "GoodsMovement messages published for ERP adapter: $movements"
 [[ "$movements" == "2" ]] || fail "expected 2 GoodsMovement messages, got $movements"
 
+step "Access scopes (G.5.1): 3PL client sees only its own stock; site scope; approver value limit"
+expect 200 -X PUT "$MD/api/v1/items/BETA/SKU-B" "${H[@]}" \
+  -d '{"description":"Client item","baseUom":"EA","status":"ACTIVE","sites":[{"siteId":"DC1","lotControlled":false,"serialControl":"NONE"}]}'
+for _ in $(seq 1 30); do
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$INV/api/v1/sites/DC1/inventory/receipts" "${OP[@]}" \
+          -H "Idempotency-Key: receipt-beta" -d '{"ownerId":"BETA","itemNo":"SKU-B","qty":7,"uom":"EA","locationId":"A-01-102"}')"
+  [[ "$code" == "201" ]] && break; sleep 1
+done
+[[ "$code" == "201" ]] || fail "BETA receipt not accepted"
+SCOPE_OWNERS=BETA provision "$TENANT" "$TENANT-beta-client" RECEIVER
+SCOPE_SITES=DC2 provision "$TENANT" "$TENANT-dc2-supervisor" SUPERVISOR
+APPROVAL_LIMIT=20 provision "$TENANT" "$TENANT-manager-20" INV_MANAGER
+APPROVAL_LIMIT=100 provision "$TENANT" "$TENANT-manager-100" INV_MANAGER
+bearer "$TENANT-beta-client"; BETA=("${AUTH[@]}" -H "Content-Type: application/json")
+bearer "$TENANT-dc2-supervisor"; DC2=("${AUTH[@]}" -H "Content-Type: application/json")
+expect 200 "$INV/api/v1/sites/DC1/inventory/balances" "${BETA[@]}"
+owners="$(python -c "import json,sys; print(','.join(sorted({b['ownerId'] for b in json.load(sys.stdin)['items']})))" <<<"$BODY")"
+[[ "$owners" == "BETA" ]] || fail "3PL client should only see BETA stock, saw $owners"
+expect 403 "$INV/api/v1/sites/DC1/inventory/items/ACME/SKU-100/summary" "${BETA[@]}"
+expect 403 "$INV/api/v1/sites/DC1/inventory/balances" "${DC2[@]}"
+echo "BETA client sees only BETA stock; ACME item -> 403; DC2 supervisor on DC1 -> 403"
+
+expect 200 -X PUT "$MD/api/v1/items/ACME/SKU-100" "${H[@]}" \
+  -d '{"description":"Bluetooth Speaker","baseUom":"EA","status":"ACTIVE","standardCost":2.50,"sites":[{"siteId":"DC1","lotControlled":false,"serialControl":"NONE"}],"uoms":[{"uom":"CS","numerator":12,"denominator":1,"gtin":"10614141000415"}]}'
+sleep 2
+bearer "$TENANT-manager-20";  LOW="${AUTH[1]#Authorization: Bearer }"
+bearer "$TENANT-manager-100"; HIGH="${AUTH[1]#Authorization: Bearer }"
+VAR='{"ownerId":"ACME","itemNo":"SKU-100","locationId":"QC-01","lpnId":"LPN-SMOKE-1","qtyDelta":-10,"uom":"EA","reasonCode":"CC_VAR"}'
+expect 403 -X POST "$INV/api/v1/sites/DC1/inventory/adjustments" "${OP[@]}" -H "Idempotency-Key: var-1" \
+  -H "X-Approval-Token: $LOW" -d "$VAR"
+grep -q APPROVAL_LIMIT_EXCEEDED <<<"$BODY" || fail "expected APPROVAL_LIMIT_EXCEEDED: $BODY"
+expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/adjustments" "${OP[@]}" -H "Idempotency-Key: var-2" \
+  -H "X-Approval-Token: $HIGH" -d "$VAR"
+echo "Variance worth 25.00: approver with limit 20 -> 403 APPROVAL_LIMIT_EXCEEDED; approver with limit 100 -> approved"
+
 printf '\nSMOKE TEST PASSED (tenant %s)\n' "$TENANT"

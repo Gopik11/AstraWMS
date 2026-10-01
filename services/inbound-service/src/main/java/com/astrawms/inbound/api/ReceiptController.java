@@ -6,6 +6,7 @@ import com.astrawms.inbound.api.InboundDtos.ExpectationSummary;
 import com.astrawms.inbound.api.InboundDtos.ReceiveLineRequest;
 import com.astrawms.inbound.api.InboundDtos.ReceiveResult;
 import com.astrawms.inbound.api.InboundDtos.ReceiveSsccRequest;
+import com.astrawms.inbound.receiving.ReceiptScope;
 import com.astrawms.inbound.receiving.ReceivingService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -27,18 +28,21 @@ import org.springframework.web.bind.annotation.RestController;
 public class ReceiptController {
 
     private final ReceivingService receiving;
+    private final ReceiptScope scope;
 
-    public ReceiptController(ReceivingService receiving) {
+    public ReceiptController(ReceivingService receiving, ReceiptScope scope) {
         this.receiving = receiving;
+        this.scope = scope;
     }
 
     @GetMapping
     public List<ExpectationSummary> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return receiving.list(siteId, status);
+        return scope.filter(siteId, receiving.list(siteId, status), ExpectationSummary::erpDocNo);
     }
 
     @GetMapping("/{erpDocNo}")
     public ExpectationDetail detail(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
         return receiving.detail(siteId, erpDocNo);
     }
 
@@ -48,6 +52,7 @@ public class ReceiptController {
                                                      @PathVariable String lineRef,
                                                      @RequestHeader("Idempotency-Key") String key,
                                                      @Valid @RequestBody ReceiveLineRequest body) {
+        scope.require(siteId, erpDocNo);
         return respond(receiving.receiveLine(siteId, erpDocNo, lineRef, key, body));
     }
 
@@ -57,6 +62,7 @@ public class ReceiptController {
                                                      @PathVariable String sscc,
                                                      @RequestHeader("Idempotency-Key") String key,
                                                      @Valid @RequestBody ReceiveSsccRequest body) {
+        scope.require(siteId, erpDocNo);
         return respond(receiving.receiveSscc(siteId, erpDocNo, sscc, key, body));
     }
 
@@ -64,12 +70,14 @@ public class ReceiptController {
     @PostMapping("/{erpDocNo}/close")
     public ExpectationSummary close(@PathVariable String siteId, @PathVariable String erpDocNo,
                                     @RequestBody(required = false) CloseRequest body) {
+        scope.require(siteId, erpDocNo);
         return receiving.close(siteId, erpDocNo, body);
     }
 
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/repost")
     public ExpectationSummary repost(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
         return receiving.repost(siteId, erpDocNo);
     }
 

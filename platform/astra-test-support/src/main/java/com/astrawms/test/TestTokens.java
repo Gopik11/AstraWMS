@@ -81,6 +81,31 @@ public final class TestTokens {
         private Instant issuedAt = Instant.now();
         private Instant expiresAt = Instant.now().plus(Duration.ofMinutes(5));
         private RSAKey key = KEY;
+        private List<String> sites = List.of("*");
+        private List<String> owners = List.of("*");
+        private List<String> zones = List.of("*");
+        private String approvalLimit;
+
+        /** Access scope claims (§G.5.1); default {@code *}. {@code null} omits the claim. */
+        public Builder sites(String... sites) {
+            this.sites = sites == null ? null : List.of(sites);
+            return this;
+        }
+
+        public Builder owners(String... owners) {
+            this.owners = owners == null ? null : List.of(owners);
+            return this;
+        }
+
+        public Builder zones(String... zones) {
+            this.zones = zones == null ? null : List.of(zones);
+            return this;
+        }
+
+        public Builder approvalLimit(String approvalLimit) {
+            this.approvalLimit = approvalLimit;
+            return this;
+        }
 
         public Builder tenant(String tenant) {
             this.tenant = tenant;
@@ -134,6 +159,18 @@ public final class TestTokens {
                     .claim("realm_access", Map.of("roles", roles));
             if (tenant != null) {
                 claims.claim("tenant_id", tenant);
+            }
+            if (sites != null) {
+                claims.claim("wms_sites", sites);
+            }
+            if (owners != null) {
+                claims.claim("wms_owners", owners);
+            }
+            if (zones != null) {
+                claims.claim("wms_zones", zones);
+            }
+            if (approvalLimit != null) {
+                claims.claim("approval_limit", approvalLimit);
             }
             NimbusJwtEncoder encoder = new NimbusJwtEncoder(new ImmutableJWKSet<>(new JWKSet(key)));
             JwsHeader header = JwsHeader.with(SignatureAlgorithm.RS256).keyId(key.getKeyID()).build();

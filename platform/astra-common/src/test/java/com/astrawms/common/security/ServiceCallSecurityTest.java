@@ -44,6 +44,27 @@ class ServiceCallSecurityTest {
     }
 
     @Test
+    void readsAccessScopeClaims_G5() {
+        AccessScope scoped = converter.accessScope(jwt(Map.of("wms_sites", List.of("DC1", "DC2"), "wms_owners", "ACME, BETA",
+                "wms_zones", List.of("*"), "approval_limit", "5000")));
+        assertThat(scoped.sites()).containsExactlyInAnyOrder("DC1", "DC2");
+        assertThat(scoped.owners()).containsExactlyInAnyOrder("ACME", "BETA");
+        assertThat(scoped.zones()).isNull();                                   // "*" = all
+        assertThat(scoped.approvalLimit()).isEqualByComparingTo("5000");
+        assertThat(scoped.allowsSite("DC3")).isFalse();
+
+        AccessScope bare = converter.accessScope(jwt(Map.of()));               // least privilege by default
+        assertThat(bare.allowsSite("DC1")).isFalse();
+        assertThat(bare.allowsOwner("ACME")).isFalse();
+        assertThat(bare.approvalLimit()).isNull();
+        assertThat(bare.ownerList()).containsExactly("");                     // matches nothing in SQL
+
+        AstraSecurityProperties.Claims lenient = new AstraSecurityProperties.Claims();
+        lenient.setScopeWhenMissing("ALL");
+        assertThat(new AstraJwtAuthenticationConverter(lenient).accessScope(jwt(Map.of())).sites()).isNull();
+    }
+
+    @Test
     void relaysTheUsersTokenInsideAUserRequest() throws Exception {
         SecurityContextHolder.getContext().setAuthentication(converter.convert(
                 jwt(Map.of("preferred_username", "alice", "tenant_id", "t1", "realm_access", Map.of("roles", List.of("PICKER"))))));

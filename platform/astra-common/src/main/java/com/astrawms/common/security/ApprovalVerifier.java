@@ -38,8 +38,15 @@ public class ApprovalVerifier {
         this.clock = clock;
     }
 
-    /** Returns the verified approver's user name. */
-    public String approver(String approvalToken, String... approverRoles) {
+    /**
+     * A verified approver with their own access scope (§G.5.1): the caller checks that the approver may work for the
+     * transaction's site and owner and that its value is within {@link AccessScope#approvalLimit()}.
+     */
+    public record Approver(String userName, AccessScope scope) {
+    }
+
+    /** Verifies the approval token and returns the approver. */
+    public Approver approver(String approvalToken, String... approverRoles) {
         Jwt jwt;
         try {
             jwt = decoder.decode(approvalToken);
@@ -64,6 +71,6 @@ public class ApprovalVerifier {
                     "User " + approver + " may not approve this transaction",
                     Map.of("approverRoles", Arrays.asList(approverRoles)));
         }
-        return approver;
+        return new Approver(approver, converter.accessScope(jwt));
     }
 }

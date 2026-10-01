@@ -318,6 +318,20 @@ class InboundIT {
     }
 
 
+    @Test
+    void receiptsOfOtherOwnersAreInvisible_G5() throws Exception {
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-clerk").roles(Roles.RECEIVER)
+                .owners("BETA").sign());
+        mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/sites/DC1/receipts").with(beta)).andExpect(jsonPath("$.length()", is(0)));
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/close").with(beta)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isNotFound());
+        var acme = TestTokens.bearer(TestTokens.token().tenant(tenant).user("acme-clerk").roles(Roles.RECEIVER)
+                .owners("ACME").sites("DC1").sign());
+        mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(acme)).andExpect(status().isOk());
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void expectation(long revision, String action, String qty10, String qty20) throws Exception {

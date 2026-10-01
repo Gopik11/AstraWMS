@@ -1,5 +1,7 @@
 package com.astrawms.common.tenancy;
 
+import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.security.AstraJwtAuthenticationConverter;
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.web.Problems;
 import jakarta.servlet.FilterChain;
@@ -21,7 +23,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *       {@code X-Tenant-Id} header is allowed only if it names the same tenant; {@code X-User-Id} is ignored.</li>
  *   <li><b>Service tokens</b> (role {@link Roles#WMS_SERVICE}): an AstraWMS service acting for a tenant names it in
  *       {@code X-Tenant-Id} and the user it acts for in {@code X-User-Id}. Only service accounts are trusted to do
- *       so.</li>
+ *       so. Service accounts are not limited by site, owner or zone; the user's {@link AccessScope} comes from
+ *       the token's scope claims.</li>
  * </ul>
  * Unauthenticated requests pass through untouched; the authorization rules reject them (or allow health probes).
  */
@@ -34,9 +37,11 @@ public class TenantFilter extends OncePerRequestFilter {
     private static final String SERVICE_AUTHORITY = "ROLE_" + Roles.WMS_SERVICE;
 
     private final String tenantClaim;
+    private final AstraJwtAuthenticationConverter converter;
 
-    public TenantFilter(String tenantClaim) {
+    public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter) {
         this.tenantClaim = tenantClaim;
+        this.converter = converter;
     }
 
     @Override
@@ -50,6 +55,7 @@ public class TenantFilter extends OncePerRequestFilter {
         String headerTenant = trimToNull(request.getHeader(TENANT_HEADER));
         String tenant;
         String user;
+        AccessScope access = AccessScope.UNRESTRICTED;
         if (isService(token)) {
             if (headerTenant == null) {
                 Problems.write(response, HttpStatus.BAD_REQUEST, "TENANT_MISSING",
@@ -72,9 +78,10 @@ public class TenantFilter extends OncePerRequestFilter {
                 return;
             }
             user = token.getName();
+            access = converter.accessScope(token.getToken());
         }
         String channel = trimToNull(request.getHeader(CHANNEL_HEADER));
-        TenantContext.bind(new TenantContext.Scope(tenant, user, channel == null ? "API" : channel));
+        TenantContext.bind(new TenantContext.Scope(tenant, user, channel == null ? "API" : channel, access));
         try {
             chain.doFilter(request, response);
         } finally {

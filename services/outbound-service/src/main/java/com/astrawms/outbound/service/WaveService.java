@@ -1,5 +1,6 @@
 package com.astrawms.outbound.service;
 
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import jakarta.validation.constraints.Positive;
@@ -149,8 +150,11 @@ public class WaveService {
                           and (cast(:scac as text) is null or o.carrier_scac = :scac)
                           and (cast(:type as text) is null or o.order_type = :type)
                           and (cast(:before as timestamptz) is null or o.planned_gi_utc <= :before)
-                        order by o.planned_gi_utc nulls last, o.created_at\s""" + (lock ? "for update of o skip locked" : ""))
+                          and (:ownersAll or\s""" + OrderScope.ALL_LINES_IN_SCOPE + ")"
+                        + " order by o.planned_gi_utc nulls last, o.created_at " + (lock ? "for update of o skip locked" : ""))
                 .param("site", siteId).param("scac", criteria.carrierScac()).param("type", criteria.orderType())
+                .param("ownersAll", AccessScope.current().ownersAll())
+                .param("scopeOwners", AccessScope.current().ownerList())
                 .param("before", criteria.goodsIssueBefore() == null ? null : Timestamp.from(criteria.goodsIssueBefore()))
                 .query((rs, n) -> new PlannedOrder(rs.getString(1), rs.getString(2), rs.getString(3),
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(), rs.getInt(5)))

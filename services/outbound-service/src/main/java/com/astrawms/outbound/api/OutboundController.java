@@ -1,5 +1,6 @@
 package com.astrawms.outbound.api;
 
+import com.astrawms.outbound.service.OrderScope;
 import com.astrawms.outbound.service.OutboundService;
 import com.astrawms.outbound.service.OutboundService.ShipRequest;
 import java.util.List;
@@ -19,18 +20,21 @@ import org.springframework.web.bind.annotation.RestController;
 public class OutboundController {
 
     private final OutboundService outbound;
+    private final OrderScope scope;
 
-    public OutboundController(OutboundService outbound) {
+    public OutboundController(OutboundService outbound, OrderScope scope) {
         this.outbound = outbound;
+        this.scope = scope;
     }
 
     @GetMapping
     public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return outbound.list(siteId, status);
+        return scope.filter(siteId, outbound.list(siteId, status));
     }
 
     @GetMapping("/{erpDocNo}")
     public Map<String, Object> detail(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
         return outbound.detail(siteId, erpDocNo);
     }
 
@@ -38,12 +42,14 @@ public class OutboundController {
     @PostMapping("/{erpDocNo}/ship")
     public Map<String, Object> ship(@PathVariable String siteId, @PathVariable String erpDocNo,
                                     @RequestBody(required = false) ShipRequest body) {
+        scope.require(siteId, erpDocNo);
         return outbound.ship(siteId, erpDocNo, body);
     }
 
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/repost")
     public Map<String, Object> repost(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
         return outbound.repost(siteId, erpDocNo);
     }
 }

@@ -12,15 +12,27 @@ public final class MasterDataEvents {
     public static final String TOPIC = "wms.masterdata.events.v1";
     public static final String ITEM_UPSERTED = "ItemUpserted";
     public static final String LOCATION_UPSERTED = "LocationUpserted";
-    public static final String SCHEMA_VERSION = "1.0";
+    /** 1.1: ItemUpserted.standardCost (additive). */
+    public static final String SCHEMA_VERSION = "1.1";
 
     private MasterDataEvents() {
     }
 
     /** Business key {@code ownerId:itemNo}. Carries the full item so consumers can replace their projection. */
+    /**
+     * @param standardCost value of one base unit in the tenant's reporting currency (optional); used for approval
+     *                     value limits (§G.5.1). Added in schema 1.1; consumers of 1.0 ignore it.
+     */
     public record ItemUpserted(String ownerId, String itemNo, String baseUom, String status, Integer shelfLifeDays,
                                String temperatureClass, boolean hazardous, List<Site> sites, List<Uom> uoms,
-                               Instant sourceChangedAt) {
+                               Instant sourceChangedAt, java.math.BigDecimal standardCost) {
+
+        public ItemUpserted(String ownerId, String itemNo, String baseUom, String status, Integer shelfLifeDays,
+                            String temperatureClass, boolean hazardous, List<Site> sites, List<Uom> uoms,
+                            Instant sourceChangedAt) {
+            this(ownerId, itemNo, baseUom, status, shelfLifeDays, temperatureClass, hazardous, sites, uoms,
+                    sourceChangedAt, null);
+        }
 
         /** Site-level control data (IF-MD-001: lot/serial control can differ per site). */
         public record Site(String siteId, boolean lotControlled, String serialControl, String status) {
