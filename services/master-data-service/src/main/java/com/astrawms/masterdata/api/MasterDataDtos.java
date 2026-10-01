@@ -36,7 +36,8 @@ public final class MasterDataDtos {
             boolean hazardous,
             @NotEmpty List<@Valid ItemSite> sites,
             List<@Valid ItemUom> uoms,
-            Instant sourceChangedAt) {
+            Instant sourceChangedAt,
+            @PositiveOrZero java.math.BigDecimal standardCost) {
     }
 
     public record ItemSite(@NotBlank String siteId, boolean lotControlled, @NotNull SerialControl serialControl,
@@ -51,7 +52,8 @@ public final class MasterDataDtos {
     public record ItemView(String ownerId, String itemNo, String description, String baseUom, String itemType,
                            ItemStatus status, Integer shelfLifeDays, Integer minRemainingShelfLifeDays,
                            String temperatureClass, boolean hazardous, List<ItemSite> sites, List<ItemUom> uoms,
-                           String source, long version, Instant updatedAt, String updatedBy) {
+                           String source, long version, Instant updatedAt, String updatedBy,
+                           java.math.BigDecimal standardCost) {
     }
 
     public record Page<T>(List<T> items, String nextCursor) {

@@ -11,7 +11,7 @@ public final class ReferenceData {
 
     public record ItemRef(String ownerId, String itemNo, String siteId, String baseUom, boolean lotControlled,
                           String serialControl, Integer shelfLifeDays, String temperatureClass, boolean hazardous,
-                          String status) {
+                          String status, java.math.BigDecimal standardCost) {
 
         public boolean receivable() {
             return "ACTIVE".equals(status) || "BLOCKED_PROCUREMENT".equals(status);

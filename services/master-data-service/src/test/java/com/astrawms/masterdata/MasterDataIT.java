@@ -170,6 +170,25 @@ class MasterDataIT {
     }
 
     @Test
+    void standardCostIsStoredAndPublished() throws Exception {
+        call(put("/api/v1/items/ACME/SKU-COST"), ITEM.formatted("036000291452").replace("\"status\":\"ACTIVE\",",
+                "\"status\":\"ACTIVE\",\"standardCost\":12.5,"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.standardCost", is(12.5)));
+        JsonNode event = outbox("ItemUpserted").getLast();
+        assertThat(event.get("payload").get("standardCost").decimalValue()).isEqualByComparingTo("12.5");
+        assertThat(event.get("schemaVersion").asString()).isEqualTo("1.1");
+    }
+
+    @Test
+    void itemsOfOtherOwnersAreOutOfScope_G5() throws Exception {
+        mvc.perform(get("/api/v1/items/ACME").with(TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta")
+                        .roles(Roles.RECEIVER).owners("BETA").sign())))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+    }
+
+    @Test
     void onlySolutionAdminsChangeMasterData_G5() throws Exception {
         mvc.perform(put("/api/v1/sites/DC1/locations/L-X").with(TestTokens.as(tenant, "rita", Roles.RECEIVER, Roles.SUPERVISOR))
                         .contentType(MediaType.APPLICATION_JSON).content("""

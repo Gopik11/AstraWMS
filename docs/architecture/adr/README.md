@@ -13,5 +13,6 @@
 | [0009](0009-allocation-in-inventory-and-outbound-flow.md) | Inventory owns allocation (FEFO/FIFO, pick to staging still allocated, issue); outbound orchestrates via pick events; shortfalls reported to the ERP |
 | [0010](0010-token-based-identity-and-api-gateway.md) | OAuth2 resource servers: tenant and user from the token, role checks on every write, approver proof, service-account tokens, Keycloak locally, nginx API gateway |
 | [0011](0011-waves-reallocation-and-reverse-picks.md) | Per-site wave or waveless release with wave plan/create/release; re-allocation after short picks; reverse picks for cancelled picked orders, ERP ack only when stock is back |
+| [0012](0012-attribute-scopes-on-roles.md) | Scope claims on roles: sites, owners (3PL clients), zones and approval value limits; deny when missing; item standard cost |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

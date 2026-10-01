@@ -4,6 +4,7 @@ import com.astrawms.common.security.ApprovalVerifier;
 import com.astrawms.common.security.AstraJwtAuthenticationConverter;
 import com.astrawms.common.security.AstraSecurityProperties;
 import com.astrawms.common.security.EarlyRoleCheckInterceptor;
+import com.astrawms.common.security.PathScopeInterceptor;
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.security.SecuredEndpointsVerifier;
 import com.astrawms.common.security.ServiceCallInterceptor;
@@ -117,18 +118,20 @@ public class AstraSecurityAutoConfiguration {
                         .authenticationEntryPoint(unauthenticated)
                         .accessDeniedHandler(forbidden))
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthenticated).accessDeniedHandler(forbidden))
-                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant()), BearerTokenAuthenticationFilter.class);
+                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant(), converter), BearerTokenAuthenticationFilter.class);
         return http.build();
     }
 
-    /** Role checks before body binding and validation (see {@link EarlyRoleCheckInterceptor}). */
+    /** Role checks, then site/owner path scope checks, before body binding and validation. */
     @Bean
     WebMvcConfigurer astraEarlyRoleCheck() {
-        EarlyRoleCheckInterceptor interceptor = new EarlyRoleCheckInterceptor();
+        EarlyRoleCheckInterceptor roles = new EarlyRoleCheckInterceptor();
+        PathScopeInterceptor scopes = new PathScopeInterceptor();
         return new WebMvcConfigurer() {
             @Override
             public void addInterceptors(InterceptorRegistry registry) {
-                registry.addInterceptor(interceptor);
+                registry.addInterceptor(roles);
+                registry.addInterceptor(scopes);
             }
         };
     }

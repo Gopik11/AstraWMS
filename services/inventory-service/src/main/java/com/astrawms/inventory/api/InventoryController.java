@@ -1,5 +1,6 @@
 package com.astrawms.inventory.api;
 
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.security.ApprovalVerifier;
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.tenancy.TenantFilter;
@@ -83,7 +84,8 @@ public class InventoryController {
                                                   @RequestHeader(value = ApprovalVerifier.APPROVAL_HEADER, required = false)
                                                   String approvalToken,
                                                   @Valid @RequestBody AdjustRequest body) {
-        return created(commands.adjust(siteId, key, body.withApprovedBy(approver(approvalToken, body.approvedBy()))));
+        Approval a = approval(approvalToken, body.approvedBy());
+        return created(commands.adjust(siteId, key, body.withApprovedBy(a.name()), a.scope()));
     }
 
     @PreAuthorize("hasAnyRole('INV_ANALYST','INV_MANAGER','SUPERVISOR','QA_MANAGER','WMS_SERVICE')")
@@ -98,8 +100,8 @@ public class InventoryController {
             throw new ApiException(HttpStatus.FORBIDDEN, "INV_QA_RELEASE_REQUIRED",
                     "Releasing stock from quality inspection requires the QA_MANAGER role");
         }
-        return created(commands.changeStatus(siteId, key,
-                body.withApprovedBy(approver(approvalToken, body.approvedBy()))));
+        Approval a = approval(approvalToken, body.approvedBy());
+        return created(commands.changeStatus(siteId, key, body.withApprovedBy(a.name()), a.scope()));
     }
 
     // ------------------------------------------------------------------ allocation / pick / issue
@@ -116,7 +118,8 @@ public class InventoryController {
     @GetMapping("/allocations")
     public java.util.List<AllocationRepository.Allocation> allocations(@PathVariable String siteId,
                                                                       @RequestParam String orderRef) {
-        return allocationsRepo.byOrder(siteId, orderRef);
+        AccessScope scope = AccessScope.current();
+        return allocationsRepo.byOrder(siteId, orderRef).stream().filter(a -> scope.allowsOwner(a.ownerId())).toList();
     }
 
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR','WMS_SERVICE')")
@@ -198,19 +201,27 @@ public class InventoryController {
 
     // ------------------------------------------------------------------ approvals (NFR-101, §G.5)
 
+    private record Approval(String name, AccessScope scope) {
+    }
+
     /**
-     * The approver must prove their identity with their own fresh sign-in (X-Approval-Token). A plain
-     * {@code approvedBy} name is accepted only from AstraWMS services (e.g. an approval workflow) acting for a user.
+     * The approver must prove their identity with their own fresh sign-in (X-Approval-Token); their site/owner scope
+     * and value limit then apply (§G.5.1). A plain {@code approvedBy} name is accepted only from AstraWMS services
+     * (e.g. an approval workflow) acting for a user, which have checked the approver themselves.
      */
-    private String approver(String approvalToken, String claimedApprover) {
+    private Approval approval(String approvalToken, String claimedApprover) {
         if (approvalToken != null && !approvalToken.isBlank()) {
-            return approvals.approver(approvalToken, Roles.INV_MANAGER, Roles.SUPERVISOR);
+            ApprovalVerifier.Approver a = approvals.approver(approvalToken, Roles.INV_MANAGER, Roles.SUPERVISOR);
+            return new Approval(a.userName(), a.scope());
         }
-        if (claimedApprover != null && !claimedApprover.isBlank() && !isService()) {
-            throw ApiException.unprocessable("INV_APPROVAL_TOKEN_REQUIRED",
-                    "The approver must sign in to approve: send their token in " + ApprovalVerifier.APPROVAL_HEADER);
+        if (claimedApprover != null && !claimedApprover.isBlank()) {
+            if (!isService()) {
+                throw ApiException.unprocessable("INV_APPROVAL_TOKEN_REQUIRED",
+                        "The approver must sign in to approve: send their token in " + ApprovalVerifier.APPROVAL_HEADER);
+            }
+            return new Approval(claimedApprover, AccessScope.UNRESTRICTED);
         }
-        return claimedApprover;
+        return new Approval(null, null);
     }
 
     private static boolean isService() {

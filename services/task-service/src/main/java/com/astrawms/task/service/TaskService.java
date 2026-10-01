@@ -3,6 +3,7 @@ package com.astrawms.task.service;
 import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.OutboxWriter;
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.task.api.TaskDtos.Content;
@@ -346,10 +347,17 @@ public class TaskService {
         if (current.isPresent()) {
             return Optional.of(view(siteId, current.get()));
         }
+        // Only work in the operator's owner and zone scope (§G.5.1); a task's zones are those of its from/to location.
+        AccessScope scope = AccessScope.current();
         Optional<UUID> next = jdbc.sql("""
-                        select id from task where site_id = :site and status = 'RELEASED'
-                        order by priority desc, created_at limit 1 for update skip locked""")
-                .param("site", siteId).query(UUID.class).optional();
+                        select t.id from task t where t.site_id = :site and t.status = 'RELEASED'
+                          and (:ownersAll or t.owner_id in (:owners))
+                          and (:zonesAll or exists (select 1 from ref_location l where l.site_id = t.site_id
+                                 and l.location_id in (t.from_location, t.target_location) and l.zone_id in (:zones)))
+                        order by t.priority desc, t.created_at limit 1 for update of t skip locked""")
+                .param("site", siteId).param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
+                .param("zonesAll", scope.zonesAll()).param("zones", scope.zoneList())
+                .query(UUID.class).optional();
         next.ifPresent(id -> {
             jdbc.sql("update task set status = 'ASSIGNED', assigned_to = :user, assigned_at = :now, updated_at = :now where id = :id")
                     .param("user", user).param("now", Timestamp.from(clock.instant())).param("id", id).update();
@@ -454,8 +462,11 @@ public class TaskService {
     public List<TaskView> list(String siteId, String status) {
         List<UUID> ids = jdbc.sql("""
                         select id from task where site_id = :site and (cast(:status as text) is null or status = :status)
+                          and (:ownersAll or owner_id in (:owners))
                         order by priority desc, created_at limit 500""")
-                .param("site", siteId).param("status", status).query(UUID.class).list();
+                .param("site", siteId).param("status", status)
+                .param("ownersAll", AccessScope.current().ownersAll()).param("owners", AccessScope.current().ownerList())
+                .query(UUID.class).list();
         List<TaskView> views = new ArrayList<>();
         ids.forEach(id -> views.add(view(siteId, id)));
         return views;

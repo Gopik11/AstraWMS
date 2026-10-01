@@ -329,6 +329,24 @@ class TaskIT {
         assertThat(done.get("qtyPicked").decimalValue()).isEqualByComparingTo("4");
     }
 
+    @Test
+    void operatorsOnlyGetWorkInTheirZonesAndOwners_G5() throws Exception {
+        UUID allocation = UUID.randomUUID();
+        pickRequested(allocation, "SO-Z", "A-01", "1");
+        awaitPickTask(allocation, "RELEASED");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(picker(TestTokens.token().zones("FREEZER"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(picker(TestTokens.token().owners("BETA"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(picker(TestTokens.token().zones("Z").owners("ACME"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.allocationId", is(allocation.toString())));
+    }
+
+    private org.springframework.test.web.servlet.request.RequestPostProcessor picker(TestTokens.Builder token) {
+        return TestTokens.bearer(token.tenant(tenant).user("zone-picker").roles(Roles.PICKER).sign());
+    }
+
     private void pickRequested(UUID allocation, String order, String from, String qty) throws Exception {
         location("STAGE-OUT", "STAGING_OUT", null, false, "77", 99);
         send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickRequested.TYPE, "DC1:" + order,

@@ -25,13 +25,14 @@ public class ReferenceRepository {
     public Optional<ItemRef> item(String ownerId, String itemNo, String siteId) {
         return jdbc.sql("""
                         select owner_id, item_no, site_id, base_uom, lot_controlled, serial_control, shelf_life_days,
-                               temperature_class, hazardous, status
+                               temperature_class, hazardous, status, standard_cost
                         from ref_item where owner_id = :owner and item_no = :item and site_id = :site""")
                 .param("owner", ownerId).param("item", itemNo).param("site", siteId)
                 .query((rs, n) -> new ItemRef(rs.getString("owner_id"), rs.getString("item_no"),
                         rs.getString("site_id"), rs.getString("base_uom"), rs.getBoolean("lot_controlled"),
                         rs.getString("serial_control"), (Integer) rs.getObject("shelf_life_days"),
-                        rs.getString("temperature_class"), rs.getBoolean("hazardous"), rs.getString("status")))
+                        rs.getString("temperature_class"), rs.getBoolean("hazardous"), rs.getString("status"),
+                        rs.getBigDecimal("standard_cost")))
                 .optional();
     }
 
@@ -89,14 +90,15 @@ public class ReferenceRepository {
             jdbc.sql("""
                             insert into ref_item (tenant_id, owner_id, item_no, site_id, base_uom, lot_controlled,
                                                   serial_control, shelf_life_days, temperature_class, hazardous,
-                                                  status, source_changed_at)
+                                                  status, source_changed_at, standard_cost)
                             values (:tenant, :owner, :item, :site, :baseUom, :lot, :serial, :shelf, :temp, :haz,
-                                    :status, :changedAt)
+                                    :status, :changedAt, :cost)
                             on conflict (tenant_id, owner_id, item_no, site_id) do update set
                                 base_uom = excluded.base_uom, lot_controlled = excluded.lot_controlled,
                                 serial_control = excluded.serial_control, shelf_life_days = excluded.shelf_life_days,
                                 temperature_class = excluded.temperature_class, hazardous = excluded.hazardous,
-                                status = excluded.status, source_changed_at = excluded.source_changed_at
+                                status = excluded.status, source_changed_at = excluded.source_changed_at,
+                                standard_cost = excluded.standard_cost
                             where ref_item.source_changed_at <= excluded.source_changed_at""")
                     .param("tenant", tenant).param("owner", e.ownerId()).param("item", e.itemNo())
                     .param("site", site.siteId()).param("baseUom", e.baseUom()).param("lot", site.lotControlled())
@@ -104,7 +106,7 @@ public class ReferenceRepository {
                     .param("shelf", e.shelfLifeDays())
                     .param("temp", e.temperatureClass()).param("haz", e.hazardous())
                     .param("status", site.status() != null ? site.status() : e.status())
-                    .param("changedAt", changedAt)
+                    .param("changedAt", changedAt).param("cost", e.standardCost())
                     .update();
         }
         jdbc.sql("delete from ref_item_uom where owner_id = :owner and item_no = :item")

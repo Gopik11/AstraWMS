@@ -61,9 +61,9 @@ public class ItemService {
         jdbc.sql("""
                         insert into item (tenant_id, owner_id, item_no, description, base_uom, item_type, status,
                                           shelf_life_days, min_remaining_shelf_life_days, temperature_class, hazardous,
-                                          source, source_changed_at, version, updated_at, updated_by)
+                                          source, source_changed_at, version, updated_at, updated_by, standard_cost)
                         values (:tenant, :owner, :item, :description, :baseUom, :itemType, :status, :shelf, :minShelf,
-                                :temp, :haz, :source, :changedAt, 0, :now, :user)
+                                :temp, :haz, :source, :changedAt, 0, :now, :user, :cost)
                         on conflict (tenant_id, owner_id, item_no) do update set
                             description = excluded.description, base_uom = excluded.base_uom,
                             item_type = excluded.item_type, status = excluded.status,
@@ -72,14 +72,14 @@ public class ItemService {
                             temperature_class = excluded.temperature_class, hazardous = excluded.hazardous,
                             source = excluded.source, source_changed_at = excluded.source_changed_at,
                             version = item.version + 1, updated_at = excluded.updated_at,
-                            updated_by = excluded.updated_by""")
+                            updated_by = excluded.updated_by, standard_cost = excluded.standard_cost""")
                 .param("tenant", scope.tenantId()).param("owner", ownerId).param("item", itemNo)
                 .param("description", r.description()).param("baseUom", r.baseUom()).param("itemType", r.itemType())
                 .param("status", r.status().name()).param("shelf", r.shelfLifeDays())
                 .param("minShelf", r.minRemainingShelfLifeDays()).param("temp", r.temperatureClass())
                 .param("haz", r.hazardous()).param("source", "ERP".equals(scope.channel()) ? "ERP" : "API")
                 .param("changedAt", Timestamp.from(sourceChangedAt)).param("now", Timestamp.from(now))
-                .param("user", scope.userId())
+                .param("user", scope.userId()).param("cost", r.standardCost())
                 .update();
 
         jdbc.sql("delete from item_site where owner_id = :owner and item_no = :item")
@@ -119,7 +119,7 @@ public class ItemService {
                         r.sites().stream().map(s -> new ItemUpserted.Site(s.siteId(), s.lotControlled(),
                                 s.serialControl().name(), s.status() == null ? null : s.status().name())).toList(),
                         uoms.stream().map(u -> new ItemUpserted.Uom(u.uom(), u.numerator(), u.denominator())).toList(),
-                        sourceChangedAt)));
+                        sourceChangedAt, r.standardCost())));
         return get(ownerId, itemNo);
     }
 
@@ -144,7 +144,7 @@ public class ItemService {
         return jdbc.sql("""
                         select owner_id, item_no, description, base_uom, item_type, status, shelf_life_days,
                                min_remaining_shelf_life_days, temperature_class, hazardous, source, version,
-                               updated_at, updated_by
+                               updated_at, updated_by, standard_cost
                         from item where owner_id = :owner and item_no = :item""")
                 .param("owner", ownerId).param("item", itemNo)
                 .query((rs, n) -> new ItemView(rs.getString("owner_id"), rs.getString("item_no"),
@@ -152,7 +152,8 @@ public class ItemService {
                         ItemStatus.valueOf(rs.getString("status")), (Integer) rs.getObject("shelf_life_days"),
                         (Integer) rs.getObject("min_remaining_shelf_life_days"), rs.getString("temperature_class"),
                         rs.getBoolean("hazardous"), sites, uoms, rs.getString("source"), rs.getLong("version"),
-                        rs.getTimestamp("updated_at").toInstant(), rs.getString("updated_by")))
+                        rs.getTimestamp("updated_at").toInstant(), rs.getString("updated_by"),
+                        rs.getBigDecimal("standard_cost")))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("MD_ITEM_UNKNOWN", "Item " + itemNo + " of owner " + ownerId + " not found"));
     }

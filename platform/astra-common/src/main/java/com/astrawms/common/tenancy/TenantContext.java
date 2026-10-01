@@ -1,5 +1,6 @@
 package com.astrawms.common.tenancy;
 
+import com.astrawms.common.security.AccessScope;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 
@@ -13,11 +14,22 @@ import java.util.concurrent.Callable;
  */
 public final class TenantContext {
 
-    public record Scope(String tenantId, String userId, String channel) {
+    /**
+     * @param access the user's site / owner / zone / approval-value constraints; unrestricted for service accounts,
+     *               message consumers and jobs
+     */
+    public record Scope(String tenantId, String userId, String channel, AccessScope access) {
         public Scope {
             if (tenantId == null || tenantId.isBlank()) {
                 throw new IllegalArgumentException("tenantId is required");
             }
+            if (access == null) {
+                access = AccessScope.UNRESTRICTED;
+            }
+        }
+
+        public Scope(String tenantId, String userId, String channel) {
+            this(tenantId, userId, channel, AccessScope.UNRESTRICTED);
         }
     }
 

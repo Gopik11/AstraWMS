@@ -4,7 +4,7 @@
 |---|---|
 | Interface ID | IF-MD-001 |
 | Name | Item / Material Master (ERP → WMS) |
-| Version / Status | 0.1 — Draft for design review |
+| Version / Status | 0.2 — Draft for design review |
 | Direction | Inbound to AstraWMS |
 | Source → Target | ERP → Middleware → AstraWMS (Master Data service) |
 | Pattern | Asynchronous publish (change-driven) + nightly delta sweep + bulk initial load |
@@ -97,6 +97,7 @@ Card = cardinality; Req: M mandatory, C conditional, O optional. **PII** fields 
 | item.handling.hazardous | boolean | 0..1 | O | True if a DG/hazardous indicator is set in ERP |
 | item.handling.dgProfile | string(20) | 0..1 | C | ERP DG profile/hazard reference; key for DG master extract |
 | item.catchWeight | boolean | 0..1 | O | Catch-weight / dual-UoM item |
+| item.valuation.standardCost | decimal(18,4) | 0..1 | O | Value of one base unit in the tenant's reporting currency; used for approval value limits (§G.5.1). Converted to the base UoM and price unit by the adapter |
 | item.sourceChangedAtUtc | date-time | 1 | M | ERP change timestamp; used for stale-message rule (ISD-00 §5) |
 
 ## 5. Field Mapping
@@ -126,6 +127,7 @@ Card = cardinality; Req: M mandatory, C conditional, O optional. **PII** fields 
 | item.handling.storageCondition | E1MARAM-RAUBE | DFF/EFF *(confirm)* | EFF *(confirm)* | Value map |
 | item.handling.hazardous / dgProfile | E1MARAM-PROFL (DG indicator profile) | HAZARD_CLASS_ID / UN_NUMBER_ID not null | HazardClass / UNNumber attributes *(confirm)* |  |
 | item.catchWeight | S/4 CWM active for material *(confirm field)* | TRACKING_QUANTITY_IND = 'PS' (dual UoM) | TrackingUOMValue = Primary and secondary |  |
+| item.valuation.standardCost | E1MBEWM-STPRS (price control S) or E1MBEWM-VERPR (V) ÷ PEINH, valuation area = mapped plant; requires the MBEW segment in the reduced message type | CST_ITEM_COSTS.ITEM_COST (Frozen cost type) *(confirm)* | Item standard cost (Cost Accounting) *(confirm resource)* | Converted to the tenant reporting currency if the valuation currency differs |
 | item.sourceChangedAtUtc | Change pointer timestamp (BDCP2-CRETIME) / A_Product.LastChangeDateTime | LAST_UPDATE_DATE (converted to UTC) | LastUpdateDateTime |  |
 
 ### 5.1 Serial Control Mapping
@@ -190,9 +192,11 @@ Error classes and default retry behaviour: ISD-00 §6.
 | 3 | S/4 product business event name and payload in customer release | SAP integration lead |
 | 4 | Fusion resource for UoM conversions and GTINs | Oracle integration lead |
 | 5 | Temperature/storage condition value maps | Warehouse process owner |
+| 6 | Valuation source per ERP (standard vs moving average price), the valuation area for multi-plant items, and the tenant reporting currency | Finance / ERP functional lead |
 
 ## Change Log
 
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-30 | Initial draft generated from scope §D |
+| 0.2 | 2026-10-01 | Added `item.valuation.standardCost` (approval value limits, ADR-0012) |
