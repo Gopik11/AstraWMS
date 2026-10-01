@@ -172,6 +172,33 @@ class SapAdapterIT {
         assertThat(call.get("GOODSMVT_ITEM").get(0).get("PLANT").asString()).isEqualTo("1000");
     }
 
+    @Test
+    void outboundDeliveryBecomesOrderAndShipmentPostsGoodsIssue_IFOB001_IFOB003() throws Exception {
+        call(post("/api/v1/sap/idocs/delvry07"), """
+                {"DOCNUM":"0000000000000201","MESTYP":"SHP_OBDLV_SAVE_REPLICA",
+                 "E1EDL20":{"VBELN":"0080000201","LFART":"LF","WERKS":"1000"},
+                 "E1ADRM1":[{"PARTNER_Q":"WE","PARTNER_ID":"C-1","NAME1":"Customer One"}],
+                 "E1EDL24":[{"POSNR":"000010","MATNR":"SKU-1","LFIMG":"5","VRKME":"ST"}]}""")
+                .andExpect(status().isAccepted());
+        JsonNode order = outbox(com.astrawms.common.contracts.OutboundContracts.OutboundOrder.TYPE).getFirst();
+        assertThat(order.get("businessKey").asString()).isEqualTo("DC1:0080000201");
+        assertThat(order.get("payload").get("shipTo").get("name").asString()).isEqualTo("Customer One");
+
+        String txn = "W1M3S5G8745800B1";
+        send(com.astrawms.common.contracts.OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS,
+                com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.TYPE, "DC1:0080000201", "ASTRAWMS",
+                new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation(txn, "0080000201", Instant.now(),
+                        "UPSN", "1Z1", null,
+                        List.of(new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.Line("000010",
+                                "SKU-1", new BigDecimal("5"), "EA", List.of(), null, null))));
+        JsonNode result = awaitResult(txn, 1).getFirst();
+        assertThat(result.get("success").asBoolean()).isTrue();
+        assertThat(result.get("sourceMessageType").asString()).isEqualTo("ShipmentConfirmation");
+        String docType = queryAsTenant(() -> jdbc.sql("select doc_type from mock_sap_document where xblnr = :x")
+                .param("x", txn).query(String.class).single());
+        assertThat(docType).isEqualTo("GI_OUTBOUND_DELIVERY");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private ReceiptConfirmation confirmation(String txn, String vbeln) {

@@ -1,4 +1,4 @@
-# Local AstraWMS stack: Postgres 16, single-node Kafka (KRaft), master-data, inventory, inbound and task services,
+# Local AstraWMS stack: Postgres 16, single-node Kafka (KRaft), master-data, inventory, inbound, task and outbound services,
 # and the SAP adapter with its simulated SAP backend.
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #   scripts/smoke-test.sh && scripts/smoke-inbound.sh
@@ -30,7 +30,7 @@ services:
     entrypoint: ["sh", "-c"]
     command:
       - |
-        for db in masterdata inventory inbound sapadapter tasks; do
+        for db in masterdata inventory inbound sapadapter tasks outbound; do
           psql -h postgres -U postgres -tAc "select 1 from pg_database where datname = '$$db'" | grep -q 1             || psql -h postgres -U postgres -c "create database $$db owner astra_owner"
         done
     restart: "no"
@@ -119,6 +119,24 @@ services:
       INVENTORY_URL: http://inventory-service:8080
     ports:
       - "8084:8080"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+
+  outbound-service:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        MODULE: outbound-service
+    environment:
+      <<: *service-env
+      DB_NAME: outbound
+      INVENTORY_URL: http://inventory-service:8080
+    ports:
+      - "8085:8080"
     depends_on:
       db-init:
         condition: service_completed_successfully

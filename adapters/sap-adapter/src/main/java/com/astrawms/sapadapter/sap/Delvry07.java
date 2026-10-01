@@ -22,6 +22,13 @@ public record Delvry07(
 
     public static final String SAVE_REPLICA = "SHP_IBDLV_SAVE_REPLICA";
     public static final String CHANGE = "SHP_IBDLV_CHANGE";
+    public static final String OB_SAVE_REPLICA = "SHP_OBDLV_SAVE_REPLICA";
+    public static final String OB_CHANGE = "SHP_OBDLV_CHANGE";
+
+    /** Outbound deliveries (IF-OB-001) use the SHP_OBDLV_* message types; inbound ones SHP_IBDLV_*. */
+    public boolean outbound() {
+        return mestyp != null && mestyp.startsWith("SHP_OBDLV");
+    }
 
     /** Delivery header. */
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -35,9 +42,14 @@ public record Delvry07(
     public record E1edl18(@JsonProperty("QUALF") String qualf) {
     }
 
-    /** Partner: PARTNER_Q LF = vendor, SP = carrier. */
+    /** Partner: PARTNER_Q LF = vendor, SP = carrier, WE = ship-to (with name/address for the snapshot). */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record E1adrm1(@JsonProperty("PARTNER_Q") String partnerQ, @JsonProperty("PARTNER_ID") String partnerId) {
+    public record E1adrm1(@JsonProperty("PARTNER_Q") String partnerQ, @JsonProperty("PARTNER_ID") String partnerId,
+                          @JsonProperty("NAME1") String name1, @JsonProperty("CITY1") String city1,
+                          @JsonProperty("COUNTRY1") String country1) {
+        public E1adrm1(String partnerQ, String partnerId) {
+            this(partnerQ, partnerId, null, null, null);
+        }
     }
 
     /** Deadline: QUALF 007 = delivery date; NTANF yyyyMMdd, NTANZ HHmmss in plant local time. */

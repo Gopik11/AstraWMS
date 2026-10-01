@@ -42,6 +42,12 @@ public class MockSapGateway implements SapGateway {
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW, noRollbackFor = SapTransientException.class)
+    public Result confirmOutboundDelivery(Bapi.OutbDeliveryConfirmDec call) {
+        return post("GI_OUTBOUND_DELIVERY", call.wmsTxnId(), call.delivery(), call.delivery(), call);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW, noRollbackFor = SapTransientException.class)
     public Result createGoodsMovement(Bapi.GoodsmvtCreate call) {
         String material = call.items().isEmpty() ? "" : call.items().getFirst().material();
         return post("GOODS_MOVEMENT", call.header().refDocNo(), null, material, call);

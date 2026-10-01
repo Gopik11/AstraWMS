@@ -52,6 +52,41 @@ public class HttpInventoryClient implements InventoryClient {
         }
     }
 
+    @Override
+    public UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,
+                     String toLpnId, java.util.List<String> serials, boolean shortClose) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("qty", qty);
+        body.put("toLocationId", toLocationId);
+        body.put("toLpnId", toLpnId);
+        body.put("serials", serials);
+        body.put("shortClose", shortClose);
+        return post("/api/v1/sites/{site}/inventory/allocations/" + allocationId + "/pick", siteId, idempotencyKey, body);
+    }
+
+    private UUID post(String path, String siteId, String idempotencyKey, Object payload) {
+        TenantContext.Scope scope = TenantContext.require();
+        try {
+            JsonNode body = rest.post()
+                    .uri(path, siteId)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .header(TenantFilter.TENANT_HEADER, scope.tenantId())
+                    .header(TenantFilter.USER_HEADER, scope.userId())
+                    .header(TenantFilter.CHANNEL_HEADER, scope.channel())
+                    .header("Idempotency-Key", idempotencyKey)
+                    .body(payload)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (request, response) -> {
+                        throw translate(response.getStatusCode(), response.getBody().readAllBytes());
+                    })
+                    .body(JsonNode.class);
+            return UUID.fromString(body.get("operationId").asString());
+        } catch (ResourceAccessException e) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "TSK_INVENTORY_UNAVAILABLE",
+                    "Inventory service unreachable; confirm again");
+        }
+    }
+
     private ApiException translate(HttpStatusCode status, byte[] body) {
         if (status.is5xxServerError()) {
             return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "TSK_INVENTORY_UNAVAILABLE",

@@ -56,6 +56,16 @@ public class AdapterConfig {
     }
 
     @Bean
+    NewTopic outboundOrdersTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.OutboundContracts.TOPIC_OUTBOUND_ORDERS).partitions(6).replicas(1).build();
+    }
+
+    @Bean
+    NewTopic shipmentConfirmationsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS).partitions(6).replicas(1).build();
+    }
+
+    @Bean
     NewTopic postingResultsTopic() {
         return TopicBuilder.name(IntegrationContracts.TOPIC_ERP_POSTING_RESULTS).partitions(6).replicas(1).build();
     }

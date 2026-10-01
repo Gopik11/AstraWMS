@@ -48,6 +48,12 @@ public class TaskController {
         return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit());
     }
 
+    @PostMapping("/{taskId}/pick")
+    public TaskView pick(@PathVariable String siteId, @PathVariable UUID taskId,
+                         @Valid @RequestBody TaskDtos.PickConfirmRequest body) {
+        return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.qty(), body.serials());
+    }
+
     @PostMapping("/{taskId}/exception")
     public TaskView exception(@PathVariable String siteId, @PathVariable UUID taskId,
                               @Valid @RequestBody ExceptionRequest body) {

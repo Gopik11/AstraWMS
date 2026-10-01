@@ -22,6 +22,19 @@ import com.astrawms.inventory.persistence.InventoryRepository.Reason;
 import com.astrawms.inventory.persistence.InventoryRepository.StoredOperation;
 import com.astrawms.inventory.persistence.InventoryRepository.TxnLine;
 import com.astrawms.inventory.persistence.SerialRepository;
+import com.astrawms.inventory.persistence.AllocationRepository;
+import com.astrawms.inventory.persistence.AllocationRepository.Allocation;
+import com.astrawms.inventory.api.AllocationDtos.AllocateRequest;
+import com.astrawms.inventory.api.AllocationDtos.AllocationResult;
+import com.astrawms.inventory.api.AllocationDtos.AllocationView;
+import com.astrawms.inventory.api.AllocationDtos.IssueRequest;
+import com.astrawms.inventory.api.AllocationDtos.IssueResult;
+import com.astrawms.inventory.api.AllocationDtos.IssuedLine;
+import com.astrawms.inventory.api.AllocationDtos.LotQty;
+import com.astrawms.inventory.api.AllocationDtos.PickRequest;
+import com.astrawms.inventory.api.AllocationDtos.ReleaseRequest;
+import com.astrawms.inventory.api.AllocationDtos.ReleaseResult;
+import com.astrawms.inventory.api.AllocationDtos.Rotation;
 import com.astrawms.inventory.reference.ReferenceData.ItemRef;
 import com.astrawms.inventory.reference.ReferenceData.LocationRef;
 import com.astrawms.inventory.reference.ReferenceRepository;
@@ -58,16 +71,19 @@ public class InventoryCommandService {
 
     private final InventoryRepository repo;
     private final SerialRepository serials;
+    private final AllocationRepository allocations;
     private final ReferenceRepository refs;
     private final OutboxWriter outbox;
     private final JsonMapper json;
     private final Clock clock;
     private final Topics topics;
 
-    public InventoryCommandService(InventoryRepository repo, SerialRepository serials, ReferenceRepository refs,
-                                   OutboxWriter outbox, JsonMapper json, Clock clock, Topics topics) {
+    public InventoryCommandService(InventoryRepository repo, SerialRepository serials, AllocationRepository allocations,
+                                   ReferenceRepository refs, OutboxWriter outbox, JsonMapper json, Clock clock,
+                                   Topics topics) {
         this.repo = repo;
         this.serials = serials;
+        this.allocations = allocations;
         this.refs = refs;
         this.outbox = outbox;
         this.json = json;
@@ -181,6 +197,166 @@ public class InventoryCommandService {
                 ErpMovementType.forStatusChange(r.fromStatus(), r.toStatus()).ifPresent(type ->
                         ctx.erp(type, item, qty, lot, r.fromStatus(), location.erpBucket(), null, sn));
             }
+        });
+    }
+
+    // =====================================================================================================
+    // Allocation, pick, issue (scope §3.4, §4, §5)
+    // =====================================================================================================
+
+    /**
+     * Reserves stock for an order line by rotation (FEFO default, FIFO), never from staging locations (PUT-006).
+     * A shortfall is returned as {@code shortQty}; the caller applies its short-allocation rule (OUT-EX-01).
+     */
+    @Transactional
+    public AllocationResult allocate(String siteId, String idempotencyKey, AllocateRequest r) {
+        return idempotentValue(siteId, idempotencyKey, "ALLOCATE", r, AllocationResult.class, ctx -> {
+            ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
+            BigDecimal wanted = toBase(item, r.qty(), r.uom());
+            String lot = blank(r.lotNo()) ? null : r.lotNo().trim();
+            boolean fefo = r.rotation() != Rotation.FIFO;
+            BigDecimal remaining = wanted;
+            List<AllocationView> views = new ArrayList<>();
+            for (AllocationRepository.Candidate c : allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
+                    r.minExpiryDate(), fefo)) {
+                if (remaining.signum() == 0) {
+                    break;
+                }
+                BigDecimal take = c.free().min(remaining);
+                allocations.reserve(c.key(), take);
+                UUID id = UUID.randomUUID();
+                allocations.insert(id, c.key(), r.orderRef(), r.orderLineRef(), take, ctx.now);
+                views.add(new AllocationView(id, c.key().locationId(), c.key().lpnId(), c.key().lotNo(), take, c.expiry()));
+                remaining = remaining.subtract(take);
+            }
+            return new AllocationResult(r.orderRef(), r.orderLineRef(), r.itemNo(), item.baseUom(), wanted,
+                    wanted.subtract(remaining), remaining, views, false);
+        });
+    }
+
+    /**
+     * Picks (part of) an allocation into outbound staging. The stock stays allocated at the destination so it can
+     * never be re-allocated; serials must be at the source (INB-006); a short close releases the remainder (PCK-003).
+     */
+    @Transactional
+    public OperationResult pick(String siteId, UUID allocationId, String idempotencyKey, PickRequest r) {
+        return idempotent(siteId, idempotencyKey, "PICK", java.util.Map.of("allocation", allocationId, "request", r), ctx -> {
+            Allocation a = allocations.lock(siteId, allocationId).orElseThrow(() ->
+                    ApiException.notFound("INV_ALLOCATION_UNKNOWN", "Allocation " + allocationId + " not found"));
+            if (!"OPEN".equals(a.status())) {
+                throw ApiException.unprocessable("INV_ALLOCATION_NOT_OPEN", "Allocation is " + a.status());
+            }
+            BigDecimal qty = checkScale(r.qty());
+            if (qty.compareTo(a.open()) > 0) {
+                throw ApiException.unprocessable("INV_PICK_QTY_EXCEEDS",
+                        "Pick of " + qty.toPlainString() + " exceeds the open allocation of " + a.open().toPlainString());
+            }
+            if (qty.signum() == 0 && !r.shortClose()) {
+                throw ApiException.unprocessable("INV_ZERO_QTY", "A zero pick is only allowed with shortClose");
+            }
+            ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+            List<String> sn = qty.signum() == 0 ? List.of() : serialsFor(item, qty, r.serials());
+            BalanceKey from = a.sourceKey();
+            requireSerialsAt(from, sn);
+            Map<String, LocationRef> locs = lockLocations(siteId, List.of(from.locationId(), r.toLocationId()));
+            LocationRef fromLoc = locs.get(from.locationId());
+            LocationRef toLoc = locs.get(r.toLocationId());
+            requireActive(toLoc);
+            String toLpn = ensureLpn(siteId, r.toLpnId(), a.ownerId(), toLoc.locationId());
+            if (a.pickedLocation() != null && (!a.pickedLocation().equals(toLoc.locationId()) || !a.pickedLpn().equals(toLpn))) {
+                throw ApiException.unprocessable("INV_PICK_DESTINATION_CHANGED",
+                        "Earlier picks of this allocation went to " + a.pickedLocation() + " / " + a.pickedLpn());
+            }
+            BigDecimal picked = a.qtyPicked().add(qty);
+            if (qty.signum() > 0) {
+                Balance source = repo.find(from).orElseThrow(() -> noStock(from));
+                BigDecimal after = allocations.takeAllocated(from, qty).orElseThrow(() ->
+                        ApiException.conflict("INV_ALLOCATION_INCONSISTENT", "Allocated stock no longer at " + from.locationId()));
+                ctx.line(TxnType.PICK_OUT, from, qty.negate(), after, sn);
+                BalanceKey to = from.withLocation(toLoc.locationId(), toLpn);
+                ctx.line(TxnType.PICK_IN, to, qty, allocations.putAllocated(to, qty, source.expiryDate(), source.receiptDate()), sn);
+                serials.transfer(sn, to, ctx.operationId, ctx.now);
+                if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
+                    ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, from.lotNo(), StockStatus.AVAILABLE,
+                            fromLoc.erpBucket(), toLoc.erpBucket(), sn);
+                }
+            }
+            BigDecimal allocated = a.qtyAllocated();
+            if (r.shortClose() && allocated.compareTo(picked) > 0) {
+                allocations.unreserve(from, allocated.subtract(picked));
+                allocated = picked;
+            }
+            String status = picked.signum() == 0 ? "RELEASED" : picked.compareTo(allocated) == 0 ? "PICKED" : "OPEN";
+            allocations.recordPick(a.id(), picked, allocated, picked.signum() == 0 ? null : toLoc.locationId(),
+                    picked.signum() == 0 ? null : toLpn, status, ctx.now);
+            ctx.sourceDoc = a.orderRef() + "/" + a.orderLineRef();
+        });
+    }
+
+    /** Issues all picked allocations of an order at shipment; serials leave stock as SHIPPED (SHP-007). */
+    @Transactional
+    public IssueResult issue(String siteId, String idempotencyKey, IssueRequest r) {
+        return idempotentValue(siteId, idempotencyKey, "ISSUE", r, IssueResult.class, ctx -> {
+            List<Allocation> all = allocations.lockByOrder(siteId, r.orderRef());
+            if (all.stream().anyMatch(a -> "OPEN".equals(a.status()))) {
+                throw ApiException.unprocessable("INV_ALLOCATIONS_OPEN",
+                        "Order " + r.orderRef() + " still has open allocations; pick or release them first");
+            }
+            List<Allocation> picked = all.stream().filter(a -> "PICKED".equals(a.status())).toList();
+            if (picked.isEmpty()) {
+                throw ApiException.unprocessable("INV_NOTHING_TO_ISSUE", "Order " + r.orderRef() + " has no picked stock");
+            }
+            Map<BalanceKey, java.util.Deque<String>> serialPool = new java.util.HashMap<>();
+            Map<String, IssuedLine> lines = new LinkedHashMap<>();
+            for (Allocation a : picked) {
+                ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+                BalanceKey key = a.pickedKey();
+                List<String> sn = new ArrayList<>();
+                if (item.serialTracked()) {
+                    java.util.Deque<String> pool = serialPool.computeIfAbsent(key, k -> new java.util.ArrayDeque<>(serials.atKey(k)));
+                    for (int i = 0; i < a.qtyPicked().intValue() && !pool.isEmpty(); i++) {
+                        sn.add(pool.poll());
+                    }
+                }
+                BigDecimal after = allocations.takeAllocated(key, a.qtyPicked()).orElseThrow(() ->
+                        ApiException.conflict("INV_ALLOCATION_INCONSISTENT", "Picked stock no longer at " + key.locationId()));
+                ctx.line(TxnType.ISSUE, key, a.qtyPicked().negate(), after, sn);
+                serials.ship(a.ownerId(), a.itemNo(), sn, ctx.operationId, ctx.now);
+                allocations.setStatus(a.id(), "ISSUED", ctx.now);
+                IssuedLine prev = lines.get(a.orderLineRef());
+                List<LotQty> lots = new ArrayList<>(prev == null ? List.of() : prev.lots());
+                if (!a.lotNo().isEmpty()) {
+                    lots.add(new LotQty(a.lotNo(), a.qtyPicked()));
+                }
+                List<String> allSerials = new ArrayList<>(prev == null ? List.of() : prev.serials());
+                allSerials.addAll(sn);
+                lines.put(a.orderLineRef(), new IssuedLine(a.orderLineRef(), a.itemNo(),
+                        (prev == null ? BigDecimal.ZERO : prev.qty()).add(a.qtyPicked()), item.baseUom(), lots, allSerials));
+            }
+            ctx.sourceDoc = r.orderRef();
+            return new IssueResult(r.orderRef(), new ArrayList<>(lines.values()), false);
+        });
+    }
+
+    /** Releases the open (unpicked) allocations of an order, e.g. on cancellation (OUT-EX-02). */
+    @Transactional
+    public ReleaseResult release(String siteId, String idempotencyKey, ReleaseRequest r) {
+        return idempotentValue(siteId, idempotencyKey, "RELEASE", r, ReleaseResult.class, ctx -> {
+            int count = 0;
+            BigDecimal qty = BigDecimal.ZERO;
+            for (Allocation a : allocations.lockByOrder(siteId, r.orderRef())) {
+                if ("PICKED".equals(a.status()) || a.qtyPicked().signum() > 0) {
+                    throw ApiException.unprocessable("INV_ORDER_PICKED",
+                            "Order " + r.orderRef() + " has picked stock; return it to stock before releasing");
+                }
+                if ("OPEN".equals(a.status())) {
+                    allocations.unreserve(a.sourceKey(), a.open());
+                    allocations.setStatus(a.id(), "RELEASED", ctx.now);
+                    count++;
+                    qty = qty.add(a.open());
+                }
+            }
+            return new ReleaseResult(r.orderRef(), count, qty, false);
         });
     }
 
@@ -549,6 +725,53 @@ public class InventoryCommandService {
         OperationResult result = finish(ctx);
         repo.saveResponse(ctx.operationId, json.writeValueAsString(result));
         return result;
+    }
+
+    /**
+     * Idempotent execution returning a custom result type. Ledger lines and events the body adds are written exactly
+     * as for {@link #idempotent}.
+     */
+    private <T> T idempotentValue(String siteId, String idempotencyKey, String opType, Object request, Class<T> type,
+                                  java.util.function.Function<OpContext, T> body) {
+        if (blank(idempotencyKey) || idempotencyKey.length() > MAX_IDEMPOTENCY_KEY) {
+            throw ApiException.badRequest("IDEMPOTENCY_KEY_INVALID",
+                    "Header Idempotency-Key is required (1-" + MAX_IDEMPOTENCY_KEY + " characters)");
+        }
+        String hash = sha256(opType + "|" + siteId + "|" + json.writeValueAsString(request));
+        Optional<StoredOperation> existing = repo.findOperation(idempotencyKey);
+        if (existing.isEmpty()) {
+            TenantContext.Scope scope = TenantContext.require();
+            OpContext ctx = new OpContext(UUID.randomUUID(), WmsTxnId.next(clock), opType, siteId, scope, clock.instant());
+            if (repo.insertOperation(ctx.operationId, siteId, idempotencyKey, hash, opType, ctx.wmsTxnId, ctx.userId,
+                    ctx.channel, ctx.now)) {
+                T result = body.apply(ctx);
+                if (!ctx.lines.isEmpty() || !ctx.movements.isEmpty()) {
+                    finish(ctx);
+                }
+                repo.saveResponse(ctx.operationId, json.writeValueAsString(result));
+                return result;
+            }
+            existing = repo.findOperation(idempotencyKey);
+        }
+        StoredOperation op = existing.orElseThrow();
+        if (!op.requestHash().equals(hash)) {
+            throw ApiException.unprocessable("IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for a different request");
+        }
+        if (op.responseJson() == null) {
+            throw ApiException.conflict("OPERATION_IN_PROGRESS", "The original request is still being processed");
+        }
+        T stored = json.readValue(op.responseJson(), type);
+        return replayed(stored);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T replayed(T value) {
+        return switch (value) {
+            case AllocationResult a -> (T) a.asReplay();
+            case IssueResult i -> (T) i.asReplay();
+            case ReleaseResult r -> (T) r.asReplay();
+            default -> value;
+        };
     }
 
     private OperationResult replay(StoredOperation op, String hash) {

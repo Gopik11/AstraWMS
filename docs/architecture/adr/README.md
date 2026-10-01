@@ -10,5 +10,6 @@
 | [0006](0006-erp-adapter-architecture.md) | ERP adapters: pure mapping code, `SapGateway` boundary, simulated SAP backend, posting results and application acks |
 | [0007](0007-dead-letter-topics-and-messaging-housekeeping.md) | Platform consumer error policy: backoff, then `<topic>.dlq`; outbox/inbox retention purge |
 | [0008](0008-directed-putaway-and-task-model.md) | Task service with directed putaway from event-carried projections; reservations, RF check-digit confirmation, re-planning |
+| [0009](0009-allocation-in-inventory-and-outbound-flow.md) | Inventory owns allocation (FEFO/FIFO, pick to staging still allocated, issue); outbound orchestrates via pick events; shortfalls reported to the ERP |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

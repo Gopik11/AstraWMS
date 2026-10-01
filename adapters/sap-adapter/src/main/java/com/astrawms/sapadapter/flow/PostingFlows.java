@@ -4,6 +4,7 @@ import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ErpPostingResult;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.sapadapter.config.SapProperties;
@@ -55,6 +56,20 @@ public class PostingFlows {
                     gateway.confirmInboundDelivery(call));
         } catch (MappingException e) {
             result = mappingFailure(confirmation.wmsTxnId(), ReceiptConfirmation.TYPE, confirmation.erpDocNo(), e);
+        }
+        publish(envelope, result);
+    }
+
+    @Transactional
+    public void confirmShipment(EventEnvelope envelope, OutboundContracts.ShipmentConfirmation confirmation) {
+        ErpPostingResult result;
+        try {
+            Bapi.OutbDeliveryConfirmDec call = BapiMapper.confirmOutbound(confirmation);
+            result = toResult(confirmation.wmsTxnId(), OutboundContracts.ShipmentConfirmation.TYPE, confirmation.erpDocNo(),
+                    gateway.confirmOutboundDelivery(call));
+        } catch (MappingException e) {
+            result = mappingFailure(confirmation.wmsTxnId(), OutboundContracts.ShipmentConfirmation.TYPE,
+                    confirmation.erpDocNo(), e);
         }
         publish(envelope, result);
     }

@@ -112,6 +112,31 @@ public class SerialRepository {
         return itemNo + "|" + lotNo + "|" + stockStatus;
     }
 
+    /** IN_STOCK serials at exactly this balance key, in serial order. */
+    public List<String> atKey(BalanceKey k) {
+        return jdbc.sql("""
+                        select serial_no from serial_number
+                        where owner_id = :owner and item_no = :item and status = 'IN_STOCK' and site_id = :site
+                          and location_id = :loc and lpn_id = :lpn and lot_no = :lot and stock_status = :status
+                        order by serial_no for update""")
+                .param("owner", k.ownerId()).param("item", k.itemNo()).param("site", k.siteId())
+                .param("loc", k.locationId()).param("lpn", k.lpnId()).param("lot", k.lotNo())
+                .param("status", k.status().name())
+                .query(String.class).list();
+    }
+
+    /** Serials leave stock at shipment. */
+    public void ship(String ownerId, String itemNo, List<String> serials, UUID operationId, Instant now) {
+        if (serials.isEmpty()) {
+            return;
+        }
+        jdbc.sql("""
+                        update serial_number set status = 'SHIPPED', last_operation_id = :op, updated_at = :now
+                        where owner_id = :owner and item_no = :item and serial_no in (:serials)""")
+                .param("op", operationId).param("now", Timestamp.from(now)).param("owner", ownerId)
+                .param("item", itemNo).param("serials", serials).update();
+    }
+
     /** Whole-LPN move: all serials in the LPN follow it. */
     public List<MovedSerial> relocateLpn(String siteId, String lpnId, String toLocation, UUID operationId, Instant now) {
         return jdbc.sql("""

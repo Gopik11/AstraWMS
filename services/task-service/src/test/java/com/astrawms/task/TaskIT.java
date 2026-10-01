@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.astrawms.common.contracts.InventoryContracts;
 import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.common.contracts.MasterDataEvents;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.contracts.MasterDataEvents.ItemUpserted;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.common.messaging.EventEnvelope;
@@ -55,7 +56,21 @@ class TaskIT {
         record Move(String key, String lpn, String from, String to) {
         }
 
+        record Pick(String key, UUID allocation, BigDecimal qty, String to, String toLpn, List<String> serials,
+                    boolean shortClose) {
+        }
+
         final List<Move> moves = new CopyOnWriteArrayList<>();
+        final List<Pick> picks = new CopyOnWriteArrayList<>();
+
+        @Override
+        public UUID pick(String siteId, String key, UUID allocationId, BigDecimal qty, String to, String toLpn,
+                         List<String> serials, boolean shortClose) {
+            if (picks.stream().noneMatch(p -> p.key().equals(key))) {
+                picks.add(new Pick(key, allocationId, qty, to, toLpn, serials, shortClose));
+            }
+            return UUID.nameUUIDFromBytes(key.getBytes());
+        }
 
         @Override
         public UUID moveLpn(String siteId, String key, String lpnId, String from, String to) {
@@ -217,6 +232,84 @@ class TaskIT {
         String id = awaitTask("LPN-1", "RELEASED");
         stockEvent(UUID.randomUUID(), "SKU-1", "MOVE_OUT", "LPN-1", "DOCK-1", "-10", "0");
         await(() -> "CANCELLED".equals(taskStatus(id)));
+    }
+
+    // ------------------------------------------------------------------ PICK tasks
+
+    @Test
+    void pickRequestCreatesTaskAndRfPickCompletesIt() throws Exception {
+        UUID allocation = UUID.randomUUID();
+        pickRequested(allocation, "SO-1", "A-01", "6");
+        String id = awaitPickTask(allocation, "RELEASED");
+        String next = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        assertThat(next).isEqualTo(id);
+        tasks(get("/api/v1/sites/DC1/tasks/" + id))
+                .andExpect(jsonPath("$.taskType", is("PICK")))
+                .andExpect(jsonPath("$.itemNo", is("SKU-1")))
+                .andExpect(jsonPath("$.qty", is(6)))
+                .andExpect(jsonPath("$.targetLocation", is("STAGE-OUT")));
+
+        pickConfirm(id, "22", "6").andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));   // A-02's digit
+        confirm(id, "LPN-X", "A-01", "33").andExpect(jsonPath("$.code", is("TSK_WRONG_TYPE")));
+        pickConfirm(id, "33", "6").andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.qtyPicked", is(6)));
+
+        StubInventory.Pick p = inventory.picks.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow();
+        assertThat(p.allocation()).isEqualTo(allocation);
+        assertThat(p.to()).isEqualTo("STAGE-OUT");
+        assertThat(p.toLpn()).isEqualTo("PK-SO-1");
+        assertThat(p.shortClose()).isFalse();
+        tools.jackson.databind.JsonNode done = taskCompleted(allocation);
+        assertThat(done.get("qtyPicked").decimalValue()).isEqualByComparingTo("6");
+        assertThat(done.get("qtyShort").decimalValue()).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void pickingLessIsAShortPick_PCK003() throws Exception {
+        UUID allocation = UUID.randomUUID();
+        pickRequested(allocation, "SO-2", "A-01", "6");
+        awaitPickTask(allocation, "RELEASED");
+        String id = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        pickConfirm(id, "33", "4").andExpect(jsonPath("$.exceptionReason", is("SHORT_PICK")));
+        assertThat(inventory.picks.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow().shortClose())
+                .isTrue();
+        assertThat(taskCompleted(allocation).get("qtyShort").decimalValue()).isEqualByComparingTo("2");
+    }
+
+    @Test
+    void cancelledPickRequestsCancelTheTask() throws Exception {
+        UUID allocation = UUID.randomUUID();
+        pickRequested(allocation, "SO-3", "A-01", "1");
+        awaitPickTask(allocation, "RELEASED");
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickCancelled.TYPE, "DC1:SO-3",
+                new OutboundContracts.PickCancelled(allocation, "SO-3"));
+        awaitPickTask(allocation, "CANCELLED");
+    }
+
+    private void pickRequested(UUID allocation, String order, String from, String qty) throws Exception {
+        location("STAGE-OUT", "STAGING_OUT", null, false, "77", 99);
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickRequested.TYPE, "DC1:" + order,
+                new OutboundContracts.PickRequested(allocation, order, "000010", "ACME", "SKU-1", "", new BigDecimal(qty),
+                        "EA", from, "", "STAGE-OUT", "PK-" + order, 60));
+    }
+
+    private String awaitPickTask(UUID allocation, String status) throws InterruptedException {
+        await(() -> status.equals(asTenant(() -> jdbc.sql("select status from task where allocation_id = :a")
+                .param("a", allocation).query(String.class).optional().orElse(null))));
+        return asTenant(() -> jdbc.sql("select id::text from task where allocation_id = :a").param("a", allocation)
+                .query(String.class).single());
+    }
+
+    private tools.jackson.databind.JsonNode taskCompleted(UUID allocation) {
+        return asTenant(() -> jdbc.sql("select envelope::text from outbox where tenant_id = :t and message_type = 'TaskCompleted'")
+                .param("t", tenant).query(String.class).list()).stream().map(json::readTree)
+                .map(e -> e.get("payload")).filter(p -> p.get("allocationId").asString().equals(allocation.toString()))
+                .findFirst().orElseThrow();
+    }
+
+    private ResultActions pickConfirm(String id, String checkDigit, String qty) throws Exception {
+        return tasks(post("/api/v1/sites/DC1/tasks/" + id + "/pick"), """
+                {"checkDigit":"%s","qty":%s}""".formatted(checkDigit, qty));
     }
 
     // ------------------------------------------------------------------ helpers
