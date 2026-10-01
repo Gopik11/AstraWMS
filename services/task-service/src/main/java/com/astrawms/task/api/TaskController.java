@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,28 +39,33 @@ public class TaskController {
     }
 
     /** 200 with the operator's task, or 204 when there is no work. */
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/next")
     public ResponseEntity<TaskView> next(@PathVariable String siteId) {
         return tasks.next(siteId).map(ResponseEntity::ok).orElseGet(() -> ResponseEntity.noContent().build());
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/confirm")
     public TaskView confirm(@PathVariable String siteId, @PathVariable UUID taskId, @Valid @RequestBody ConfirmRequest body) {
         return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit());
     }
 
+    @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/pick")
     public TaskView pick(@PathVariable String siteId, @PathVariable UUID taskId,
                          @Valid @RequestBody TaskDtos.PickConfirmRequest body) {
         return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.qty(), body.serials());
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/exception")
     public TaskView exception(@PathVariable String siteId, @PathVariable UUID taskId,
                               @Valid @RequestBody ExceptionRequest body) {
         return tasks.reportException(siteId, taskId, body.reason(), body.detail());
     }
 
+    @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{taskId}/replan")
     public TaskView replan(@PathVariable String siteId, @PathVariable UUID taskId) {
         return tasks.replan(siteId, taskId);

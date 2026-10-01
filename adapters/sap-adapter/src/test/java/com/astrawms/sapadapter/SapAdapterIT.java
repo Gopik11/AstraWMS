@@ -8,14 +8,16 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ApplicationAck;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -33,7 +35,6 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import tools.jackson.databind.JsonNode;
@@ -63,7 +64,7 @@ class SapAdapterIT {
 
     @BeforeEach
     void setUp() throws Exception {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         call(put("/api/v1/sap/site-map/1000"), """
                 {"siteId":"DC1","timeZone":"America/Chicago","defaultOwner":"ACME"}""").andExpect(status().isNoContent());
@@ -199,6 +200,18 @@ class SapAdapterIT {
         assertThat(docType).isEqualTo("GI_OUTBOUND_DELIVERY");
     }
 
+    @Test
+    void idocPortNeedsErpIntegrationRoleAndMockSapNeedsAdmin() throws Exception {
+        mvc.perform(post("/api/v1/sap/idocs/delvry07").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"DOCNUM\":\"0000000000000999\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/mock-sap/documents").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/mock-sap/documents").with(TestTokens.as(tenant, "ada", Roles.SOLUTION_ADMIN)))
+                .andExpect(status().isOk());
+    }
+
+
     // ------------------------------------------------------------------ helpers
 
     private ReceiptConfirmation confirmation(String txn, String vbeln) {
@@ -261,7 +274,7 @@ class SapAdapterIT {
     }
 
     private ResultActions call(MockHttpServletRequestBuilder request, String body) throws Exception {
-        return mvc.perform(request.header(TenantFilter.TENANT_HEADER, tenant).contentType(MediaType.APPLICATION_JSON)
+        return mvc.perform(request.with(TestTokens.as(tenant, "sap-cpi", TestTokens.ALL_ROLES)).contentType(MediaType.APPLICATION_JSON)
                 .content(body));
     }
 }

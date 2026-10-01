@@ -42,6 +42,12 @@ management:
         enabled: true
 
 astra:
+  security:
+    # Tokens are accepted only from this identity provider (ADR-0010). Defaults: the local Keycloak.
+    jwt:
+      issuer: ${OIDC_ISSUER:http://localhost:8180/realms/astrawms}
+      jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/astrawms/protocol/openid-connect/certs}
+      audience: astrawms-api
   outbox:
     relay-interval-ms: 500
   sap:

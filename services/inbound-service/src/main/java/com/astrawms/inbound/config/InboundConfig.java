@@ -1,6 +1,7 @@
 package com.astrawms.inbound.config;
 
 import com.astrawms.common.contracts.IntegrationContracts;
+import com.astrawms.common.security.ServiceCallInterceptor;
 import com.astrawms.inbound.inventory.HttpInventoryClient;
 import com.astrawms.inbound.inventory.InventoryClient;
 import java.time.Duration;
@@ -30,13 +31,14 @@ public class InboundConfig {
      */
     @Bean
     @ConditionalOnMissingBean(InventoryClient.class)
-    InventoryClient inventoryClient(JsonMapper json,
+    InventoryClient inventoryClient(JsonMapper json, ServiceCallInterceptor serviceCalls,
                                     @Value("${astra.inventory.base-url}") String baseUrl,
                                     @Value("${astra.inventory.timeout-ms:3000}") long timeoutMs) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
         factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        return new HttpInventoryClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory).build(), json);
+        return new HttpInventoryClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
+                .requestInterceptor(serviceCalls).build(), json);
     }
 
     // Declared for local/dev environments; production topics are provisioned by infrastructure.

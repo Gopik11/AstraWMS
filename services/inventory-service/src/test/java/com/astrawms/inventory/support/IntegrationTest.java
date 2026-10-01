@@ -1,7 +1,6 @@
 package com.astrawms.inventory.support;
 
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.common.contracts.MasterDataEvents.ItemUpserted;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.inventory.reference.ReferenceRepository;
@@ -17,10 +16,12 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
@@ -59,7 +60,7 @@ public abstract class IntegrationTest {
 
     @BeforeEach
     void setUpTenant() {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         // Reference data used by most tests.
         item("SKU-EA", false, null, null, false);                  // plain item, base EA, 1 CS = 12 EA
@@ -115,16 +116,34 @@ public abstract class IntegrationTest {
     // ------------------------------------------------------------------ HTTP helpers
 
     protected ResultActions postAs(String user, String path, String key, String json) throws Exception {
+        return postWith(TestTokens.as(tenant, user, TestTokens.ALL_ROLES), path, key, json, null);
+    }
+
+    /** Posts with the approver's own sign-in in X-Approval-Token (segregation of duties). */
+    protected ResultActions postApproved(String user, String path, String key, String json, String approvalToken)
+            throws Exception {
+        return postWith(TestTokens.as(tenant, user, TestTokens.ALL_ROLES), path, key, json, approvalToken);
+    }
+
+    protected ResultActions postWith(RequestPostProcessor auth, String path, String key, String json,
+                                     String approvalToken) throws Exception {
         var request = org.springframework.test.web.servlet.request.MockMvcRequestBuilders
                 .post("/api/v1/sites/" + SITE + "/inventory" + path)
-                .header(TenantFilter.TENANT_HEADER, tenant)
-                .header(TenantFilter.USER_HEADER, user)
+                .with(auth)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(json);
         if (key != null) {
             request.header("Idempotency-Key", key);
         }
+        if (approvalToken != null) {
+            request.header("X-Approval-Token", approvalToken);
+        }
         return mvc.perform(request);
+    }
+
+    /** A fresh sign-in of {@code user} in this tenant, as an approver would send it. */
+    protected String approvalToken(String user, String... roles) {
+        return TestTokens.token().tenant(tenant).user(user).roles(roles).sign();
     }
 
     protected ResultActions post(String path, String json) throws Exception {
@@ -133,7 +152,7 @@ public abstract class IntegrationTest {
 
     protected ResultActions getJson(String path) throws Exception {
         return mvc.perform(get("/api/v1/sites/" + SITE + "/inventory" + path)
-                .header(TenantFilter.TENANT_HEADER, tenant));
+                .with(TestTokens.as(tenant, "operator1", TestTokens.ALL_ROLES)));
     }
 
     protected ResultActions receive(String itemNo, String qty, String uom, String location, String lpn, String lot)

@@ -11,8 +11,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,10 +26,11 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -55,7 +56,7 @@ class MasterDataIT {
 
     @BeforeEach
     void setUp() throws Exception {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         call(put("/api/v1/sites/DC1"), """
                 {"name":"Dallas DC","timeZone":"America/Chicago","erpSite":"1000"}""").andExpect(status().isNoContent());
@@ -126,7 +127,7 @@ class MasterDataIT {
                 .andExpect(jsonPath("$.unchanged", is(24)));
         assertThat(outbox("LocationUpserted")).hasSize(24);
 
-        mvc.perform(get("/api/v1/sites/DC1/locations/A-01-101").header(TenantFilter.TENANT_HEADER, tenant))
+        mvc.perform(get("/api/v1/sites/DC1/locations/A-01-101").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
                 .andExpect(jsonPath("$.checkDigit", matchesPattern("[1-9][0-9]")))
                 .andExpect(jsonPath("$.erpBucket", is("0001")));
     }
@@ -142,9 +143,9 @@ class MasterDataIT {
                 {"zoneType":"RESERVE","erpBucket":"0001","temperatureClass":"FROZEN"}""")
                 .andExpect(jsonPath("$.locationsRepublished", is(2)));
 
-        mvc.perform(get("/api/v1/sites/DC1/locations/L-INHERIT").header(TenantFilter.TENANT_HEADER, tenant))
+        mvc.perform(get("/api/v1/sites/DC1/locations/L-INHERIT").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
                 .andExpect(jsonPath("$.temperatureClass", is("FROZEN")));
-        mvc.perform(get("/api/v1/sites/DC1/locations/L-OWN").header(TenantFilter.TENANT_HEADER, tenant))
+        mvc.perform(get("/api/v1/sites/DC1/locations/L-OWN").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
                 .andExpect(jsonPath("$.temperatureClass", is("CHILLED")));
         JsonNode last = outbox("LocationUpserted").stream()
                 .filter(e -> e.get("businessKey").asString().equals("DC1:L-INHERIT")).toList().getLast();
@@ -161,15 +162,26 @@ class MasterDataIT {
         call(put("/api/v1/items/ACME/SKU-9"), ITEM.formatted("036000291452")).andExpect(status().isOk());
         String mine = tenant;
         tenant = "t-intruder";
-        mvc.perform(get("/api/v1/items/ACME/SKU-9").header(TenantFilter.TENANT_HEADER, tenant))
+        mvc.perform(get("/api/v1/items/ACME/SKU-9").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
                 .andExpect(status().isNotFound());
         tenant = mine;
-        mvc.perform(get("/api/v1/items/ACME/SKU-9").header(TenantFilter.TENANT_HEADER, tenant))
+        mvc.perform(get("/api/v1/items/ACME/SKU-9").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void onlySolutionAdminsChangeMasterData_G5() throws Exception {
+        mvc.perform(put("/api/v1/sites/DC1/locations/L-X").with(TestTokens.as(tenant, "rita", Roles.RECEIVER, Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("""
+                                {"zoneId":"STOR","locationType":"RACK"}"""))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code", is("FORBIDDEN")));
+        mvc.perform(get("/api/v1/items/ACME").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
                 .andExpect(status().isOk());
     }
 
     private ResultActions call(MockHttpServletRequestBuilder request, String body) throws Exception {
-        return mvc.perform(request.header(TenantFilter.TENANT_HEADER, tenant).header(TenantFilter.USER_HEADER, "md-admin")
+        return mvc.perform(request.with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES))
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

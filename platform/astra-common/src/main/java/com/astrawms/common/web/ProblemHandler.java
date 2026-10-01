@@ -9,6 +9,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -40,6 +41,12 @@ public class ProblemHandler {
     @ExceptionHandler(MissingRequestHeaderException.class)
     ProblemDetail missingHeader(MissingRequestHeaderException e) {
         return problem(HttpStatus.BAD_REQUEST, "HEADER_MISSING", "Header " + e.getHeaderName() + " is required");
+    }
+
+    /** {@code @PreAuthorize} denials; authentication failures never reach the controller. */
+    @ExceptionHandler(AccessDeniedException.class)
+    ProblemDetail forbidden(AccessDeniedException e) {
+        return problem(HttpStatus.FORBIDDEN, "FORBIDDEN", "Your roles do not permit this operation");
     }
 
     @ExceptionHandler(OptimisticLockingFailureException.class)

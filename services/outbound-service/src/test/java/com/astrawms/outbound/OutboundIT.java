@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ErpPostingResult;
 import com.astrawms.common.contracts.OutboundContracts;
@@ -13,9 +14,10 @@ import com.astrawms.common.contracts.OutboundContracts.OutboundOrder;
 import com.astrawms.common.contracts.OutboundContracts.TaskCompleted;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.outbound.inventory.InventoryClient;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -40,7 +42,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import tools.jackson.databind.JsonNode;
@@ -127,7 +128,7 @@ class OutboundIT {
 
     @BeforeEach
     void setUp() {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         doc = "08" + (System.nanoTime() % 100_000_000L);
         inventory.stock.put("SKU-1", new BigDecimal("1000"));
@@ -233,6 +234,15 @@ class OutboundIT {
         assertThat(orderStatus()).isEqualTo("RELEASED");
     }
 
+    @Test
+    void onlySupervisorsShip_G5() throws Exception {
+        mvc.perform(post("/api/v1/sites/DC1/outbound/orders/0080009999/ship").with(TestTokens.as(tenant, "pete", Roles.PICKER))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"carrierScac\":\"UPSN\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code", is("FORBIDDEN")));
+    }
+
+
     // ------------------------------------------------------------------ helpers
 
     private void order(long revision, String action, String qty10, String qty20) throws Exception {
@@ -283,7 +293,7 @@ class OutboundIT {
 
     private ResultActions call(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder r, String body)
             throws Exception {
-        return mvc.perform(r.header(TenantFilter.TENANT_HEADER, tenant).header(TenantFilter.USER_HEADER, "shipper1")
+        return mvc.perform(r.with(TestTokens.as(tenant, "shipper1", TestTokens.ALL_ROLES))
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

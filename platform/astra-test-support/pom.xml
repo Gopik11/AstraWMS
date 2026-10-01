@@ -12,9 +12,13 @@
 
     <artifactId>astra-test-support</artifactId>
     <name>AstraWMS :: Test Support</name>
-    <description>Shared Testcontainers setup for service integration tests (test scope only)</description>
+    <description>Shared Testcontainers setup and a test token issuer for service integration tests (test scope only)</description>
 
     <dependencies>
+        <dependency>
+            <groupId>com.astrawms</groupId>
+            <artifactId>astra-common</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-test</artifactId>

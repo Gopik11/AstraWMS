@@ -15,6 +15,7 @@ import com.astrawms.masterdata.service.LocationService;
 import jakarta.validation.Valid;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,6 +39,7 @@ public class MasterDataController {
         this.locations = locations;
     }
 
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','ERP_INTEGRATION')")
     @PutMapping("/items/{ownerId}/{itemNo}")
     public ResponseEntity<ItemView> putItem(@PathVariable String ownerId, @PathVariable String itemNo,
                                             @RequestHeader(value = "If-Match", required = false) String ifMatch,
@@ -58,24 +60,28 @@ public class MasterDataController {
         return items.list(ownerId, after, limit);
     }
 
+    @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PutMapping("/sites/{siteId}")
     public ResponseEntity<Void> putSite(@PathVariable String siteId, @Valid @RequestBody SiteRequest body) {
         locations.upsertSite(siteId, body);
         return ResponseEntity.noContent().build();
     }
 
+    @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PutMapping("/sites/{siteId}/zones/{zoneId}")
     public Map<String, Integer> putZone(@PathVariable String siteId, @PathVariable String zoneId,
                                         @Valid @RequestBody ZoneRequest body) {
         return Map.of("locationsRepublished", locations.upsertZone(siteId, zoneId, body));
     }
 
+    @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PostMapping("/sites/{siteId}/zones/{zoneId}/locations/generate")
     public GenerateResult generate(@PathVariable String siteId, @PathVariable String zoneId,
                                    @Valid @RequestBody GenerateRequest body) {
         return locations.generate(siteId, zoneId, body);
     }
 
+    @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PutMapping("/sites/{siteId}/locations/{locationId}")
     public LocationView putLocation(@PathVariable String siteId, @PathVariable String locationId,
                                     @Valid @RequestBody LocationRequest body) {
