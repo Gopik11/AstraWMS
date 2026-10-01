@@ -72,6 +72,7 @@ expect 200 "$INV/api/v1/sites/DC1/inventory/lpns/LPN-SMOKE-1" "${OP[@]}"
 echo "$BODY"
 grep -q '"locationId":"QC-01"' <<<"$BODY" && grep -q '"qty":118' <<<"$BODY" || fail "unexpected LPN state"
 
+if [[ "${SMOKE_SKIP_DB_CHECKS:-}" != "1" ]]; then   # needs the local compose stack
 step "Outbox: all events published to Kafka"
 sleep 2
 pending="$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d inventory -tAc \
@@ -81,6 +82,7 @@ movements="$("${COMPOSE[@]}" exec -T postgres psql -U postgres -d inventory -tAc
            "select count(*) from outbox where tenant_id = '$TENANT' and message_type = 'GoodsMovement'")"
 echo "GoodsMovement messages published for ERP adapter: $movements"
 [[ "$movements" == "2" ]] || fail "expected 2 GoodsMovement messages, got $movements"
+fi
 
 step "Access scopes (G.5.1): 3PL client sees only its own stock; site scope; approver value limit"
 expect 200 -X PUT "$MD/api/v1/items/BETA/SKU-B" "${H[@]}" \

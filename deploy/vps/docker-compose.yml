@@ -1,0 +1,184 @@
+# AstraWMS on a shared VPS (test environment). Deployed by scripts/deploy-vps.sh into /opt/astrawms.
+#
+# The host runs other production applications, so this stack is fenced in:
+#   - hard memory and CPU limits on every container (about 3.3 GB in total), small JVM heaps, log rotation;
+#   - one published port: the API gateway (${PUBLIC_PORT}); it also serves the Keycloak token endpoints under
+#     /realms/. Postgres, Kafka and the services stay on the private network; the Keycloak admin console is bound
+#     to 127.0.0.1:8181 (use an SSH tunnel);
+#   - all passwords and client secrets come from /opt/astrawms/.env, generated on the server and never committed.
+name: astrawms
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-service: &service
+  restart: unless-stopped
+  logging: *logging
+  mem_limit: 360m
+  cpus: 0.5
+  depends_on:
+    postgres:
+      condition: service_healthy
+    kafka:
+      condition: service_started
+  environment: &service-env
+    PORT: "8080"
+    DB_HOST: postgres
+    DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
+    DB_APP_PASSWORD: ${DB_APP_PASSWORD}
+    KAFKA_BOOTSTRAP: kafka:9092
+    OIDC_ISSUER: ${PUBLIC_URL}/realms/astrawms
+    OIDC_JWK_SET_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/certs
+    OIDC_TOKEN_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/token
+    # Small heaps; the explicit -Xmx overrides the image's MaxRAMPercentage.
+    JAVA_TOOL_OPTIONS: >-
+      -Xmx160m -Xss512k -XX:MaxMetaspaceSize=128m -XX:ReservedCodeCacheSize=48m
+      -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:ActiveProcessorCount=1
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 192m
+    cpus: 0.5
+    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=120", "-c", "work_mem=2MB"]
+    environment:
+      POSTGRES_PASSWORD: ${PG_SUPERUSER_PASSWORD}
+      DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 30
+
+  kafka:
+    image: apache/kafka-native:3.8.0
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 320m
+    cpus: 0.5
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_RETENTION_HOURS: 72
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 640m
+    cpus: 1.0
+    command: ["start", "--import-realm"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
+      # Plain HTTP for this test environment (no domain yet); tokens always carry the public issuer.
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: ${PUBLIC_URL}
+      KC_HOSTNAME_ADMIN: http://localhost:8181
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      JAVA_OPTS_KC_HEAP: "-XX:MaxRAMPercentage=60 -XX:InitialRAMPercentage=20"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:8181:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      retries: 60
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 48m
+    cpus: 0.25
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${PUBLIC_PORT}:8080"
+
+  master-data-service:
+    <<: *service
+    image: astrawms/master-data-service:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: masterdata
+
+  inventory-service:
+    <<: *service
+    image: astrawms/inventory-service:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: inventory
+
+  inbound-service:
+    <<: *service
+    image: astrawms/inbound-service:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: inbound
+      INVENTORY_URL: http://inventory-service:8080
+      OIDC_CLIENT_ID: astra-inbound
+      OIDC_CLIENT_SECRET: ${INBOUND_CLIENT_SECRET}
+
+  task-service:
+    <<: *service
+    image: astrawms/task-service:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: tasks
+      INVENTORY_URL: http://inventory-service:8080
+      OIDC_CLIENT_ID: astra-task
+      OIDC_CLIENT_SECRET: ${TASK_CLIENT_SECRET}
+
+  outbound-service:
+    <<: *service
+    image: astrawms/outbound-service:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: outbound
+      INVENTORY_URL: http://inventory-service:8080
+      OIDC_CLIENT_ID: astra-outbound
+      OIDC_CLIENT_SECRET: ${OUTBOUND_CLIENT_SECRET}
+
+  sap-adapter:
+    <<: *service
+    image: astrawms/sap-adapter:${IMAGE_TAG}
+    environment:
+      <<: *service-env
+      DB_NAME: sapadapter
+      SAP_LOGICAL_SYSTEM: SAP_S4_DEV_100
+      SAP_GATEWAY: mock
+
+volumes:
+  pgdata:
+  kafkadata:

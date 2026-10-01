@@ -10,7 +10,7 @@ SMOKE_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(18))')"
 
 _kc_admin_token() {
   curl -sf -X POST "$REALM/protocol/openid-connect/token" \
-    -d grant_type=client_credentials -d client_id=astra-provisioner -d client_secret=provisioner-dev-secret \
+    -d grant_type=client_credentials -d client_id=astra-provisioner --data-urlencode "client_secret=${PROVISIONER_SECRET:-provisioner-dev-secret}" \
     | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
 }
 
