@@ -134,6 +134,46 @@ class AllocationIT extends IntegrationTest {
         getJson("/balances?locationId=A-01-01").andExpect(jsonPath("$.items[0].availableQty", is(10)));
     }
 
+    @Test
+    void reallocationSkipsExcludedLocations_PCK003() throws Exception {
+        receive("SKU-EA", "5", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        receive("SKU-EA", "5", "EA", "A-01-02", null, null).andExpect(status().isCreated());
+        post("/allocations", """
+                {"orderRef":"SO-9","orderLineRef":"000010","ownerId":"ACME","itemNo":"SKU-EA","qty":3,"uom":"EA",
+                 "excludeLocationIds":["A-01-01"]}""")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.allocations[*].locationId", contains("A-01-02")));
+    }
+
+    @Test
+    void releaseKeepsPickedStockUntilItIsReturnedToStock_OUTEX02() throws Exception {
+        receive("SKU-EA", "10", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        String picked = JsonPath.read(body(allocate("SO-8", "000010", "SKU-EA", "4", null)), "$.allocations[0].id");
+        String open = JsonPath.read(body(allocate("SO-8", "000020", "SKU-EA", "3", null)), "$.allocations[0].id");
+        pick(picked, "4", "PK-SO-8", "").andExpect(status().isCreated());
+
+        post("/allocations/release", """
+                {"orderRef":"SO-8"}""")
+                .andExpect(jsonPath("$.releasedAllocations", is(1)))
+                .andExpect(jsonPath("$.releasedQty", is(3)));
+        getJson("/balances?locationId=A-01-01").andExpect(jsonPath("$.items[0].availableQty", is(6)));
+
+        postAs("operator1", "/allocations/" + open + "/return", "ret-0", "{}")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code", is("INV_ALLOCATION_NOT_PICKED")));
+        postAs("operator1", "/allocations/" + picked + "/return", "ret-1", "{}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.lines[*].txnType", contains("RETURN_OUT", "RETURN_IN")));
+        postAs("operator1", "/allocations/" + picked + "/return", "ret-1", "{}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replayed", is(true)));
+
+        getJson("/balances?locationId=STAGE-OUT").andExpect(jsonPath("$.items", hasSize(0)));
+        getJson("/balances?locationId=A-01-01")
+                .andExpect(jsonPath("$.items[0].qty", is(10)))
+                .andExpect(jsonPath("$.items[0].availableQty", is(10)));
+        getJson("/allocations?orderRef=SO-8").andExpect(jsonPath("$[*].status", contains("RETURNED", "RELEASED")));
+    }
+
     private String body(ResultActions a) throws Exception {
         return a.andReturn().getResponse().getContentAsString();
     }

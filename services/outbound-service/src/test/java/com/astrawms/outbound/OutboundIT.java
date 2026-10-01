@@ -2,7 +2,9 @@ package com.astrawms.outbound;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.is;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -16,6 +18,7 @@ import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.outbound.inventory.InventoryClient;
 import com.astrawms.test.AstraContainers;
+import com.jayway.jsonpath.JsonPath;
 import com.astrawms.test.AstraMockMvc;
 import com.astrawms.test.TestTokens;
 import java.math.BigDecimal;
@@ -59,10 +62,28 @@ class OutboundIT {
         final Map<String, List<IssuedLine>> issueByKey = new ConcurrentHashMap<>();
         final List<String> releases = new CopyOnWriteArrayList<>();
         final Map<UUID, String[]> allocationLine = new ConcurrentHashMap<>();   // id -> order, line, item
+        /** Stock available outside excluded locations, for re-allocation after a short pick (default: none). */
+        final Map<String, BigDecimal> elsewhere = new ConcurrentHashMap<>();
+        final Map<String, List<String>> exclusionsByKey = new ConcurrentHashMap<>();
+        /** What inventory reports as picked (to staging) per order, for cancellations after picking. */
+        final Map<String, List<InventoryAllocation>> pickedByOrder = new ConcurrentHashMap<>();
 
         @Override
         public synchronized AllocateResult allocate(String siteId, String key, String orderRef, String orderLineRef,
-                                                    String ownerId, String itemNo, BigDecimal qty, String uom, String lotNo) {
+                                                    String ownerId, String itemNo, BigDecimal qty, String uom, String lotNo,
+                                                    List<String> excludeLocationIds) {
+            exclusionsByKey.putIfAbsent(key, excludeLocationIds);
+            if (!excludeLocationIds.isEmpty()) {
+                return allocateByKey.computeIfAbsent(key, k -> {
+                    BigDecimal free = elsewhere.getOrDefault(itemNo, BigDecimal.ZERO);
+                    BigDecimal take = free.min(qty);
+                    elsewhere.put(itemNo, free.subtract(take));
+                    List<Allocation> allocations = take.signum() == 0 ? List.of()
+                            : List.of(new Allocation(UUID.randomUUID(), "B-09", "", "L9", take));
+                    allocations.forEach(a -> allocationLine.put(a.id(), new String[] {orderRef, orderLineRef, itemNo}));
+                    return new AllocateResult("EA", qty, take, qty.subtract(take), allocations);
+                });
+            }
             return allocateByKey.computeIfAbsent(key, k -> {
                 BigDecimal free = stock.getOrDefault(itemNo, BigDecimal.ZERO);
                 BigDecimal take = free.min(qty);
@@ -92,6 +113,11 @@ class OutboundIT {
         @Override
         public void release(String siteId, String key, String orderRef) {
             releases.add(orderRef);
+        }
+
+        @Override
+        public List<InventoryAllocation> allocations(String siteId, String orderRef) {
+            return pickedByOrder.getOrDefault(orderRef, List.of());
         }
     }
 
@@ -217,21 +243,124 @@ class OutboundIT {
     }
 
     @Test
-    void changesAndLateCancellationsAreRejected_IFOB002() throws Exception {
+    void changesAfterReleaseAreRejected_IFOB002() throws Exception {
         order(1, "CREATE", "3", "1");
         await(() -> "RELEASED".equals(orderStatus()));
         order(2, "CHANGE", "5", "1");
         await(() -> acks().size() >= 2);
         assertThat(acks().getLast().get("reasonCode").asString()).isEqualTo("RELEASED_TO_PICK");
+    }
 
+    @Test
+    void cancelAfterPickingReturnsStockAndAcknowledgesOnlyWhenItIsBack_OUTEX02() throws Exception {
+        order(1, "CREATE", "3", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
         JsonNode pick = outbox(OutboundContracts.PickRequested.TYPE).getFirst().get("payload");
-        completed(UUID.fromString(pick.get("allocationId").asString()), pick.get("orderLineRef").asString(),
-                pick.get("qty").decimalValue(), BigDecimal.ZERO);
+        UUID pickedAllocation = UUID.fromString(pick.get("allocationId").asString());
+        completed(pickedAllocation, pick.get("orderLineRef").asString(), pick.get("qty").decimalValue(), BigDecimal.ZERO);
         await(() -> picked().signum() > 0);
-        order(3, "CANCEL", "3", "1");
-        await(() -> acks().size() >= 3);
-        assertThat(acks().getLast().get("reasonCode").asString()).isEqualTo("PICK_STARTED");
-        assertThat(orderStatus()).isEqualTo("RELEASED");
+        inventory.pickedByOrder.put(doc, List.of(new InventoryClient.InventoryAllocation(pickedAllocation, "000010",
+                "ACME", "SKU-1", "L1", "", "A-01", pick.get("qty").decimalValue(), "STAGE-OUT", "PK-" + doc, "PICKED")));
+
+        order(2, "CANCEL", "3", "1");
+        await(() -> "CANCEL_REQUESTED".equals(orderStatus()));
+        assertThat(inventory.releases).contains(doc);
+        assertThat(outbox(OutboundContracts.PickCancelled.TYPE)).hasSize(2);           // the two unpicked allocations
+        List<JsonNode> returns = outbox(OutboundContracts.ReturnRequested.TYPE);
+        assertThat(returns).hasSize(1);
+        JsonNode r = returns.getFirst().get("payload");
+        assertThat(r.get("fromLocation").asString()).isEqualTo("STAGE-OUT");
+        assertThat(r.get("fromLpn").asString()).isEqualTo("PK-" + doc);
+        assertThat(r.get("toLocation").asString()).isEqualTo("A-01");
+        assertThat(acks()).hasSize(1);                                                 // cancel not yet acknowledged
+
+        send(OutboundContracts.TOPIC_TASK_EVENTS, TaskCompleted.TYPE, "ASTRAWMS", new TaskCompleted(UUID.randomUUID(),
+                "RETURN", pickedAllocation, doc, "000010", pick.get("qty").decimalValue(), BigDecimal.ZERO, "picker1",
+                Instant.now()));
+        await(() -> "CANCELLED".equals(orderStatus()));
+        await(() -> acks().size() == 2);
+        assertThat(acks().getLast().get("result").asString()).isEqualTo("ACCEPTED");
+        assertThat(acks().getLast().get("sourceDocumentId").asString()).isEqualTo("IDOC-2");
+    }
+
+    @Test
+    void shortPickIsReallocatedFromAnotherLocation_PCK003() throws Exception {
+        inventory.elsewhere.put("SKU-1", new BigDecimal("1"));
+        order(1, "CREATE", "4", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
+        List<JsonNode> picks = outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList();
+        JsonNode big = picks.stream().filter(p -> p.get("qty").decimalValue().compareTo(BigDecimal.ONE) > 0).findFirst()
+                .orElseThrow();
+        UUID shorted = UUID.fromString(big.get("allocationId").asString());
+        for (JsonNode pick : picks) {
+            UUID id = UUID.fromString(pick.get("allocationId").asString());
+            BigDecimal qty = pick.get("qty").decimalValue();
+            BigDecimal picked = id.equals(shorted) ? qty.subtract(BigDecimal.ONE) : qty;
+            completed(id, pick.get("orderLineRef").asString(), picked, qty.subtract(picked));
+        }
+        await(() -> outbox(OutboundContracts.PickRequested.TYPE).size() == 4);
+        assertThat(orderStatus()).isEqualTo("RELEASED");                              // the re-allocated pick is open
+        JsonNode again = outbox(OutboundContracts.PickRequested.TYPE).getLast().get("payload");
+        assertThat(again.get("fromLocation").asString()).isEqualTo("B-09");
+        assertThat(again.get("qty").decimalValue()).isEqualByComparingTo("1");
+        assertThat(inventory.exclusionsByKey.get("OUT-RA-" + shorted)).containsExactly("A-01");
+
+        completed(UUID.fromString(again.get("allocationId").asString()), "000010", BigDecimal.ONE, BigDecimal.ZERO);
+        await(() -> "PICKED".equals(orderStatus()));
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.lines[0].qty_picked", is(4)))
+                .andExpect(jsonPath("$.lines[0].qty_short_pick", is(0)))
+                .andExpect(jsonPath("$.lines[0].qty_allocated", is(4)));
+    }
+
+    @Test
+    void waveModePoolsOrdersUntilAPlannedWaveIsReleased_ADV030() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE"}""").andExpect(jsonPath("$.releaseMode", is("WAVE")));
+        order(1, "CREATE", "3", "1");
+        await(() -> "POOLED".equals(orderStatus()));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).isEmpty();
+        order(2, "CHANGE", "5", "1");                                                  // OUT-002: accepted before release
+        await(() -> acks().size() == 2);
+        assertThat(acks().getLast().get("result").asString()).isEqualTo("ACCEPTED");
+
+        call(post("/api/v1/sites/DC1/outbound/waves/plan"), """
+                {"carrierScac":"DHLX"}""").andExpect(jsonPath("$.orderCount", is(0)));
+        call(post("/api/v1/sites/DC1/outbound/waves/plan"), """
+                {"carrierScac":"UPSN","maxOrders":10}""")
+                .andExpect(jsonPath("$.orderCount", is(1)))
+                .andExpect(jsonPath("$.lineCount", is(2)))
+                .andExpect(jsonPath("$.orders[0].erpDocNo", is(doc)));
+        call(get("/api/v1/sites/DC1/outbound/waves"), "").andExpect(jsonPath("$.length()", is(0)));   // plan is a preview
+
+        String waveNo = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/waves"), """
+                {"carrierScac":"UPSN"}""").andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status", is("PLANNED")))
+                .andReturn().getResponse().getContentAsString(), "$.wave_no");
+        call(post("/api/v1/sites/DC1/outbound/waves"), "{}")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_WAVE_EMPTY")));
+
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/release"), "")
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.orders[0].status", is("RELEASED")));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);           // line 10: 5 = 4 + 1, line 20: 1
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/release"), "").andExpect(jsonPath("$.status", is("RELEASED")));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.wave_no", is(waveNo)))
+                .andExpect(jsonPath("$.lines[0].qty_allocated", is(5)));
+    }
+
+    @Test
+    void pooledOrderCancelsWithoutTouchingInventory() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE"}""").andExpect(status().isOk());
+        order(1, "CREATE", "3", "1");
+        await(() -> "POOLED".equals(orderStatus()));
+        order(2, "CANCEL", "3", "1");
+        await(() -> "CANCELLED".equals(orderStatus()));
+        assertThat(inventory.releases).doesNotContain(doc);
+        assertThat(acks().getLast().get("result").asString()).isEqualTo("ACCEPTED");
     }
 
     @Test
@@ -240,6 +369,11 @@ class OutboundIT {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"carrierScac\":\"UPSN\"}"))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code", is("FORBIDDEN")));
+        mvc.perform(post("/api/v1/sites/DC1/outbound/waves/W000001/release").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isForbidden());
+        mvc.perform(put("/api/v1/sites/DC1/outbound/config").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"releaseMode\":\"WAVE\"}"))
+                .andExpect(status().isForbidden());
     }
 
 

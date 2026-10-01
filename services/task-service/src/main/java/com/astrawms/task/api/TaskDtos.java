@@ -33,6 +33,10 @@ public final class TaskDtos {
      * RF pick confirmation: the operator scans the source location label (check digit), picks {@code qty} (less than
      * requested = short pick, PCK-003) and scans serials for serial-tracked items.
      */
+    /** RF return confirmation: the check digit of the location the stock is put back to. */
+    public record ReturnConfirmRequest(@NotBlank String checkDigit) {
+    }
+
     public record PickConfirmRequest(@NotBlank String checkDigit, @jakarta.validation.constraints.NotNull
                                      @jakarta.validation.constraints.PositiveOrZero BigDecimal qty, List<String> serials) {
     }

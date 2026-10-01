@@ -15,7 +15,7 @@ This repository contains:
 | [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
 | [`services/inbound-service`](services/inbound-service) | Receipt expectations from the ERP with the IF-IB-001 change matrix and application acks; RF line and SSCC receiving with tolerance and lot rules; receipt close with short reasons; `ReceiptConfirmation` (IF-IB-002), ERP result tracking and repost |
 | [`services/task-service`](services/task-service) | Directed putaway: tasks created when LPNs arrive at the dock; engine with temperature, hazmat, mixing and capacity rules, consolidate then nearest-empty; RF next / confirm (LPN and check-digit scan) / exception with re-planning |
-| [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; allocation on receipt; pick requests to the task service; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancel before picking |
+| [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; waveless release or waves (pool, plan preview, release); allocation and pick requests; re-allocation after short picks; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancellation with reverse picks of picked stock |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
 | [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) and a test token issuer |
 | [`deploy`](deploy) | Docker Compose stack with Keycloak (`deploy/keycloak`, realm `astrawms`) and the nginx API gateway (`deploy/gateway`) |
@@ -37,9 +37,10 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 - `smoke-outbound.sh` covers the outbound flow: SAP outbound delivery, then FEFO allocation, then RF picks (one short, one with serials), then ship, then goods issue posted in simulated SAP (order CONFIRMED).
+- `smoke-waves.sh` covers wave release: orders pooled in WAVE mode, wave plan / create / release, a short pick re-allocated to another location, a picked order cancelled from SAP and returned to stock by an RF return task (cancel acknowledged only then), and the other order shipped complete.
 
 ```bash
-scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh
+scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh
 ```
 
 **APIs.** All APIs go through the gateway at http://localhost:8080:
@@ -49,8 +50,8 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh
 | Master data | `/api/v1/items`, `/api/v1/sites/...` |
 | Inventory | `/api/v1/sites/{siteId}/inventory/...` |
 | Inbound | `/api/v1/sites/{siteId}/receipts/...` |
-| Task | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/exception`, `{id}/replan`) |
-| Outbound | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`) |
+| Task | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/return`, `{id}/exception`, `{id}/replan`) |
+| Outbound | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`), `/outbound/config` (release mode), `/outbound/waves` (`plan`, create, `{no}/release`) |
 | SAP adapter | `/api/v1/sap/...` (IDoc port, site map), `/mock-sap/...` (simulated SAP) |
 | Health | `/health/{service}`, e.g. `/health/inventory-service` |
 

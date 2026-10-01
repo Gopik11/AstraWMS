@@ -60,6 +60,15 @@ public class HttpInventoryClient implements InventoryClient {
         return post("/api/v1/sites/{site}/inventory/allocations/" + allocationId + "/pick", siteId, idempotencyKey, body);
     }
 
+    @Override
+    public UUID returnToStock(String siteId, String idempotencyKey, UUID allocationId, String toLocationId,
+                              String toLpnId) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("toLocationId", toLocationId);
+        body.put("toLpnId", toLpnId);
+        return post("/api/v1/sites/{site}/inventory/allocations/" + allocationId + "/return", siteId, idempotencyKey, body);
+    }
+
     private UUID post(String path, String siteId, String idempotencyKey, Object payload) {
         TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {

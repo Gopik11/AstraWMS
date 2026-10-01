@@ -134,6 +134,14 @@ public class InventoryController {
         return commands.release(siteId, key, body);
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR','WMS_SERVICE')")
+    @PostMapping("/allocations/{allocationId}/return")
+    public ResponseEntity<OperationResult> returnToStock(@PathVariable String siteId, @PathVariable UUID allocationId,
+                                                        @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                        @RequestBody(required = false) AllocationDtos.ReturnRequest body) {
+        return created(commands.returnToStock(siteId, allocationId, key, body));
+    }
+
     @PreAuthorize("hasAnyRole('SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/issues")
     public ResponseEntity<AllocationDtos.IssueResult> issue(@PathVariable String siteId,

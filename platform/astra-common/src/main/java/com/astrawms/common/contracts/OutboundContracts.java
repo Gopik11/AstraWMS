@@ -63,6 +63,17 @@ public final class OutboundContracts {
         public static final String VERSION = "1.0";
     }
 
+    /**
+     * Reverse pick (OUT-EX-02): bring the picked stock of an allocation from outbound staging back to stock. The
+     * task service creates a RETURN task; its completion is reported as {@link TaskCompleted} with type RETURN.
+     */
+    public record ReturnRequested(UUID allocationId, String orderRef, String orderLineRef, String ownerId,
+                                  String itemNo, String lotNo, BigDecimal qty, String uom, String fromLocation,
+                                  String fromLpn, String toLocation, String toLpn, int priority) {
+        public static final String TYPE = "ReturnRequested";
+        public static final String VERSION = "1.0";
+    }
+
     public record PickCancelled(UUID allocationId, String orderRef) {
         public static final String TYPE = "PickCancelled";
         public static final String VERSION = "1.0";

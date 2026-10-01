@@ -53,11 +53,12 @@ public class AllocationRepository {
 
     /**
      * Allocable balances of an item: AVAILABLE, unallocated quantity left, in an active non-staging location,
-     * optional lot and minimum expiry. FEFO: earliest expiry first, then oldest receipt; FIFO: oldest receipt.
-     * The rows are locked so concurrent allocations cannot over-reserve.
+     * optional lot and minimum expiry, outside {@code excludedLocations} (e.g. where a pick came up short).
+     * FEFO: earliest expiry first, then oldest receipt; FIFO: oldest receipt. The rows are locked so concurrent
+     * allocations cannot over-reserve.
      */
     public List<Candidate> candidates(String siteId, String ownerId, String itemNo, String lotNo, LocalDate minExpiry,
-                                      boolean fefo) {
+                                      boolean fefo, List<String> excludedLocations) {
         String order = fefo ? "b.expiry_date nulls last, b.receipt_date, b.id" : "b.receipt_date, b.id";
         return jdbc.sql("""
                         select b.site_id, b.owner_id, b.item_no, b.lot_no, b.lpn_id, b.location_id,
@@ -67,12 +68,14 @@ public class AllocationRepository {
                         where b.site_id = :site and b.owner_id = :owner and b.item_no = :item
                           and b.stock_status = 'AVAILABLE' and b.qty > b.allocated_qty
                           and l.status = 'ACTIVE' and l.location_type not in (:staging)
+                          and b.location_id not in (:excluded)
                           and (cast(:lot as text) is null or b.lot_no = :lot)
                           and (cast(:minExpiry as date) is null or b.expiry_date >= :minExpiry)
                         order by\s""" + order + " for update of b")
                 .param("site", siteId).param("owner", ownerId).param("item", itemNo).param("lot", lotNo)
                 .param("minExpiry", minExpiry == null ? null : Date.valueOf(minExpiry))
                 .param("staging", NON_ALLOCABLE_TYPES)
+                .param("excluded", excludedLocations == null || excludedLocations.isEmpty() ? List.of("") : excludedLocations)
                 .query((rs, n) -> {
                     Date expiry = rs.getDate(8);
                     return new Candidate(new BalanceKey(rs.getString(1), rs.getString(2), rs.getString(3),

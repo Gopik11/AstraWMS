@@ -26,7 +26,8 @@ public final class AllocationDtos {
             @NotBlank String uom,
             String lotNo,
             LocalDate minExpiryDate,
-            Rotation rotation) {
+            Rotation rotation,
+            List<String> excludeLocationIds) {
     }
 
     public record AllocationResult(String orderRef, String orderLineRef, String itemNo, String baseUom,
@@ -71,6 +72,13 @@ public final class AllocationDtos {
     }
 
     public record ReleaseRequest(@NotBlank String orderRef) {
+    }
+
+    /**
+     * Returns the picked stock of an allocation from outbound staging to stock (reverse pick, OUT-EX-02). Without a
+     * destination the stock goes back to the location and LPN it was picked from.
+     */
+    public record ReturnRequest(String toLocationId, String toLpnId) {
     }
 
     public record ReleaseResult(String orderRef, int releasedAllocations, BigDecimal releasedQty, boolean replayed) {

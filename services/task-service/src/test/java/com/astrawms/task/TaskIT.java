@@ -73,6 +73,19 @@ class TaskIT {
             return UUID.nameUUIDFromBytes(key.getBytes());
         }
 
+        record Return(String key, UUID allocation, String to, String toLpn) {
+        }
+
+        final List<Return> returns = new CopyOnWriteArrayList<>();
+
+        @Override
+        public UUID returnToStock(String siteId, String key, UUID allocationId, String to, String toLpn) {
+            if (returns.stream().noneMatch(r -> r.key().equals(key))) {
+                returns.add(new Return(key, allocationId, to, toLpn));
+            }
+            return UUID.nameUUIDFromBytes(key.getBytes());
+        }
+
         @Override
         public UUID moveLpn(String siteId, String key, String lpnId, String from, String to) {
             if (moves.stream().noneMatch(m -> m.key().equals(key))) {
@@ -285,6 +298,35 @@ class TaskIT {
         send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickCancelled.TYPE, "DC1:SO-3",
                 new OutboundContracts.PickCancelled(allocation, "SO-3"));
         awaitPickTask(allocation, "CANCELLED");
+    }
+
+    @Test
+    void returnRequestCreatesReturnTaskConfirmedAtTheTargetLocation_OUTEX02() throws Exception {
+        UUID allocation = UUID.randomUUID();
+        location("STAGE-OUT", "STAGING_OUT", null, false, "77", 99);
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.ReturnRequested.TYPE, "DC1:SO-9",
+                new OutboundContracts.ReturnRequested(allocation, "SO-9", "000010", "ACME", "SKU-1", "",
+                        new BigDecimal("4"), "EA", "STAGE-OUT", "PK-SO-9", "A-01", "LPN-ORIG", 70));
+        String id = awaitPickTask(allocation, "RELEASED");
+        assertThat((String) JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id")).isEqualTo(id);
+        tasks(get("/api/v1/sites/DC1/tasks/" + id))
+                .andExpect(jsonPath("$.taskType", is("RETURN")))
+                .andExpect(jsonPath("$.fromLocation", is("STAGE-OUT")))
+                .andExpect(jsonPath("$.targetLocation", is("A-01")));
+
+        pickConfirm(id, "33", "4").andExpect(jsonPath("$.code", is("TSK_WRONG_TYPE")));
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/return"), "{\"checkDigit\":\"77\"}")
+                .andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/return"), "{\"checkDigit\":\"33\"}")
+                .andExpect(jsonPath("$.status", is("COMPLETED")));
+
+        StubInventory.Return r = inventory.returns.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow();
+        assertThat(r.allocation()).isEqualTo(allocation);
+        assertThat(r.to()).isEqualTo("A-01");
+        assertThat(r.toLpn()).isEqualTo("LPN-ORIG");
+        tools.jackson.databind.JsonNode done = taskCompleted(allocation);
+        assertThat(done.get("taskType").asString()).isEqualTo("RETURN");
+        assertThat(done.get("qtyPicked").decimalValue()).isEqualByComparingTo("4");
     }
 
     private void pickRequested(UUID allocation, String order, String from, String qty) throws Exception {

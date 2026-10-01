@@ -33,6 +33,7 @@ import com.astrawms.inventory.api.AllocationDtos.IssuedLine;
 import com.astrawms.inventory.api.AllocationDtos.LotQty;
 import com.astrawms.inventory.api.AllocationDtos.PickRequest;
 import com.astrawms.inventory.api.AllocationDtos.ReleaseRequest;
+import com.astrawms.inventory.api.AllocationDtos.ReturnRequest;
 import com.astrawms.inventory.api.AllocationDtos.ReleaseResult;
 import com.astrawms.inventory.api.AllocationDtos.Rotation;
 import com.astrawms.inventory.reference.ReferenceData.ItemRef;
@@ -218,7 +219,7 @@ public class InventoryCommandService {
             BigDecimal remaining = wanted;
             List<AllocationView> views = new ArrayList<>();
             for (AllocationRepository.Candidate c : allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
-                    r.minExpiryDate(), fefo)) {
+                    r.minExpiryDate(), fefo, r.excludeLocationIds())) {
                 if (remaining.signum() == 0) {
                     break;
                 }
@@ -338,25 +339,73 @@ public class InventoryCommandService {
         });
     }
 
-    /** Releases the open (unpicked) allocations of an order, e.g. on cancellation (OUT-EX-02). */
+    /**
+     * Releases the open (unpicked) quantity of an order's allocations, e.g. on cancellation (OUT-EX-02). Picked stock
+     * stays allocated at outbound staging until it is returned to stock ({@link #returnToStock}).
+     */
     @Transactional
     public ReleaseResult release(String siteId, String idempotencyKey, ReleaseRequest r) {
         return idempotentValue(siteId, idempotencyKey, "RELEASE", r, ReleaseResult.class, ctx -> {
             int count = 0;
             BigDecimal qty = BigDecimal.ZERO;
             for (Allocation a : allocations.lockByOrder(siteId, r.orderRef())) {
-                if ("PICKED".equals(a.status()) || a.qtyPicked().signum() > 0) {
-                    throw ApiException.unprocessable("INV_ORDER_PICKED",
-                            "Order " + r.orderRef() + " has picked stock; return it to stock before releasing");
+                if (!"OPEN".equals(a.status())) {
+                    continue;
                 }
-                if ("OPEN".equals(a.status())) {
-                    allocations.unreserve(a.sourceKey(), a.open());
+                allocations.unreserve(a.sourceKey(), a.open());
+                if (a.qtyPicked().signum() > 0) {
+                    allocations.recordPick(a.id(), a.qtyPicked(), a.qtyPicked(), a.pickedLocation(), a.pickedLpn(),
+                            "PICKED", ctx.now);
+                } else {
                     allocations.setStatus(a.id(), "RELEASED", ctx.now);
-                    count++;
-                    qty = qty.add(a.open());
                 }
+                count++;
+                qty = qty.add(a.open());
             }
             return new ReleaseResult(r.orderRef(), count, qty, false);
+        });
+    }
+
+    /**
+     * Reverse pick (OUT-EX-02): moves the picked stock of an allocation from outbound staging back into stock, where
+     * it is unallocated and allocable again. Default destination: the location and LPN it was picked from.
+     */
+    @Transactional
+    public OperationResult returnToStock(String siteId, UUID allocationId, String idempotencyKey, ReturnRequest r) {
+        return idempotent(siteId, idempotencyKey, "RETURN", java.util.Map.of("allocation", allocationId, "request", r), ctx -> {
+            Allocation a = allocations.lock(siteId, allocationId).orElseThrow(() ->
+                    ApiException.notFound("INV_ALLOCATION_UNKNOWN", "Allocation " + allocationId + " not found"));
+            if (!"PICKED".equals(a.status())) {
+                throw ApiException.unprocessable("INV_ALLOCATION_NOT_PICKED",
+                        "Only picked allocations can be returned to stock; allocation is " + a.status());
+            }
+            ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
+            String toLocation = blank(r == null ? null : r.toLocationId()) ? a.locationId() : r.toLocationId();
+            String requestedLpn = r == null || blank(r.toLpnId())
+                    ? (toLocation.equals(a.locationId()) ? a.lpnId() : null) : r.toLpnId();
+            BalanceKey from = a.pickedKey();
+            Map<String, LocationRef> locs = lockLocations(siteId, List.of(from.locationId(), toLocation));
+            LocationRef fromLoc = locs.get(from.locationId());
+            LocationRef toLoc = locs.get(toLocation);
+            requireActive(toLoc);
+            checkPutaway(siteId, item, toLoc, from.lotNo());
+            String toLpn = ensureLpn(siteId, requestedLpn, a.ownerId(), toLoc.locationId());
+            BigDecimal qty = a.qtyPicked();
+            List<String> sn = item.serialTracked()
+                    ? serials.atKey(from).stream().limit(qty.longValue()).toList() : List.of();
+            Balance source = repo.find(from).orElseThrow(() -> noStock(from));
+            BigDecimal after = allocations.takeAllocated(from, qty).orElseThrow(() ->
+                    ApiException.conflict("INV_ALLOCATION_INCONSISTENT", "Picked stock no longer at " + from.locationId()));
+            ctx.line(TxnType.RETURN_OUT, from, qty.negate(), after, sn);
+            BalanceKey to = from.withLocation(toLoc.locationId(), toLpn);
+            ctx.line(TxnType.RETURN_IN, to, qty, repo.increment(to, qty, source.expiryDate(), source.receiptDate()), sn);
+            serials.transfer(sn, to, ctx.operationId, ctx.now);
+            if (!fromLoc.erpBucket().equals(toLoc.erpBucket())) {
+                ctx.erp(ErpMovementType.BUCKET_TRANSFER, item, qty, from.lotNo(), StockStatus.AVAILABLE,
+                        fromLoc.erpBucket(), toLoc.erpBucket(), sn);
+            }
+            allocations.setStatus(a.id(), "RETURNED", ctx.now);
+            ctx.sourceDoc = a.orderRef() + "/" + a.orderLineRef();
         });
     }
 
