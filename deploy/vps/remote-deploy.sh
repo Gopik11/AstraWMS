@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Runs ON the VPS, from /opt/astrawms, called by scripts/deploy-vps.sh after the images and files are copied.
-#   remote-deploy.sh <image-tag> <public-url> <public-port>
+#   remote-deploy.sh <image-tag> <public-url> <public-port> [<bind-address>, default 127.0.0.1]
 # Generates the secrets once (.env, root-only), renders the Keycloak realm with them, and starts the stack in
 # stages so that the shared host never sees all JVMs starting at once. Touches nothing outside /opt/astrawms.
 set -euo pipefail
 cd /opt/astrawms
-TAG="$1"; PUBLIC_URL="$2"; PUBLIC_PORT="$3"
+TAG="$1"; PUBLIC_URL="$2"; PUBLIC_PORT="$3"; PUBLIC_BIND="${4:-127.0.0.1}"
 
 say() { printf '\n== %s\n' "$*"; }
 
@@ -21,8 +21,8 @@ if [[ ! -f .env ]]; then
 fi
 chmod 600 .env
 # Deployment parameters (not secrets) are refreshed on every run.
-sed -i '/^IMAGE_TAG=/d;/^PUBLIC_URL=/d;/^PUBLIC_PORT=/d' .env
-printf 'IMAGE_TAG=%s\nPUBLIC_URL=%s\nPUBLIC_PORT=%s\n' "$TAG" "$PUBLIC_URL" "$PUBLIC_PORT" >> .env
+sed -i '/^IMAGE_TAG=/d;/^PUBLIC_URL=/d;/^PUBLIC_PORT=/d;/^PUBLIC_BIND=/d' .env
+printf 'IMAGE_TAG=%s\nPUBLIC_URL=%s\nPUBLIC_PORT=%s\nPUBLIC_BIND=%s\n' "$TAG" "$PUBLIC_URL" "$PUBLIC_PORT" "$PUBLIC_BIND" >> .env
 set -a; source .env; set +a
 
 say "Rendering the Keycloak realm with this environment's client secrets"

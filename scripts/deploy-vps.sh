@@ -3,13 +3,18 @@
 # Images are built here and streamed to the server, so the server's CPUs are not used for compiling.
 #
 #   scripts/deploy-vps.sh                      # defaults below
-#   VPS=root@host PUBLIC_PORT=8088 scripts/deploy-vps.sh
+#   VPS=root@host PUBLIC_URL=https://name PUBLIC_PORT=8088 scripts/deploy-vps.sh
+#
+# The gateway listens on 127.0.0.1:PUBLIC_PORT and the host nginx serves PUBLIC_URL over TLS in front of it
+# (deploy/vps/host-nginx-astrawms.conf). PUBLIC_BIND=0.0.0.0 exposes the port directly instead: plain HTTP, where
+# browsers cannot sign in (PKCE needs a secure context).
 set -euo pipefail
 
 VPS="${VPS:-root@145.223.90.247}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/astrawms_vps}"
 PUBLIC_PORT="${PUBLIC_PORT:-8088}"
-PUBLIC_URL="${PUBLIC_URL:-http://${VPS#*@}:${PUBLIC_PORT}}"
+PUBLIC_URL="${PUBLIC_URL:-https://145-223-90-247.sslip.io}"
+PUBLIC_BIND="${PUBLIC_BIND:-127.0.0.1}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="$(git -C "$ROOT" rev-parse --short HEAD)"
 SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes "$VPS")
@@ -44,7 +49,7 @@ tar -C "$ROOT/deploy" -cf - vps/docker-compose.yml vps/postgres-init vps/remote-
       chmod +x remote-deploy.sh; rm -rf "$t"'
 
 echo "== Starting on the server"
-"${SSH[@]}" "/opt/astrawms/remote-deploy.sh '$TAG' '$PUBLIC_URL' '$PUBLIC_PORT'"
+"${SSH[@]}" "/opt/astrawms/remote-deploy.sh '$TAG' '$PUBLIC_URL' '$PUBLIC_PORT' '$PUBLIC_BIND'"
 
 echo
 echo "AstraWMS $TAG is running at $PUBLIC_URL"

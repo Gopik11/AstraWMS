@@ -3,7 +3,8 @@
 # The host runs other production applications, so this stack is fenced in:
 #   - hard memory and CPU limits on every container (about 3.3 GB in total), small JVM heaps, log rotation;
 #   - one published port: the gateway (${PUBLIC_PORT}) with the web UI and API; it also serves the Keycloak endpoints under
-#     /realms/. Postgres, Kafka and the services stay on the private network; the Keycloak admin console is bound
+#     /realms/. It is bound to ${PUBLIC_BIND} (127.0.0.1 by default): the host nginx terminates TLS for PUBLIC_URL
+#     (deploy/vps/host-nginx-astrawms.conf, Let's Encrypt) and proxies to it. Postgres, Kafka and the services stay on the private network; the Keycloak admin console is bound
 #     to 127.0.0.1:8181 (use an SSH tunnel);
 #   - all passwords and client secrets come from /opt/astrawms/.env, generated on the server and never committed.
 name: astrawms
@@ -99,7 +100,7 @@ services:
       KC_DB_PASSWORD: ${KC_DB_PASSWORD}
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD}
-      # Plain HTTP for this test environment (no domain yet); tokens always carry the public issuer.
+      # TLS ends at the host nginx; Keycloak speaks HTTP inside, and tokens always carry the public (HTTPS) issuer.
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME: ${PUBLIC_URL}
       KC_HOSTNAME_ADMIN: http://localhost:8181
@@ -124,7 +125,7 @@ services:
     volumes:
       - ./gateway/ui-config.json:/etc/astrawms/ui-config.json:ro
     ports:
-      - "${PUBLIC_PORT}:8080"
+      - "${PUBLIC_BIND:-127.0.0.1}:${PUBLIC_PORT}:8080"
 
   master-data-service:
     <<: *service
