@@ -19,6 +19,7 @@ import Replenishment from './pages/Replenishment'
 import Tasks from './pages/Tasks'
 import MasterData from './pages/MasterData'
 import ErpSimulator from './pages/ErpSimulator'
+import Operations from './pages/Operations'
 
 interface NavItem {
   to: string
@@ -55,6 +56,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     items: [
       { to: '/master-data', label: 'Master data', roles: ['SOLUTION_ADMIN'] },
       { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
+      { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'] },
     ],
   },
 ]
@@ -124,6 +126,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/adjust" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER']}><Adjust /></Guard>} />
           <Route path="/master-data" element={<Guard roles={['SOLUTION_ADMIN']}><MasterData /></Guard>} />
+          <Route path="/operations" element={<Guard roles={['SOLUTION_ADMIN']}><Operations /></Guard>} />
           <Route path="/erp" element={<Guard roles={['ERP_INTEGRATION', 'SOLUTION_ADMIN']}><ErpSimulator /></Guard>} />
           <Route path="/auth/callback" element={<Navigate to="/" replace />} />
           <Route path="*" element={<div className="alert error">Page not found</div>} />

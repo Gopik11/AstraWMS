@@ -31,6 +31,8 @@ x-service: &service
     DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
     DB_APP_PASSWORD: ${DB_APP_PASSWORD}
     KAFKA_BOOTSTRAP: kafka:9092
+    SPRING_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+    SPRING_KAFKA_PROPERTIES_SASL_MECHANISM: PLAIN
     OIDC_ISSUER: ${PUBLIC_URL}/realms/astrawms
     OIDC_JWK_SET_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/certs
     OIDC_TOKEN_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/token
@@ -69,12 +71,17 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      # Clients authenticate with SASL/PLAIN, one account per service; kafka/jaas.conf is rendered from .env by
+      # remote-deploy.sh (ADR-0018). The broker is reachable only on the private network.
+      KAFKA_LISTENERS: SASL_PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: SASL_PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_OPTS: -Djava.security.auth.login.config=/etc/kafka/secrets/jaas.conf
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -82,6 +89,7 @@ services:
       KAFKA_LOG_RETENTION_HOURS: 72
     volumes:
       - kafkadata:/var/lib/kafka/data
+      - ./kafka/jaas.conf:/etc/kafka/secrets/jaas.conf:ro
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.4
@@ -132,6 +140,7 @@ services:
     image: astrawms/master-data-service:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="master-data-service" password="${KAFKA_MASTERDATA_PASSWORD}";
       DB_NAME: masterdata
 
   inventory-service:
@@ -139,6 +148,7 @@ services:
     image: astrawms/inventory-service:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="inventory-service" password="${KAFKA_INVENTORY_PASSWORD}";
       DB_NAME: inventory
 
   inbound-service:
@@ -146,6 +156,7 @@ services:
     image: astrawms/inbound-service:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="inbound-service" password="${KAFKA_INBOUND_PASSWORD}";
       DB_NAME: inbound
       INVENTORY_URL: http://inventory-service:8080
       OIDC_CLIENT_ID: astra-inbound
@@ -156,6 +167,7 @@ services:
     image: astrawms/task-service:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="task-service" password="${KAFKA_TASK_PASSWORD}";
       DB_NAME: tasks
       INVENTORY_URL: http://inventory-service:8080
       OIDC_CLIENT_ID: astra-task
@@ -166,6 +178,7 @@ services:
     image: astrawms/outbound-service:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="outbound-service" password="${KAFKA_OUTBOUND_PASSWORD}";
       DB_NAME: outbound
       INVENTORY_URL: http://inventory-service:8080
       OIDC_CLIENT_ID: astra-outbound
@@ -176,10 +189,27 @@ services:
     image: astrawms/sap-adapter:${IMAGE_TAG}
     environment:
       <<: *service-env
+      SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="sap-adapter" password="${KAFKA_SAPADAPTER_PASSWORD}";
       DB_NAME: sapadapter
       SAP_LOGICAL_SYSTEM: SAP_S4_DEV_100
       SAP_GATEWAY: mock
 
+  # Metrics and alert rules (ADR-0018); UI on 127.0.0.1:9090 only (SSH tunnel).
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 160m
+    cpus: 0.25
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d",
+              "--storage.tsdb.retention.size=500MB"]
+    volumes:
+      - ./monitoring:/etc/prometheus:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
 volumes:
   pgdata:
   kafkadata:
+  promdata:

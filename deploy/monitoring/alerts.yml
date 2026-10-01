@@ -1,0 +1,50 @@
+# Alert rules (ADR-0018). Each one names the runbook action in its description.
+groups:
+  - name: astrawms
+    rules:
+      - alert: ServiceDown
+        expr: up{job="astrawms"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }} is not answering"
+          description: "Check the container (docker compose ps / logs). Messages wait in Kafka and in the outbox; nothing is lost."
+
+      - alert: OutboxBacklog
+        expr: astra_outbox_oldest_pending_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} cannot publish to Kafka"
+          description: "The oldest unpublished outbox message is {{ $value | humanizeDuration }} old. Check Kafka health and the service log for OutboxRelay errors."
+
+      - alert: MessagesDeadLettered
+        expr: increase(astra_kafka_dead_lettered_total[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} dead-lettered messages from {{ $labels.topic }}"
+          description: "Open Operations in the web UI: read the error, fix the cause, then replay."
+
+      - alert: ConsumerLagGrowing
+        expr: max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max) > 1000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} consumer {{ $labels.client_id }} is falling behind"
+          description: "Consumers are not keeping up. Look for slow downstream calls (inventory, Keycloak) or retry storms in the log."
+
+      - alert: HeapPressure
+        expr: sum by (service) (jvm_memory_used_bytes{area="heap"}) / sum by (service) (jvm_memory_max_bytes{area="heap"}) > 0.9
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} heap above 90%"
+          description: "Raise -Xmx and the container mem_limit together, or look for a leak (heap dump)."
+
+      - alert: HttpServerErrors
+        expr: sum by (service) (rate(http_server_requests_seconds_count{status=~"5.."}[5m])) > 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} answers with 5xx"
+          description: "Check the service log for the stack trace (correlate with X-Request-Id)."

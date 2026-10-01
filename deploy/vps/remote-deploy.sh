@@ -9,21 +9,38 @@ TAG="$1"; PUBLIC_URL="$2"; PUBLIC_PORT="$3"; PUBLIC_BIND="${4:-127.0.0.1}"
 
 say() { printf '\n== %s\n' "$*"; }
 
-if [[ ! -f .env ]]; then
-  say "Generating secrets (.env, first deployment only)"
-  umask 077
-  {
-    for v in PG_SUPERUSER_PASSWORD DB_OWNER_PASSWORD DB_APP_PASSWORD KC_DB_PASSWORD KC_ADMIN_PASSWORD \
-             INBOUND_CLIENT_SECRET TASK_CLIENT_SECRET OUTBOUND_CLIENT_SECRET PROVISIONER_CLIENT_SECRET; do
-      echo "$v=$(openssl rand -hex 24)"
-    done
-  } > .env
-fi
+# Each secret is generated once and kept; one added by a later release is generated on its first deployment.
+( umask 077; touch .env )
 chmod 600 .env
+for v in PG_SUPERUSER_PASSWORD DB_OWNER_PASSWORD DB_APP_PASSWORD KC_DB_PASSWORD KC_ADMIN_PASSWORD \
+         INBOUND_CLIENT_SECRET TASK_CLIENT_SECRET OUTBOUND_CLIENT_SECRET PROVISIONER_CLIENT_SECRET \
+         KAFKA_BROKER_PASSWORD KAFKA_MASTERDATA_PASSWORD KAFKA_INVENTORY_PASSWORD KAFKA_INBOUND_PASSWORD \
+         KAFKA_TASK_PASSWORD KAFKA_OUTBOUND_PASSWORD KAFKA_SAPADAPTER_PASSWORD; do
+  grep -q "^$v=" .env || { echo "$v=$(openssl rand -hex 24)" >> .env; echo "Generated $v"; }
+done
 # Deployment parameters (not secrets) are refreshed on every run.
 sed -i '/^IMAGE_TAG=/d;/^PUBLIC_URL=/d;/^PUBLIC_PORT=/d;/^PUBLIC_BIND=/d' .env
 printf 'IMAGE_TAG=%s\nPUBLIC_URL=%s\nPUBLIC_PORT=%s\nPUBLIC_BIND=%s\n' "$TAG" "$PUBLIC_URL" "$PUBLIC_PORT" "$PUBLIC_BIND" >> .env
 set -a; source .env; set +a
+
+say "Rendering the Kafka broker accounts (one per service)"
+mkdir -p kafka && chmod 755 kafka
+( umask 077
+  cat > kafka/jaas.conf <<JAAS
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="broker" password="${KAFKA_BROKER_PASSWORD}"
+  user_broker="${KAFKA_BROKER_PASSWORD}"
+  user_master-data-service="${KAFKA_MASTERDATA_PASSWORD}"
+  user_inventory-service="${KAFKA_INVENTORY_PASSWORD}"
+  user_inbound-service="${KAFKA_INBOUND_PASSWORD}"
+  user_task-service="${KAFKA_TASK_PASSWORD}"
+  user_outbound-service="${KAFKA_OUTBOUND_PASSWORD}"
+  user_sap-adapter="${KAFKA_SAPADAPTER_PASSWORD}";
+};
+JAAS
+)
+chown 1000:1000 kafka/jaas.conf   # the Kafka image runs as uid 1000 (appuser)
 
 say "Rendering the Keycloak realm with this environment's client secrets"
 mkdir -p keycloak && chmod 755 keycloak
@@ -67,7 +84,7 @@ wait_up() { # wait_up <service> <seconds>: readiness through the gateway
 }
 
 say "Pulling infrastructure images"
-dc pull -q postgres kafka keycloak
+dc pull -q postgres kafka keycloak prometheus
 
 say "Stage 1: Postgres and Kafka"
 dc up -d postgres kafka
@@ -99,6 +116,9 @@ for svc in master-data-service inventory-service inbound-service task-service ou
   wait_up "$svc" 120
   echo "$svc ready"
 done
+
+say "Stage 4: Prometheus (metrics and alert rules)"
+dc up -d prometheus
 
 say "Removing AstraWMS images of earlier deployments"
 docker images --format '{{.Repository}}:{{.Tag}}' | grep '^astrawms/' | grep -v ":${TAG}$" | xargs -r docker rmi -f >/dev/null 2>&1 || true
