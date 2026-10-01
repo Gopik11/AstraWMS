@@ -31,10 +31,14 @@ public final class MasterDataEvents {
         }
     }
 
-    /** Business key {@code siteId:locationId}. Attributes are effective values (zone defaults already applied). */
+    /**
+     * Business key {@code siteId:locationId}. Attributes are effective values (zone defaults already applied).
+     * {@code checkDigit} is printed on the location label and scanned on RF confirmation; {@code pickSeq} orders
+     * locations along the travel path (lower = closer to the dock / start of the path).
+     */
     public record LocationUpserted(String siteId, String locationId, String zoneId, String locationType,
                                    String erpBucket, String temperatureClass, boolean hazmatAllowed,
                                    boolean allowMixedItems, boolean allowMixedLots, String status,
-                                   Instant sourceChangedAt) {
+                                   Instant sourceChangedAt, String checkDigit, Integer pickSeq) {
     }
 }

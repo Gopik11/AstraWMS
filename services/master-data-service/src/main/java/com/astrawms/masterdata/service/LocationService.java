@@ -159,7 +159,7 @@ public class LocationService {
     @Transactional(readOnly = true)
     public Page<LocationView> listLocations(String siteId, String zoneId, String after, int limit) {
         int size = Math.max(1, Math.min(limit, 500));
-        List<LocationView> rows = jdbc.sql(EFFECTIVE + """
+        List<LocationView> rows = jdbc.sql(EFFECTIVE + " " + """
                          where l.site_id = :site and l.location_id > :after
                            and (cast(:zone as text) is null or l.zone_id = :zone)
                         order by l.location_id limit :limit""")
@@ -238,7 +238,7 @@ public class LocationService {
                 MasterDataEvents.SCHEMA_VERSION, null, v.siteId(), null, v.siteId() + ":" + v.locationId(),
                 new LocationUpserted(v.siteId(), v.locationId(), v.zoneId(), v.locationType(), v.erpBucket(),
                         v.temperatureClass(), v.hazmatAllowed(), v.allowMixedItems(), v.allowMixedLots(),
-                        v.status().name(), clock.instant())));
+                        v.status().name(), clock.instant(), v.checkDigit(), v.pickSeq())));
     }
 
     private void requireSite(String siteId) {
