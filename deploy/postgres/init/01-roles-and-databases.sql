@@ -5,3 +5,5 @@ create role astra_app login password 'astra_app_dev' nosuperuser nobypassrls;
 
 create database masterdata owner astra_owner;
 create database inventory owner astra_owner;
+create database inbound owner astra_owner;
+create database sapadapter owner astra_owner;

@@ -1,0 +1,370 @@
+package com.astrawms.inbound;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.is;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.astrawms.common.contracts.IntegrationContracts;
+import com.astrawms.common.contracts.IntegrationContracts.ErpPostingResult;
+import com.astrawms.common.contracts.IntegrationContracts.ReceiptExpectation;
+import com.astrawms.common.messaging.EventEnvelope;
+import com.astrawms.common.tenancy.TenantContext;
+import com.astrawms.common.tenancy.TenantFilter;
+import com.astrawms.common.web.ApiException;
+import com.astrawms.test.AstraContainers;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.context.WebApplicationContext;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+@SpringBootTest(properties = "astra.outbox.relay-enabled=false")
+@Import(InboundIT.Stubs.class)
+class InboundIT {
+
+    @TestConfiguration
+    static class Stubs {
+        @Bean
+        @Primary
+        StubInventoryClient stubInventoryClient() {
+            return new StubInventoryClient();
+        }
+    }
+
+    @DynamicPropertySource
+    static void infrastructure(DynamicPropertyRegistry r) {
+        AstraContainers.register(r);
+    }
+
+    @Autowired
+    WebApplicationContext context;
+    @Autowired
+    StubInventoryClient inventory;
+    @Autowired
+    KafkaTemplate<String, String> kafka;
+    @Autowired
+    JsonMapper json;
+    @Autowired
+    JdbcClient jdbc;
+    @Autowired
+    TransactionTemplate tx;
+
+    MockMvc mvc;
+    String tenant;
+    static final String DOC = "0180000123";
+
+    @BeforeEach
+    void setUp() throws Exception {
+        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
+        expectation(1, "CREATE", "24", "10");
+        await(() -> expectationStatus(DOC) != null);
+    }
+
+    // ------------------------------------------------------------------ receiving
+
+    @Nested
+    class Receiving {
+
+        @Test
+        void lineReceiptCallsInventoryWithChainedKeyAndTargetStockType_INB001() throws Exception {
+            receive("000020", "rf-1", """
+                    {"qty":4,"uom":"CS","lotNo":"L1","lpnId":"LPN-1","locationId":"DOCK-01"}""")
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.lines[1].qtyReceived", is(4)))
+                    .andExpect(jsonPath("$.lines[1].qtyOpen", is(6)));
+            StubInventoryClient.Call call = inventory.callsWithKeyPrefix("INB-rf-1").getFirst();
+            assertThat(call.command().status()).isEqualTo("QI");          // INSMK X on the ASN line
+            assertThat(call.command().sourceDoc()).isEqualTo(DOC + "/000020");
+            assertThat(expectationStatus(DOC)).isEqualTo("IN_PROGRESS");
+        }
+
+        @Test
+        void retryWithSameKeyReplaysWithoutSecondInventoryCall() throws Exception {
+            String body = """
+                    {"qty":10,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""";
+            receive("000010", "rf-2", body).andExpect(status().isCreated());
+            receive("000010", "rf-2", body).andExpect(status().isOk()).andExpect(jsonPath("$.replayed", is(true)));
+            assertThat(inventory.callsWithKeyPrefix("INB-rf-2")).hasSize(1);
+            assertThat(lineReceived("000010")).isEqualByComparingTo("10");
+            receive("000010", "rf-2", body.replace("10", "11"))
+                    .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("IDEMPOTENCY_KEY_REUSED")));
+        }
+
+        @Test
+        void overToleranceNeedsApprovalFromAnotherUser_INB002() throws Exception {
+            // line 000010: 24 EA expected, 5 % over-tolerance → max 25.2
+            receive("000010", "rf-3", """
+                    {"qty":26,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""")
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.code", is("INB_OVER_TOLERANCE")))
+                    .andExpect(jsonPath("$.maxQty", is(25.2)));
+            receive("000010", "rf-4", """
+                    {"qty":26,"uom":"EA","lotNo":"B1","locationId":"DOCK-01","overrideReason":"BUYER_OK","approvedBy":"receiver1"}""")
+                    .andExpect(jsonPath("$.code", is("INB_OVERRIDE_APPROVAL_REQUIRED")));
+            receive("000010", "rf-5", """
+                    {"qty":26,"uom":"EA","lotNo":"B1","locationId":"DOCK-01","overrideReason":"BUYER_OK","approvedBy":"supervisor1"}""")
+                    .andExpect(status().isCreated());
+        }
+
+        @Test
+        void inventoryErrorsPassThroughAndNothingIsRecorded() throws Exception {
+            inventory.failNext(ApiException.unprocessable("INV_LOCATION_INCOMPATIBLE", "Frozen item into ambient dock"));
+            String body = """
+                    {"qty":2,"uom":"EA","lotNo":"B1","locationId":"DOCK-AMB"}""";
+            receive("000010", "rf-6", body)
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.code", is("INV_LOCATION_INCOMPATIBLE")));
+            assertThat(lineReceived("000010")).isZero();
+            // The failed attempt left no reservation: the same key can be retried after fixing the cause.
+            receive("000010", "rf-6", body).andExpect(status().isCreated());
+        }
+
+        @Test
+        void lotAndUomMustMatchTheAsn() throws Exception {
+            receive("000010", "rf-7", """
+                    {"qty":1,"uom":"EA","lotNo":"OTHER","locationId":"DOCK-01"}""")
+                    .andExpect(jsonPath("$.code", is("INB_LOT_MISMATCH")));
+            receive("000010", "rf-8", """
+                    {"qty":1,"uom":"CS","lotNo":"B1","locationId":"DOCK-01"}""")
+                    .andExpect(jsonPath("$.code", is("INB_UOM_MISMATCH")));
+        }
+
+        @Test
+        void ssccSingleScanReceivesWholePallet_INB011() throws Exception {
+            call(post("/api/v1/sites/DC1/receipts/" + DOC + "/sscc/106141410000000019/receive").header("Idempotency-Key", "rf-9"),
+                    """
+                    {"locationId":"DOCK-01"}""")
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.lpnId", is("106141410000000019")))
+                    .andExpect(jsonPath("$.lines[0].qtyReceived", is(24)));
+            assertThat(inventory.callsWithKeyPrefix("INB-rf-9#").getFirst().command().lpnId())
+                    .isEqualTo("106141410000000019");
+            call(post("/api/v1/sites/DC1/receipts/" + DOC + "/sscc/106141410000000019/receive").header("Idempotency-Key", "rf-10"),
+                    """
+                    {"locationId":"DOCK-01"}""")
+                    .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("INB_SSCC_ALREADY_RECEIVED")));
+            call(post("/api/v1/sites/DC1/receipts/" + DOC + "/sscc/999999999999999999/receive").header("Idempotency-Key", "rf-11"),
+                    """
+                    {"locationId":"DOCK-01"}""")
+                    .andExpect(jsonPath("$.code", is("INB_SSCC_UNKNOWN")));
+        }
+    }
+
+    // ------------------------------------------------------------------ close and ERP confirmation
+
+    @Nested
+    class CloseAndConfirm {
+
+        @Test
+        void closeRequiresShortReasonsAndPublishesConfirmation_INB003_IFIB002() throws Exception {
+            receive("000010", "c-1", """
+                    {"qty":20,"uom":"EA","lotNo":"B1","expiryDate":"2027-06-30","lpnId":"LPN-A","locationId":"DOCK-01"}""");
+            receive("000010", "c-2", """
+                    {"qty":4,"uom":"EA","lotNo":"B1","lpnId":"LPN-B","locationId":"DOCK-01"}""");
+            receive("000020", "c-3", """
+                    {"qty":6,"uom":"CS","lotNo":"L1","lpnId":"LPN-B","locationId":"DOCK-01"}""");
+            receive("000020", "c-4", """
+                    {"qty":3,"uom":"CS","lotNo":"L2","lpnId":"LPN-C","locationId":"DOCK-01"}""");
+
+            close("{}").andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.code", is("INB_SHORT_REASON_REQUIRED")))
+                    .andExpect(jsonPath("$.lines", contains("000020")));
+            close("""
+                    {"shortReasons":{"000020":"SHORT_VENDOR"}}""")
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.status", is("CLOSED")));
+
+            JsonNode confirmation = outbox(IntegrationContracts.ReceiptConfirmation.TYPE).getFirst();
+            assertThat(confirmation.get("targetSystem").asString()).isEqualTo("ERP");
+            JsonNode payload = confirmation.get("payload");
+            assertThat(payload.get("wmsTxnId").asString()).hasSize(16);
+            assertThat(payload.get("final").asBoolean()).isTrue();
+            JsonNode line1 = payload.get("lines").get(0);
+            assertThat(line1.get("qtyReceived").decimalValue()).isEqualByComparingTo("24");
+            assertThat(line1.get("lotSplits")).hasSize(1);
+            assertThat(line1.get("lotSplits").get(0).get("expiryDate").asString()).isEqualTo("2027-06-30");
+            JsonNode line2 = payload.get("lines").get(1);
+            assertThat(line2.get("reasonCode").asString()).isEqualTo("SHORT_VENDOR");
+            assertThat(line2.get("lotSplits")).hasSize(2);
+            assertThat(line2.get("stockStatus").asString()).isEqualTo("QI");
+            assertThat(payload.get("handlingUnits")).hasSize(3);
+
+            // Closing again is idempotent: same transaction, no second confirmation.
+            close("{}").andExpect(status().isOk());
+            assertThat(outbox(IntegrationContracts.ReceiptConfirmation.TYPE)).hasSize(1);
+        }
+
+        @Test
+        void erpResultsDriveTerminalStatusAndRepostKeepsTheTransactionId_INT011_INT014() throws Exception {
+            receive("000010", "p-1", """
+                    {"qty":24,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""");
+            receive("000020", "p-2", """
+                    {"qty":10,"uom":"CS","locationId":"DOCK-01"}""");
+            close("{}").andExpect(jsonPath("$.status", is("CLOSED")));
+            String txn = outbox(IntegrationContracts.ReceiptConfirmation.TYPE).getFirst().get("payload").get("wmsTxnId").asString();
+
+            postingResult(new ErpPostingResult(txn, "ReceiptConfirmation", DOC, false, null, null, false,
+                    "BUSINESS_CORRECTABLE", "M7 053", "Posting only possible in periods 2026/10 and 2026/09", Instant.now()));
+            await(() -> "POSTING_FAILED".equals(expectationStatus(DOC)));
+            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).header(TenantFilter.TENANT_HEADER, tenant))
+                    .andExpect(jsonPath("$.header.erpErrorClass", is("BUSINESS_CORRECTABLE")));
+
+            call(post("/api/v1/sites/DC1/receipts/" + DOC + "/repost"), "").andExpect(jsonPath("$.status", is("CLOSED")));
+            List<JsonNode> confirmations = outbox(IntegrationContracts.ReceiptConfirmation.TYPE);
+            assertThat(confirmations).hasSize(2);
+            assertThat(confirmations.get(1).get("payload").get("wmsTxnId").asString()).isEqualTo(txn);
+
+            postingResult(new ErpPostingResult(txn, "ReceiptConfirmation", DOC, true, "4900000042", "2026", false,
+                    null, null, null, Instant.now()));
+            await(() -> "CONFIRMED".equals(expectationStatus(DOC)));
+            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).header(TenantFilter.TENANT_HEADER, tenant))
+                    .andExpect(jsonPath("$.header.erpDocument", is("4900000042")));
+        }
+    }
+
+    // ------------------------------------------------------------------ ERP change handling (IF-IB-001 §6.1)
+
+    @Nested
+    class ChangeMatrix {
+
+        @Test
+        void inProgressDecreaseBelowReceivedIsRejectedAndAcknowledged_INBEX11() throws Exception {
+            receive("000010", "m-1", """
+                    {"qty":20,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""");
+            expectation(2, "CHANGE", "12", "10");
+            await(() -> acks().size() >= 2);
+            JsonNode ack = acks().getLast();
+            assertThat(ack.get("result").asString()).isEqualTo("REJECTED");
+            assertThat(ack.get("reasonCode").asString()).isEqualTo("QTY_BELOW_RECEIVED");
+            assertThat(ack.get("sourceDocumentId").asString()).isEqualTo("IDOC-2");
+            assertThat(lineExpected("000010")).isEqualByComparingTo("24");
+
+            expectation(3, "CHANGE", "30", "10");               // increase is fine
+            await(() -> lineExpected("000010").compareTo(new BigDecimal("30")) == 0);
+
+            expectation(4, "DELETE", "30", "10");
+            await(() -> acks().size() >= 4);
+            assertThat(acks().getLast().get("reasonCode").asString()).isEqualTo("RECEIPT_IN_PROGRESS");
+        }
+
+        @Test
+        void notStartedDeleteCancelsAndStaleRevisionsAreIgnored() throws Exception {
+            expectation(5, "CHANGE", "50", "10");
+            await(() -> lineExpected("000010").compareTo(new BigDecimal("50")) == 0);
+            expectation(4, "CHANGE", "99", "10");               // older revision
+            await(() -> acks().size() >= 3);
+            assertThat(lineExpected("000010")).isEqualByComparingTo("50");
+
+            expectation(6, "DELETE", "50", "10");
+            await(() -> "CANCELLED".equals(expectationStatus(DOC)));
+            receive("000010", "m-2", """
+                    {"qty":1,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""")
+                    .andExpect(jsonPath("$.code", is("INB_EXPECTATION_CLOSED")));
+        }
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    private void expectation(long revision, String action, String qty10, String qty20) throws Exception {
+        ReceiptExpectation e = new ReceiptExpectation(DOC, "VENDOR_ASN", action, revision, "IDOC-" + revision,
+                "V-100", null, null, "UPSN", Instant.parse("2026-10-02T13:30:00Z"), "ASN-77", null, null, null,
+                List.of(new ReceiptExpectation.Line("000010", "ACME", "SKU-1", new BigDecimal(qty10), "EA", "B1", null,
+                                null, "AVAILABLE", new BigDecimal("5"), null),
+                        new ReceiptExpectation.Line("000020", "ACME", "SKU-2", new BigDecimal(qty20), "CS", null, null,
+                                null, "QI", null, null)),
+                List.of(new ReceiptExpectation.HandlingUnit("106141410000000019", "PAL01",
+                        List.of(new ReceiptExpectation.HuContent("000010", new BigDecimal("24"), "EA", "B1")))),
+                Instant.now());
+        send(IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS, ReceiptExpectation.TYPE, "SAP_S4_DEV_100", e);
+    }
+
+    private void postingResult(ErpPostingResult r) throws Exception {
+        send(IntegrationContracts.TOPIC_ERP_POSTING_RESULTS, ErpPostingResult.TYPE, "SAP_S4_DEV_100", r);
+    }
+
+    private void send(String topic, String type, String source, Object payload) throws Exception {
+        EventEnvelope e = new EventEnvelope(UUID.randomUUID(), type, "3.0", source, "ASTRAWMS", tenant, "DC1", "ACME",
+                "DC1:" + DOC, "test", 1, Instant.now(), json.valueToTree(payload));
+        kafka.send(topic, tenant + ":DC1:" + DOC, json.writeValueAsString(e)).get();
+    }
+
+    private ResultActions receive(String line, String key, String body) throws Exception {
+        return call(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/" + line + "/receive").header("Idempotency-Key", key), body);
+    }
+
+    private ResultActions close(String body) throws Exception {
+        return call(post("/api/v1/sites/DC1/receipts/" + DOC + "/close"), body);
+    }
+
+    private ResultActions call(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request, String body)
+            throws Exception {
+        return mvc.perform(request.header(TenantFilter.TENANT_HEADER, tenant).header(TenantFilter.USER_HEADER, "receiver1")
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private String expectationStatus(String doc) {
+        return asTenant(() -> jdbc.sql("select status from receipt_expectation where erp_doc_no = :d")
+                .param("d", doc).query(String.class).optional().orElse(null));
+    }
+
+    private BigDecimal lineReceived(String line) {
+        return asTenant(() -> jdbc.sql("select qty_received from receipt_expectation_line where erp_line_ref = :l")
+                .param("l", line).query(BigDecimal.class).single());
+    }
+
+    private BigDecimal lineExpected(String line) {
+        return asTenant(() -> jdbc.sql("select qty_expected from receipt_expectation_line where erp_line_ref = :l")
+                .param("l", line).query(BigDecimal.class).single());
+    }
+
+    private List<JsonNode> acks() {
+        return outbox(IntegrationContracts.ApplicationAck.TYPE).stream().map(e -> e.get("payload")).toList();
+    }
+
+    private List<JsonNode> outbox(String type) {
+        return asTenant(() -> jdbc.sql("select envelope::text from outbox where tenant_id = :t and message_type = :type order by id")
+                .param("t", tenant).param("type", type).query(String.class).list())
+                .stream().map(json::readTree).toList();
+    }
+
+    private <T> T asTenant(Supplier<T> work) {
+        return TenantContext.callAs(new TenantContext.Scope(tenant, "test", "TEST"), () -> tx.execute(s -> work.get()));
+    }
+
+    private static void await(BooleanSupplier condition) throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(30);
+        while (Instant.now().isBefore(deadline)) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Condition not met within 30 s");
+    }
+}

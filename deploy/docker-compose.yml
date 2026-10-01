@@ -1,6 +1,7 @@
-# Local AstraWMS stack: Postgres 16, single-node Kafka (KRaft), master-data-service, inventory-service.
+# Local AstraWMS stack: Postgres 16, single-node Kafka (KRaft), master-data, inventory and inbound services,
+# and the SAP adapter with its simulated SAP backend.
 #   docker compose -f deploy/docker-compose.yml up -d --build
-#   scripts/smoke-test.sh
+#   scripts/smoke-test.sh && scripts/smoke-inbound.sh
 name: astrawms
 
 services:
@@ -17,6 +18,22 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s
       retries: 20
+
+  # Creates missing service databases on every start: initdb scripts only run on an empty volume.
+  db-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for db in masterdata inventory inbound sapadapter; do
+          psql -h postgres -U postgres -tAc "select 1 from pg_database where datname = '$$db'" | grep -q 1             || psql -h postgres -U postgres -c "create database $$db owner astra_owner"
+        done
+    restart: "no"
 
   kafka:
     image: apache/kafka-native:3.8.0
@@ -50,8 +67,8 @@ services:
     ports:
       - "8081:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
       kafka:
         condition: service_started
 
@@ -67,8 +84,46 @@ services:
     ports:
       - "8082:8080"
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+
+  inbound-service:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        MODULE: inbound-service
+    environment:
+      <<: *service-env
+      DB_NAME: inbound
+      INVENTORY_URL: http://inventory-service:8080
+    ports:
+      - "8083:8080"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+
+  sap-adapter:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        MODULE: sap-adapter
+        MODULE_DIR: adapters
+    environment:
+      <<: *service-env
+      DB_NAME: sapadapter
+      SAP_LOGICAL_SYSTEM: SAP_S4_DEV_100
+      SAP_GATEWAY: mock
+    ports:
+      - "8090:8080"
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
       kafka:
         condition: service_started
 

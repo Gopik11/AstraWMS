@@ -1,5 +1,6 @@
 package com.astrawms.inventory.events;
 
+import com.astrawms.common.contracts.IntegrationContracts;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -16,7 +17,7 @@ public final class InventoryEvents {
     @ConfigurationProperties("astra.topics")
     public record Topics(
             @DefaultValue("wms.inventory.events.v1") String inventoryEvents,
-            @DefaultValue("wms.integration.outbound.goodsmovement.v1") String goodsMovements,
+            @DefaultValue(IntegrationContracts.TOPIC_GOODS_MOVEMENTS) String goodsMovements,
             @DefaultValue("wms.masterdata.events.v1") String masterdataEvents) {
     }
 
@@ -28,15 +29,4 @@ public final class InventoryEvents {
         }
     }
 
-    /**
-     * {@code GoodsMovement} v2: canonical message for IF-INV-001 (docs/isd/IF-INV-001.md §4). Quantities are in the
-     * item's base UoM. The ERP adapter maps {@code movementType} and {@code reasonCode} to SAP / Oracle values.
-     */
-    public record GoodsMovement(String wmsTxnId, String movementType, String reasonCode, Instant physicalDateTimeUtc,
-                                String approvedBy, List<Item> items) {
-        /** {@code stockType}: ERP stock type of the source stock (UNRESTRICTED, QUALITY_INSPECTION, BLOCKED). */
-        public record Item(String itemNo, BigDecimal qty, String uom, String fromBucket, String toBucket,
-                           String lotNo, String toLotNo, String stockType, String text) {
-        }
-    }
 }

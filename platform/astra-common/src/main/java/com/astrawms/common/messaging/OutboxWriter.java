@@ -27,8 +27,17 @@ public class OutboxWriter {
         this.clock = clock;
     }
 
-    public record Message(String topic, String messageType, String schemaVersion, String targetSystem,
-                          String siteId, String ownerId, String businessKey, Object payload) {
+    /**
+     * @param sourceSystem logical system the message speaks for; null = {@value #SOURCE_SYSTEM}. ERP adapters set
+     *                     the ERP's logical system (e.g. {@code SAP_S4_PRD_100}) on messages they translate.
+     */
+    public record Message(String topic, String messageType, String schemaVersion, String sourceSystem,
+                          String targetSystem, String siteId, String ownerId, String businessKey, Object payload) {
+
+        public Message(String topic, String messageType, String schemaVersion, String targetSystem, String siteId,
+                       String ownerId, String businessKey, Object payload) {
+            this(topic, messageType, schemaVersion, null, targetSystem, siteId, ownerId, businessKey, payload);
+        }
     }
 
     /** Appends a message to the outbox; must be called inside the business transaction. */
@@ -48,7 +57,8 @@ public class OutboxWriter {
                 .single();
         String correlationId = MDC.get("correlationId");
         EventEnvelope envelope = new EventEnvelope(
-                UUID.randomUUID(), m.messageType(), m.schemaVersion(), SOURCE_SYSTEM, m.targetSystem(),
+                UUID.randomUUID(), m.messageType(), m.schemaVersion(),
+                m.sourceSystem() != null ? m.sourceSystem() : SOURCE_SYSTEM, m.targetSystem(),
                 tenant, m.siteId(), m.ownerId(), m.businessKey(),
                 correlationId != null ? correlationId : UUID.randomUUID().toString(),
                 sequence, Instant.now(clock), json.valueToTree(m.payload()));

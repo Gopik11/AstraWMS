@@ -4,7 +4,7 @@
 |---|---|
 | Interface ID | IF-IB-001 |
 | Name | Inbound Delivery / ASN (ERP → WMS) |
-| Version / Status | 0.1 — Draft for design review |
+| Version / Status | 0.2 — Draft for design review |
 | Direction | Inbound to AstraWMS |
 | Source → Target | ERP → Middleware → AstraWMS (Inbound service) |
 | Pattern | Asynchronous, document-driven; create / change / delete |
@@ -137,6 +137,7 @@ Card = cardinality; Req: M mandatory, C conditional, O optional. **PII** fields 
 | IB001-R04 | Unknown item or vendor: the whole expectation is parked (dependency) and is not partially created. |
 | IB001-R05 | The cross-dock engine (§9) is notified on every create/change so that planned cross-dock allocations can be evaluated before arrival. |
 | IB001-R06 | Oracle PO-based expectations (no ASN) are created for schedules due within the horizon and refreshed when the open quantity changes. Receiving stays possible beyond the horizon via PO lookup at the dock (permission INB_RECEIVE_PO_LOOKUP). |
+| IB001-R07 | SSCCs are canonical 18-digit values without application identifier (ISD-00 §3.2). The adapter strips a leading AI `00` from 20-character EXIDV values and rejects anything else that is not 18 digits (error DELVRY_SSCC_INVALID, IDoc status 51). |
 
 ## 7. Error Handling
 
@@ -180,3 +181,4 @@ Error classes and default retry behaviour: ISD-00 §6.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-30 | Initial draft generated from scope §D |
+| 0.2 | 2026-09-30 | Rule IB001-R07 (SSCC normalisation) from the sap-adapter implementation |
