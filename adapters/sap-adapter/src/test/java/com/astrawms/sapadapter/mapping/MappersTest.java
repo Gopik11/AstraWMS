@@ -91,6 +91,56 @@ class MappersTest {
     }
 
     @Nested
+    class OutboundDelivery {
+
+        Delvry07 outbound(String mestyp, List<Delvry07.E1edl18> control) {
+            return new Delvry07("0000000000777001", mestyp,
+                    new Delvry07.E1edl20("0080001234", "LF", null, null, null, "1000"), control,
+                    List.of(new Delvry07.E1adrm1("WE", "C-77", "Acme Stores", "Dallas", "US"),
+                            new Delvry07.E1adrm1("SP", "UPSN")),
+                    List.of(new Delvry07.E1edt13("006", "20261003", "140000")),
+                    List.of(new Delvry07.E1edl24("000010", "SKU-1", "1000", "5", "ST", "B7", null, null, null, null, null, null)),
+                    null);
+        }
+
+        @Test
+        void mapsOrderShipToCarrierAndGoodsIssueDate_IFOB001() {
+            var o = DelvryMapper.mapOutbound(outbound(Delvry07.OB_SAVE_REPLICA, null), DALLAS, NOW);
+            assertThat(o.erpDocNo()).isEqualTo("0080001234");
+            assertThat(o.orderType()).isEqualTo("CUSTOMER");
+            assertThat(o.action()).isEqualTo("CREATE");
+            assertThat(o.shipTo().name()).isEqualTo("Acme Stores");
+            assertThat(o.carrierScac()).isEqualTo("UPSN");
+            assertThat(o.plannedGoodsIssueUtc()).isEqualTo(Instant.parse("2026-10-03T19:00:00Z"));
+            assertThat(o.lines().getFirst().uom()).isEqualTo("EA");
+            assertThat(o.lines().getFirst().lotNo()).isEqualTo("B7");
+            assertThat(DelvryMapper.mapOutbound(outbound(Delvry07.OB_CHANGE, List.of(new Delvry07.E1edl18("DEL"))), DALLAS, NOW)
+                    .action()).isEqualTo("CANCEL");
+        }
+
+        @Test
+        void shipmentConfirmationBecomesConfirmWithGoodsIssue_IFOB003() {
+            var c = new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation("W1M3S5G87458N6A1",
+                    "0080001234", Instant.parse("2026-10-03T18:30:00Z"), "UPSN", "1Z999", "BOL-9",
+                    List.of(new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.Line("000010",
+                                    "SKU-1", new BigDecimal("3"), "EA",
+                                    List.of(new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.LotSplit("B7", new BigDecimal("2")),
+                                            new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.LotSplit("B8", BigDecimal.ONE)),
+                                    null, "SHORT_PICK"),
+                            new com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation.Line("000020",
+                                    "SCANNER", BigDecimal.ONE, "EA", List.of(), List.of("SN-1"), null)));
+            Bapi.OutbDeliveryConfirmDec call = BapiMapper.confirmOutbound(c);
+            assertThat(call.headerControl().postGoodsIssueFlag()).isEqualTo("X");
+            assertThat(call.headerData().bolNr()).isEqualTo("BOL-9");
+            assertThat(call.headerDeadlines().getFirst().timestampUtc()).isEqualTo("20261003183000");
+            assertThat(call.itemData()).extracting(Bapi.ItemData::delivItem)
+                    .containsExactly("000010", "900001", "900002", "000020");
+            assertThat(call.itemData().get(0).dlvQty()).isEqualByComparingTo("3");
+            assertThat(call.itemSerialNo()).singleElement().satisfies(sn -> assertThat(sn.itmNumber()).isEqualTo("000020"));
+        }
+    }
+
+    @Nested
     class ReceiptConfirmationToBapi {
 
         @Test

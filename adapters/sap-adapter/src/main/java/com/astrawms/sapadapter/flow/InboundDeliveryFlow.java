@@ -3,6 +3,7 @@ package com.astrawms.sapadapter.flow;
 import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ApplicationAck;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptExpectation;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.tenancy.TenantContext;
@@ -51,6 +52,14 @@ public class InboundDeliveryFlow {
             String werks = DelvryMapper.plantOf(idoc);
             DelvryMapper.Plant plant = sites.byPlant(werks).orElseThrow(() ->
                     new MappingException("PLANT_NOT_MAPPED", "Plant " + werks + " is not mapped to an AstraWMS site"));
+            if (idoc.outbound()) {
+                OutboundContracts.OutboundOrder order = DelvryMapper.mapOutbound(idoc, plant, clock.instant());
+                EventEnvelope envelope = outbox.append(new OutboxWriter.Message(
+                        OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundContracts.OutboundOrder.TYPE,
+                        OutboundContracts.OutboundOrder.VERSION, sap.logicalSystem(), "ASTRAWMS", plant.siteId(),
+                        plant.defaultOwner(), plant.siteId() + ":" + order.erpDocNo(), order));
+                return saveStatus(idoc, vbeln, "03", "Passed to AstraWMS", envelope.messageId());
+            }
             DelvryMapper.Mapped mapped = DelvryMapper.map(idoc, plant, clock.instant());
             EventEnvelope envelope = outbox.append(new OutboxWriter.Message(
                     IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS, ReceiptExpectation.TYPE, ReceiptExpectation.VERSION,

@@ -1,6 +1,8 @@
 package com.astrawms.task.service;
 
 import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
+import com.astrawms.common.contracts.OutboundContracts;
+import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.task.api.TaskDtos.Content;
@@ -44,19 +46,113 @@ public class TaskService {
     private final Projections projections;
     private final PutawayEngine engine;
     private final InventoryClient inventory;
+    private final OutboxWriter outbox;
     private final Clock clock;
 
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
-                       Clock clock) {
+                       OutboxWriter outbox, Clock clock) {
         this.jdbc = jdbc;
         this.projections = projections;
         this.engine = engine;
         this.inventory = inventory;
+        this.outbox = outbox;
         this.clock = clock;
     }
 
+    // =====================================================================================================
+    // PICK tasks (scope §4)
+    // =====================================================================================================
+
+    /** Creates the pick task for an allocation; a redelivered request is ignored (one task per allocation). */
+    @Transactional
+    public void onPickRequested(String siteId, OutboundContracts.PickRequested p) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, allocation_id, order_ref,
+                                          order_line_ref, item_no, lot_no, qty, uom, to_lpn, created_at, updated_at)
+                        values (:id, :t, :site, 'PICK', 'RELEASED', :prio, :owner, :lpn, :from, :to, 'ALLOCATION',
+                                :alloc, :order, :line, :item, :lot, :qty, :uom, :toLpn, :now, :now)
+                        on conflict (tenant_id, allocation_id) where task_type = 'PICK' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", p.priority())
+                .param("owner", p.ownerId()).param("lpn", p.fromLpn() == null ? "" : p.fromLpn())
+                .param("from", p.fromLocation()).param("to", p.toLocation()).param("alloc", p.allocationId())
+                .param("order", p.orderRef()).param("line", p.orderLineRef()).param("item", p.itemNo())
+                .param("lot", p.lotNo()).param("qty", p.qty()).param("uom", p.uom()).param("toLpn", p.toLpn())
+                .param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", "Pick " + p.qty().toPlainString() + " " + p.itemNo() + " for " + p.orderRef());
+        }
+    }
+
+    @Transactional
+    public void onPickCancelled(String siteId, OutboundContracts.PickCancelled c) {
+        jdbc.sql("""
+                        update task set status = 'CANCELLED', exception_reason = 'ORDER_CANCELLED', updated_at = :now
+                        where site_id = :site and allocation_id = :alloc and task_type = 'PICK'
+                          and status in ('RELEASED', 'ASSIGNED', 'EXCEPTION')""")
+                .param("now", Timestamp.from(clock.instant())).param("site", siteId).param("alloc", c.allocationId())
+                .update();
+    }
+
+    /**
+     * RF pick: the scanned check digit must belong to the source location; picking less than requested is a short
+     * pick that releases the remainder (PCK-003). Idempotent via the inventory key {@code TSK-<taskId>}.
+     */
+    @Transactional
+    public TaskView confirmPick(String siteId, UUID taskId, String checkDigit, java.math.BigDecimal qty,
+                                List<String> serials) {
+        record Pick(String status, String type, String assignedTo, String from, String to, String toLpn,
+                    UUID allocation, String order, String line, java.math.BigDecimal requested) {
+        }
+        Pick p = jdbc.sql("""
+                        select status, task_type, assigned_to, from_location, target_location, to_lpn, allocation_id,
+                               order_ref, order_line_ref, qty
+                        from task where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Pick(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getString(5), rs.getString(6), rs.getObject(7, UUID.class), rs.getString(8), rs.getString(9),
+                        rs.getBigDecimal(10)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"PICK".equals(p.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + p.type() + " task");
+        }
+        if ("COMPLETED".equals(p.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(p.status()) || !user.equals(p.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + p.status() + " and not assigned to " + user);
+        }
+        Projections.Location source = projections.location(siteId, p.from()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + p.from() + " is not known"));
+        if (source.checkDigit() == null || !source.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + p.from());
+        }
+        if (qty.compareTo(p.requested()) > 0) {
+            throw ApiException.unprocessable("TSK_PICK_QTY_EXCEEDS", "Requested " + p.requested().stripTrailingZeros().toPlainString());
+        }
+        boolean shortPick = qty.compareTo(p.requested()) < 0;
+        UUID operation = inventory.pick(siteId, "TSK-" + taskId, p.allocation(), qty, p.to(), p.toLpn(), serials, shortPick);
+        Instant now = clock.instant();
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', qty_picked = :qty, confirmed_location = target_location,
+                            inventory_operation_id = :op, exception_reason = :short, completed_at = :now, updated_at = :now
+                        where id = :id""")
+                .param("qty", qty).param("op", operation).param("short", shortPick ? "SHORT_PICK" : null)
+                .param("now", Timestamp.from(now)).param("id", taskId).update();
+        event(taskId, "COMPLETED", "picked " + qty.toPlainString() + (shortPick ? " (short)" : ""));
+        outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_TASK_EVENTS, OutboundContracts.TaskCompleted.TYPE,
+                OutboundContracts.TaskCompleted.VERSION, null, siteId, null, siteId + ":" + p.order(),
+                new OutboundContracts.TaskCompleted(taskId, "PICK", p.allocation(), p.order(), p.line(), qty,
+                        p.requested().subtract(qty), user, now)));
+        return view(siteId, taskId);
+    }
+
     private record Task(UUID id, String siteId, String status, String ownerId, String lpnId, String fromLocation,
-                        String targetLocation, String assignedTo, List<String> excluded, UUID inventoryOperationId) {
+                        String targetLocation, String assignedTo, List<String> excluded, UUID inventoryOperationId,
+                        String type) {
     }
 
     // =====================================================================================================
@@ -193,6 +289,9 @@ public class TaskService {
     @Transactional
     public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit) {
         Task t = lockTask(siteId, taskId);
+        if (!"PUTAWAY".equals(t.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Confirm pick tasks with /pick");
+        }
         if ("COMPLETED".equals(t.status())) {
             return view(siteId, taskId);
         }
@@ -236,6 +335,9 @@ public class TaskService {
         if (!OPEN.contains(t.status())) {
             throw ApiException.conflict("TSK_NOT_OPEN", "Task is " + t.status());
         }
+        if (!"PUTAWAY".equals(t.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Report shorts on pick tasks by confirming a lower quantity");
+        }
         event(taskId, "EXCEPTION_REPORTED", reason + (detail == null ? "" : ": " + detail));
         if (REPLAN_REASONS.contains(reason)) {
             if (t.targetLocation() != null) {
@@ -258,6 +360,9 @@ public class TaskService {
         Task t = lockTask(siteId, taskId);
         if (!OPEN.contains(t.status())) {
             throw ApiException.conflict("TSK_NOT_OPEN", "Task is " + t.status());
+        }
+        if (!"PUTAWAY".equals(t.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Only putaway tasks are planned by the task service");
         }
         plan(t);
         return view(siteId, taskId);
@@ -287,22 +392,35 @@ public class TaskService {
         TaskView base = jdbc.sql("""
                         select id, task_type, status, priority, owner_id, lpn_id, from_location, target_location, strategy,
                                exception_reason, assigned_to, confirmed_location, inventory_operation_id, created_at,
-                               completed_at
+                               completed_at, allocation_id, order_ref, order_line_ref, item_no, lot_no, qty, uom, to_lpn,
+                               qty_picked
                         from task where site_id = :site and id = :id""")
                 .param("site", siteId).param("id", id)
                 .query((rs, n) -> new TaskView(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getInt(4),
                         rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
                         rs.getString(10), rs.getString(11), rs.getString(12), rs.getObject(13, UUID.class), List.of(),
-                        rs.getTimestamp(14).toInstant(), rs.getTimestamp(15) == null ? null : rs.getTimestamp(15).toInstant()))
+                        rs.getTimestamp(14).toInstant(), rs.getTimestamp(15) == null ? null : rs.getTimestamp(15).toInstant(),
+                        rs.getObject(16, UUID.class), rs.getString(17), rs.getString(18), rs.getString(19), rs.getString(20),
+                        strip(rs.getBigDecimal(21)), rs.getString(22), rs.getString(23), strip(rs.getBigDecimal(24))))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
         String where = base.status().equals("COMPLETED") ? base.confirmedLocation() : base.fromLocation();
-        List<Content> contents = projections.lpnContents(siteId, base.lpnId(), where).stream()
+        List<Content> contents = "PICK".equals(base.taskType()) ? List.of() : projections.lpnContents(siteId, base.lpnId(), where).stream()
                 .map(s -> new Content(s.ownerId(), s.itemNo(), s.lotNo(), s.qty().stripTrailingZeros()))
                 .toList();
         return new TaskView(base.id(), base.taskType(), base.status(), base.priority(), base.ownerId(), base.lpnId(),
                 base.fromLocation(), base.targetLocation(), base.strategy(), base.exceptionReason(), base.assignedTo(),
-                base.confirmedLocation(), base.inventoryOperationId(), contents, base.createdAt(), base.completedAt());
+                base.confirmedLocation(), base.inventoryOperationId(), contents, base.createdAt(), base.completedAt(),
+                base.allocationId(), base.orderRef(), base.orderLineRef(), base.itemNo(), base.lotNo(), base.qty(),
+                base.uom(), base.toLpn(), base.qtyPicked());
+    }
+
+    private static java.math.BigDecimal strip(java.math.BigDecimal v) {
+        if (v == null) {
+            return null;
+        }
+        java.math.BigDecimal s = v.stripTrailingZeros();
+        return s.scale() < 0 ? s.setScale(0) : s;
     }
 
     private Task lockTask(String siteId, UUID id) {
@@ -319,13 +437,14 @@ public class TaskService {
 
     private static final String TASK = """
             select id, site_id, status, owner_id, lpn_id, from_location, target_location, assigned_to,
-                   excluded_locations, inventory_operation_id from task""";
+                   excluded_locations, inventory_operation_id, task_type from task""";
 
     private static Task task(ResultSet rs, int n) throws SQLException {
         Array excluded = rs.getArray(9);
         return new Task(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
                 rs.getString(6), rs.getString(7), rs.getString(8),
-                excluded == null ? List.of() : List.of((String[]) excluded.getArray()), rs.getObject(10, UUID.class));
+                excluded == null ? List.of() : List.of((String[]) excluded.getArray()), rs.getObject(10, UUID.class),
+                rs.getString(11));
     }
 
     private void setStatus(UUID id, String status, String reason) {

@@ -4,7 +4,7 @@ AstraWMS is an enterprise Warehouse Management System (WMS). It is the **warehou
 
 This repository contains:
 - the **Scope & Solution Definition** document set, written to be used directly as the basis for an RFP response, an SRS and the target architecture design;
-- the **platform code**: the platform library; the Master Data, Inventory, Inbound and Task services; and the SAP adapter.
+- the **platform code**: the platform library; the Master Data, Inventory, Inbound, Task and Outbound services; and the SAP adapter.
 
 ## Platform
 
@@ -15,6 +15,7 @@ This repository contains:
 | [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
 | [`services/inbound-service`](services/inbound-service) | Receipt expectations from the ERP with the IF-IB-001 change matrix and application acks; RF line and SSCC receiving with tolerance and lot rules; receipt close with short reasons; `ReceiptConfirmation` (IF-IB-002), ERP result tracking and repost |
 | [`services/task-service`](services/task-service) | Directed putaway: tasks created when LPNs arrive at the dock; engine with temperature, hazmat, mixing and capacity rules, consolidate then nearest-empty; RF next / confirm (LPN and check-digit scan) / exception with re-planning |
+| [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; allocation on receipt; pick requests to the task service; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancel before picking |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
 | [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) |
 
@@ -26,7 +27,7 @@ Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/R
 scripts/mvn-docker.sh -B verify
 ```
 
-**Run locally and smoke test.** This starts Postgres, Kafka, the four services and the SAP adapter with its simulated SAP.
+**Run locally and smoke test.** This starts Postgres, Kafka, the five services and the SAP adapter with its simulated SAP.
 - `smoke-test.sh` covers master data, then Kafka, then inventory.
 - `smoke-inbound.sh` covers the whole inbound flow: SAP DELVRY07, then receiving (SSCC and line), then close, then the goods receipt in simulated SAP. It also covers a period-closed failure with repost, an inventory adjustment posted as movement type 702, and an RF directed putaway of the received pallet into storage.
 
@@ -34,8 +35,10 @@ scripts/mvn-docker.sh -B verify
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
+- `smoke-outbound.sh` covers the outbound flow: SAP outbound delivery, then FEFO allocation, then RF picks (one short, one with serials), then ship, then goods issue posted in simulated SAP (order CONFIRMED).
+
 ```bash
-scripts/smoke-test.sh && scripts/smoke-inbound.sh
+scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh
 ```
 
 **APIs.**
@@ -45,7 +48,8 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh
 | Master data | 8081 | `/api/v1/items`, `/api/v1/sites/...` |
 | Inventory | 8082 | `/api/v1/sites/{siteId}/inventory/...` |
 | Inbound | 8083 | `/api/v1/sites/{siteId}/receipts/...` |
-| Task | 8084 | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/exception`, `{id}/replan`) |
+| Task | 8084 | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/exception`, `{id}/replan`) |
+| Outbound | 8085 | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`) |
 | SAP adapter | 8090 | `/api/v1/sap/...` (IDoc port, site map), `/mock-sap/...` (simulated SAP) |
 
 Every request needs an `X-Tenant-Id` header; in deployed environments the API gateway sets it from the token. Commands (inventory and RF receiving) also need `Idempotency-Key`.

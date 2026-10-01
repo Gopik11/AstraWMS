@@ -8,5 +8,8 @@ public enum TxnType {
     ADJUST_POS,
     ADJUST_NEG,
     STATUS_OUT,
-    STATUS_IN
+    STATUS_IN,
+    PICK_OUT,
+    PICK_IN,
+    ISSUE
 }

@@ -3,6 +3,7 @@ package com.astrawms.task.projection;
 import com.astrawms.common.contracts.InventoryContracts;
 import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.common.contracts.MasterDataEvents;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.contracts.MasterDataEvents.ItemUpserted;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.common.messaging.EnvelopeCodec;
@@ -56,6 +57,20 @@ public class ProjectionListeners {
         process(e, () -> {
             projections.applyStock(e.siteId(), change);
             tasks.onInventoryChanged(e.siteId(), change);
+        });
+    }
+
+    @KafkaListener(topics = OutboundContracts.TOPIC_TASK_REQUESTS, groupId = "task-service.requests")
+    public void onTaskRequest(ConsumerRecord<String, String> record) {
+        EventEnvelope e = codec.read(record.value());
+        process(e, () -> {
+            switch (e.messageType()) {
+                case OutboundContracts.PickRequested.TYPE ->
+                        tasks.onPickRequested(e.siteId(), codec.payload(e, OutboundContracts.PickRequested.class));
+                case OutboundContracts.PickCancelled.TYPE ->
+                        tasks.onPickCancelled(e.siteId(), codec.payload(e, OutboundContracts.PickCancelled.class));
+                default -> { }
+            }
         });
     }
 

@@ -1,6 +1,7 @@
 package com.astrawms.sapadapter.mapping;
 
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
 import com.astrawms.sapadapter.sap.Bapi;
 import java.time.ZoneId;
@@ -69,6 +70,40 @@ public final class BapiMapper {
                 vbeln,
                 List.of(new Bapi.Deadline(vbeln, "WSHDRWADTI", UTC_STAMP.format(c.receiptCompletedUtc()))),
                 items, controls, huHeaders, huItems, serials, c.wmsTxnId());
+    }
+
+    /**
+     * ShipmentConfirmation → BAPI_OUTB_DELIVERY_CONFIRM_DEC with post goods issue (ISD IF-OB-003 §5): picked quantity
+     * per item with CHG_DELQTY = X (short lines reduce the delivery quantity; zero lines too), batch-split sub-items
+     * 900001+ for several lots, serials per delivery item, actual goods-issue time as WSHDRWADTI (confirm).
+     */
+    public static Bapi.OutbDeliveryConfirmDec confirmOutbound(OutboundContracts.ShipmentConfirmation c) {
+        String vbeln = c.erpDocNo();
+        List<Bapi.ItemData> items = new ArrayList<>();
+        List<Bapi.ItemControl> controls = new ArrayList<>();
+        List<Bapi.ItemSerialNo> serials = new ArrayList<>();
+        int splitItem = BATCH_SPLIT_START;
+        for (OutboundContracts.ShipmentConfirmation.Line line : c.lines()) {
+            String unit = SapCodes.uomToSap(line.uom());
+            List<OutboundContracts.ShipmentConfirmation.LotSplit> lots = line.lotSplits() == null ? List.of() : line.lotSplits();
+            items.add(new Bapi.ItemData(vbeln, line.erpLineRef(), line.itemNo(), lots.size() == 1 ? lots.getFirst().lotNo() : null,
+                    line.qtyShipped(), unit, null, null));
+            controls.add(new Bapi.ItemControl(vbeln, line.erpLineRef(), "X"));
+            if (line.serials() != null) {
+                line.serials().forEach(sn -> serials.add(new Bapi.ItemSerialNo(vbeln, line.erpLineRef(), sn)));
+            }
+            if (lots.size() > 1) {
+                for (OutboundContracts.ShipmentConfirmation.LotSplit lot : lots) {
+                    String item = String.valueOf(splitItem++);
+                    items.add(new Bapi.ItemData(vbeln, item, line.itemNo(), lot.lotNo(), lot.qty(), unit, line.erpLineRef(), "1"));
+                    controls.add(new Bapi.ItemControl(vbeln, item, "X"));
+                }
+            }
+        }
+        return new Bapi.OutbDeliveryConfirmDec(new Bapi.OutbHeaderData(vbeln, c.billOfLading(), c.trackingNo()),
+                new Bapi.OutbHeaderControl(vbeln, "X"), vbeln,
+                List.of(new Bapi.Deadline(vbeln, "WSHDRWADTI", UTC_STAMP.format(c.shipDateTimeUtc()))),
+                items, controls, serials, c.wmsTxnId());
     }
 
     /**

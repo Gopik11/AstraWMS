@@ -74,6 +74,8 @@ public abstract class IntegrationTest {
         location("F-01-01", "FRZ", "0001", "FROZEN", false, true, true);
         location("H-01-01", "HAZ", "0001", null, true, true, true);
         location("Q-01-01", "QC", "0002", null, false, true, true);      // different ERP bucket
+        location("DOCK-01", "DOCK", "DOOR", "0001", null, false, true, true);         // inbound staging
+        location("STAGE-OUT", "SHIP", "STAGING_OUT", "0001", null, false, true, true); // outbound staging
     }
 
     // ------------------------------------------------------------------ reference data
@@ -91,7 +93,12 @@ public abstract class IntegrationTest {
 
     protected void location(String id, String zone, String bucket, String temperature, boolean hazmat,
                             boolean mixedItems, boolean mixedLots) {
-        asTenant(() -> refs.upsertLocation(new LocationUpserted(SITE, id, zone, "RACK", bucket, temperature, hazmat,
+        location(id, zone, "RACK", bucket, temperature, hazmat, mixedItems, mixedLots);
+    }
+
+    protected void location(String id, String zone, String type, String bucket, String temperature, boolean hazmat,
+                            boolean mixedItems, boolean mixedLots) {
+        asTenant(() -> refs.upsertLocation(new LocationUpserted(SITE, id, zone, type, bucket, temperature, hazmat,
                 mixedItems, mixedLots, "ACTIVE", Instant.now(), "10", null)));
     }
 

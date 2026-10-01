@@ -25,6 +25,9 @@ public interface SapGateway {
 
     Result createGoodsMovement(Bapi.GoodsmvtCreate call);
 
+    /** BAPI_OUTB_DELIVERY_CONFIRM_DEC with post goods issue (IF-OB-003). */
+    Result confirmOutboundDelivery(Bapi.OutbDeliveryConfirmDec call);
+
     class SapTransientException extends RuntimeException {
         public SapTransientException(String message) {
             super(message);

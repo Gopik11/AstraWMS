@@ -11,6 +11,7 @@ import com.astrawms.inventory.api.InventoryDtos.ReceiveRequest;
 import com.astrawms.inventory.api.InventoryDtos.StatusChangeRequest;
 import com.astrawms.inventory.api.InventoryDtos.TxnView;
 import com.astrawms.inventory.domain.StockStatus;
+import com.astrawms.inventory.persistence.AllocationRepository;
 import com.astrawms.inventory.persistence.SerialRepository;
 import com.astrawms.inventory.service.InventoryCommandService;
 import com.astrawms.inventory.service.InventoryQueryService;
@@ -41,10 +42,13 @@ public class InventoryController {
 
     private final InventoryCommandService commands;
     private final InventoryQueryService queries;
+    private final AllocationRepository allocationsRepo;
 
-    public InventoryController(InventoryCommandService commands, InventoryQueryService queries) {
+    public InventoryController(InventoryCommandService commands, InventoryQueryService queries,
+                               AllocationRepository allocationsRepo) {
         this.commands = commands;
         this.queries = queries;
+        this.allocationsRepo = allocationsRepo;
     }
 
     @PostMapping("/receipts")
@@ -73,6 +77,43 @@ public class InventoryController {
                                                         @RequestHeader(IDEMPOTENCY_KEY) String key,
                                                         @Valid @RequestBody StatusChangeRequest body) {
         return created(commands.changeStatus(siteId, key, body));
+    }
+
+    // ------------------------------------------------------------------ allocation / pick / issue
+
+    @PostMapping("/allocations")
+    public ResponseEntity<AllocationDtos.AllocationResult> allocate(@PathVariable String siteId,
+                                                                   @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                                   @Valid @RequestBody AllocationDtos.AllocateRequest body) {
+        AllocationDtos.AllocationResult r = commands.allocate(siteId, key, body);
+        return ResponseEntity.status(r.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(r);
+    }
+
+    @GetMapping("/allocations")
+    public java.util.List<AllocationRepository.Allocation> allocations(@PathVariable String siteId,
+                                                                      @RequestParam String orderRef) {
+        return allocationsRepo.byOrder(siteId, orderRef);
+    }
+
+    @PostMapping("/allocations/{allocationId}/pick")
+    public ResponseEntity<OperationResult> pick(@PathVariable String siteId, @PathVariable UUID allocationId,
+                                                @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                @Valid @RequestBody AllocationDtos.PickRequest body) {
+        return created(commands.pick(siteId, allocationId, key, body));
+    }
+
+    @PostMapping("/allocations/release")
+    public AllocationDtos.ReleaseResult release(@PathVariable String siteId, @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                @Valid @RequestBody AllocationDtos.ReleaseRequest body) {
+        return commands.release(siteId, key, body);
+    }
+
+    @PostMapping("/issues")
+    public ResponseEntity<AllocationDtos.IssueResult> issue(@PathVariable String siteId,
+                                                           @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                           @Valid @RequestBody AllocationDtos.IssueRequest body) {
+        AllocationDtos.IssueResult r = commands.issue(siteId, key, body);
+        return ResponseEntity.status(r.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(r);
     }
 
     @GetMapping("/balances")

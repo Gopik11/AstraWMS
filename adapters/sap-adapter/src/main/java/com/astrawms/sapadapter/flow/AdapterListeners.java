@@ -4,6 +4,7 @@ import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ApplicationAck;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
+import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.messaging.InboxGuard;
@@ -42,6 +43,12 @@ public class AdapterListeners {
     public void onReceiptConfirmation(ConsumerRecord<String, String> record) {
         EventEnvelope e = codec.read(record.value());
         process(e, () -> postings.confirmReceipt(e, codec.payload(e, ReceiptConfirmation.class)));
+    }
+
+    @KafkaListener(topics = OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS, groupId = "sap-adapter.shipment-confirmations")
+    public void onShipmentConfirmation(ConsumerRecord<String, String> record) {
+        EventEnvelope e = codec.read(record.value());
+        process(e, () -> postings.confirmShipment(e, codec.payload(e, OutboundContracts.ShipmentConfirmation.class)));
     }
 
     @KafkaListener(topics = IntegrationContracts.TOPIC_GOODS_MOVEMENTS, groupId = "sap-adapter.goods-movements")

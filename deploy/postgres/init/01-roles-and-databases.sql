@@ -8,3 +8,4 @@ create database inventory owner astra_owner;
 create database inbound owner astra_owner;
 create database sapadapter owner astra_owner;
 create database tasks owner astra_owner;
+create database outbound owner astra_owner;
