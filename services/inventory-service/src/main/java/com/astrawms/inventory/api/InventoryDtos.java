@@ -66,6 +66,11 @@ public final class InventoryDtos {
             @NotBlank String reasonCode,
             String approvedBy,
             List<String> serials) {
+
+        public AdjustRequest withApprovedBy(String approver) {
+            return new AdjustRequest(ownerId, itemNo, lotNo, expiryDate, lpnId, locationId, status, qtyDelta, uom,
+                    reasonCode, approver, serials);
+        }
     }
 
     public record StatusChangeRequest(
@@ -81,6 +86,11 @@ public final class InventoryDtos {
             @NotBlank String reasonCode,
             String approvedBy,
             List<String> serials) {
+
+        public StatusChangeRequest withApprovedBy(String approver) {
+            return new StatusChangeRequest(ownerId, itemNo, lotNo, lpnId, locationId, fromStatus, toStatus, qty, uom,
+                    reasonCode, approver, serials);
+        }
     }
 
     public record OperationResult(UUID operationId, String wmsTxnId, String opType, List<Line> lines,

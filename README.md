@@ -10,14 +10,15 @@ This repository contains:
 
 | Module | Purpose |
 |---|---|
-| [`platform/astra-common`](platform/astra-common) | Tenancy + Postgres RLS binding, RFC 9457 errors, transactional outbox/relay, inbox de-duplication, 16-char `WmsTxnId`, shared event contracts |
+| [`platform/astra-common`](platform/astra-common) | OAuth2 resource server (token validation, tenant from the token, role checks, approver proof, service-to-service tokens), Postgres RLS binding, RFC 9457 errors, transactional outbox/relay, inbox de-duplication, 16-char `WmsTxnId`, shared event contracts |
 | [`services/master-data-service`](services/master-data-service) | Items (UoMs, GTINs, site control data), sites, zones, locations with zone inheritance and bulk generation; publishes `ItemUpserted` / `LocationUpserted` |
 | [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
 | [`services/inbound-service`](services/inbound-service) | Receipt expectations from the ERP with the IF-IB-001 change matrix and application acks; RF line and SSCC receiving with tolerance and lot rules; receipt close with short reasons; `ReceiptConfirmation` (IF-IB-002), ERP result tracking and repost |
 | [`services/task-service`](services/task-service) | Directed putaway: tasks created when LPNs arrive at the dock; engine with temperature, hazmat, mixing and capacity rules, consolidate then nearest-empty; RF next / confirm (LPN and check-digit scan) / exception with re-planning |
 | [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; allocation on receipt; pick requests to the task service; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancel before picking |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
-| [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) |
+| [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) and a test token issuer |
+| [`deploy`](deploy) | Docker Compose stack with Keycloak (`deploy/keycloak`, realm `astrawms`) and the nginx API gateway (`deploy/gateway`) |
 
 Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/README.md).
 
@@ -27,7 +28,7 @@ Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/R
 scripts/mvn-docker.sh -B verify
 ```
 
-**Run locally and smoke test.** This starts Postgres, Kafka, the five services and the SAP adapter with its simulated SAP.
+**Run locally and smoke test.** This starts Postgres, Kafka, Keycloak, the API gateway, the five services and the SAP adapter with its simulated SAP. Only the gateway (http://localhost:8080) and Keycloak (http://localhost:8180) are published. Each smoke test creates a fresh tenant with users in Keycloak, signs them in and calls the API through the gateway.
 - `smoke-test.sh` covers master data, then Kafka, then inventory.
 - `smoke-inbound.sh` covers the whole inbound flow: SAP DELVRY07, then receiving (SSCC and line), then close, then the goods receipt in simulated SAP. It also covers a period-closed failure with repost, an inventory adjustment posted as movement type 702, and an RF directed putaway of the received pallet into storage.
 
@@ -41,18 +42,26 @@ docker compose -f deploy/docker-compose.yml up -d --build
 scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh
 ```
 
-**APIs.**
+**APIs.** All APIs go through the gateway at http://localhost:8080:
 
-| Service | Port | Base path |
-|---|---|---|
-| Master data | 8081 | `/api/v1/items`, `/api/v1/sites/...` |
-| Inventory | 8082 | `/api/v1/sites/{siteId}/inventory/...` |
-| Inbound | 8083 | `/api/v1/sites/{siteId}/receipts/...` |
-| Task | 8084 | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/exception`, `{id}/replan`) |
-| Outbound | 8085 | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`) |
-| SAP adapter | 8090 | `/api/v1/sap/...` (IDoc port, site map), `/mock-sap/...` (simulated SAP) |
+| Service | Base path |
+|---|---|
+| Master data | `/api/v1/items`, `/api/v1/sites/...` |
+| Inventory | `/api/v1/sites/{siteId}/inventory/...` |
+| Inbound | `/api/v1/sites/{siteId}/receipts/...` |
+| Task | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/exception`, `{id}/replan`) |
+| Outbound | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`) |
+| SAP adapter | `/api/v1/sap/...` (IDoc port, site map), `/mock-sap/...` (simulated SAP) |
+| Health | `/health/{service}`, e.g. `/health/inventory-service` |
 
-Every request needs an `X-Tenant-Id` header; in deployed environments the API gateway sets it from the token. Commands (inventory and RF receiving) also need `Idempotency-Key`.
+**Security** ([ADR-0010](docs/architecture/adr/0010-token-based-identity-and-api-gateway.md)):
+- Every request needs `Authorization: Bearer <token>` from the identity provider (locally the Keycloak realm `astrawms`).
+- The tenant and user come from the token (`tenant_id` claim); a different `X-Tenant-Id` is rejected.
+- Endpoints that change data require roles (§G.5.2), e.g. `RECEIVER` to receive, `SUPERVISOR` to ship.
+- Approvals send the approver's own token in `X-Approval-Token`.
+- Commands also need `Idempotency-Key`.
+
+To create a user locally, use the Keycloak admin console (admin / admin): add a user in realm `astrawms` with the attribute `tenant_id` and realm roles. Or use `provision` from `scripts/lib/auth.sh`.
 
 ## Document Set
 

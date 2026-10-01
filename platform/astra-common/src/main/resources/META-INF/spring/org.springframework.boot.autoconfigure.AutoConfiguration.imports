@@ -1,1 +1,2 @@
 com.astrawms.common.config.AstraCommonAutoConfiguration
+com.astrawms.common.config.AstraSecurityAutoConfiguration

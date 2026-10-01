@@ -1,7 +1,6 @@
 package com.astrawms.inbound.inventory;
 
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.common.web.ApiException;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,14 +29,11 @@ public class HttpInventoryClient implements InventoryClient {
 
     @Override
     public ReceiveResult receive(String siteId, String idempotencyKey, ReceiveCommand command) {
-        TenantContext.Scope scope = TenantContext.require();
+        TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {
             JsonNode body = rest.post()
                     .uri("/api/v1/sites/{site}/inventory/receipts", siteId)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .header(TenantFilter.TENANT_HEADER, scope.tenantId())
-                    .header(TenantFilter.USER_HEADER, scope.userId())
-                    .header(TenantFilter.CHANNEL_HEADER, scope.channel())
                     .header("Idempotency-Key", idempotencyKey)
                     .body(command)
                     .retrieve()

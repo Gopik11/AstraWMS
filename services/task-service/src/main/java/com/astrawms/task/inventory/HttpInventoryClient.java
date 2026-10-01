@@ -1,7 +1,6 @@
 package com.astrawms.task.inventory;
 
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.common.web.ApiException;
 import java.util.HashMap;
 import java.util.Map;
@@ -30,14 +29,11 @@ public class HttpInventoryClient implements InventoryClient {
 
     @Override
     public UUID moveLpn(String siteId, String idempotencyKey, String lpnId, String fromLocationId, String toLocationId) {
-        TenantContext.Scope scope = TenantContext.require();
+        TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {
             JsonNode body = rest.post()
                     .uri("/api/v1/sites/{site}/inventory/moves", siteId)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .header(TenantFilter.TENANT_HEADER, scope.tenantId())
-                    .header(TenantFilter.USER_HEADER, scope.userId())
-                    .header(TenantFilter.CHANNEL_HEADER, scope.channel())
                     .header("Idempotency-Key", idempotencyKey)
                     .body(Map.of("fromLocationId", fromLocationId, "lpnId", lpnId, "toLocationId", toLocationId))
                     .retrieve()
@@ -65,14 +61,11 @@ public class HttpInventoryClient implements InventoryClient {
     }
 
     private UUID post(String path, String siteId, String idempotencyKey, Object payload) {
-        TenantContext.Scope scope = TenantContext.require();
+        TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {
             JsonNode body = rest.post()
                     .uri(path, siteId)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .header(TenantFilter.TENANT_HEADER, scope.tenantId())
-                    .header(TenantFilter.USER_HEADER, scope.userId())
-                    .header(TenantFilter.CHANNEL_HEADER, scope.channel())
                     .header("Idempotency-Key", idempotencyKey)
                     .body(payload)
                     .retrieve()

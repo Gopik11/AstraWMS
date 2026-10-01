@@ -4,6 +4,7 @@ import com.astrawms.outbound.service.OutboundService;
 import com.astrawms.outbound.service.OutboundService.ShipRequest;
 import java.util.List;
 import java.util.Map;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -33,12 +34,14 @@ public class OutboundController {
         return outbound.detail(siteId, erpDocNo);
     }
 
+    @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/ship")
     public Map<String, Object> ship(@PathVariable String siteId, @PathVariable String erpDocNo,
                                     @RequestBody(required = false) ShipRequest body) {
         return outbound.ship(siteId, erpDocNo, body);
     }
 
+    @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/repost")
     public Map<String, Object> repost(@PathVariable String siteId, @PathVariable String erpDocNo) {
         return outbound.repost(siteId, erpDocNo);

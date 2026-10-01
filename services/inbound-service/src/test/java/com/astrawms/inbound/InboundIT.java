@@ -8,14 +8,16 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.IntegrationContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ErpPostingResult;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptExpectation;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -38,7 +40,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import tools.jackson.databind.JsonNode;
@@ -81,7 +82,7 @@ class InboundIT {
 
     @BeforeEach
     void setUp() throws Exception {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         expectation(1, "CREATE", "24", "10");
         await(() -> expectationStatus(DOC) != null);
@@ -249,7 +250,7 @@ class InboundIT {
             postingResult(new ErpPostingResult(txn, "ReceiptConfirmation", DOC, false, null, null, false,
                     "BUSINESS_CORRECTABLE", "M7 053", "Posting only possible in periods 2026/10 and 2026/09", Instant.now()));
             await(() -> "POSTING_FAILED".equals(expectationStatus(DOC)));
-            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).header(TenantFilter.TENANT_HEADER, tenant))
+            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(TestTokens.as(tenant, "receiver1", TestTokens.ALL_ROLES)))
                     .andExpect(jsonPath("$.header.erpErrorClass", is("BUSINESS_CORRECTABLE")));
 
             call(post("/api/v1/sites/DC1/receipts/" + DOC + "/repost"), "").andExpect(jsonPath("$.status", is("CLOSED")));
@@ -260,7 +261,7 @@ class InboundIT {
             postingResult(new ErpPostingResult(txn, "ReceiptConfirmation", DOC, true, "4900000042", "2026", false,
                     null, null, null, Instant.now()));
             await(() -> "CONFIRMED".equals(expectationStatus(DOC)));
-            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).header(TenantFilter.TENANT_HEADER, tenant))
+            mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(TestTokens.as(tenant, "receiver1", TestTokens.ALL_ROLES)))
                     .andExpect(jsonPath("$.header.erpDocument", is("4900000042")));
         }
     }
@@ -306,6 +307,17 @@ class InboundIT {
         }
     }
 
+    @Test
+    void pickersCannotReceiveAndReceiversCannotRepost_G5() throws Exception {
+        mvc.perform(post("/api/v1/sites/DC1/receipts/X/lines/000010/receive")
+                        .with(TestTokens.as(tenant, "pete", Roles.PICKER)).header("Idempotency-Key", "r-1")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"qty\":1,\"uom\":\"EA\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sites/DC1/receipts/X/repost").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(status().isForbidden());
+    }
+
+
     // ------------------------------------------------------------------ helpers
 
     private void expectation(long revision, String action, String qty10, String qty20) throws Exception {
@@ -341,7 +353,7 @@ class InboundIT {
 
     private ResultActions call(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request, String body)
             throws Exception {
-        return mvc.perform(request.header(TenantFilter.TENANT_HEADER, tenant).header(TenantFilter.USER_HEADER, "receiver1")
+        return mvc.perform(request.with(TestTokens.as(tenant, "receiver1", TestTokens.ALL_ROLES))
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

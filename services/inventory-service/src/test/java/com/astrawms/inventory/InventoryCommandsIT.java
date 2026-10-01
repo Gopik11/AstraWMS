@@ -7,7 +7,10 @@ import static org.hamcrest.Matchers.matchesPattern;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.inventory.support.IntegrationTest;
+import com.astrawms.test.TestTokens;
+import java.time.Instant;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -137,12 +140,28 @@ class InventoryCommandsIT extends IntegrationTest {
                      "reasonCode":"CC_VAR"%s}""";
             post("/adjustments", adjust.formatted(""))
                     .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("INV_APPROVAL_REQUIRED")));
-            postAs("alice", "/adjustments", "k-self", adjust.formatted(",\"approvedBy\":\"alice\""))
+            // A typed-in approver name is not proof: the approver must sign in (X-Approval-Token).
+            postAs("alice", "/adjustments", "k-typed", adjust.formatted(",\"approvedBy\":\"bob\""))
+                    .andExpect(status().isUnprocessableContent())
+                    .andExpect(jsonPath("$.code", is("INV_APPROVAL_TOKEN_REQUIRED")));
+            postApproved("alice", "/adjustments", "k-self", adjust.formatted(""), approvalToken("alice", Roles.INV_MANAGER))
                     .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("INV_SELF_APPROVAL")));
+            postApproved("alice", "/adjustments", "k-role", adjust.formatted(""), approvalToken("carol", Roles.PICKER))
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("APPROVER_NOT_AUTHORISED")));
+            String stale = TestTokens.token().tenant(tenant).user("bob").roles(Roles.INV_MANAGER)
+                    .issuedAt(Instant.now().minusSeconds(600)).sign();
+            postApproved("alice", "/adjustments", "k-stale", adjust.formatted(""), stale)
+                    .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("APPROVAL_TOKEN_STALE")));
+            String otherTenant = TestTokens.token().tenant("t-other").user("bob").roles(Roles.INV_MANAGER).sign();
+            postApproved("alice", "/adjustments", "k-tenant", adjust.formatted(""), otherTenant)
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("APPROVAL_TENANT_MISMATCH")));
+            postApproved("alice", "/adjustments", "k-forged", adjust.formatted(""),
+                    TestTokens.token().tenant(tenant).user("bob").roles(Roles.INV_MANAGER).forged().sign())
+                    .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("APPROVAL_TOKEN_INVALID")));
             post("/adjustments", adjust.formatted("").replace("CC_VAR", "NOPE"))
                     .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("INV_REASON_UNKNOWN")));
 
-            postAs("alice", "/adjustments", "k-ok", adjust.formatted(",\"approvedBy\":\"bob\""))
+            postApproved("alice", "/adjustments", "k-ok", adjust.formatted(""), approvalToken("bob", Roles.INV_MANAGER))
                     .andExpect(status().isCreated())
                     .andExpect(jsonPath("$.erpMovements[0].movementType", is("ADJ_NEG")));
             assertThat(onHand("SKU-EA", "A-01-01", "AVAILABLE")).isEqualByComparingTo("8");
@@ -155,9 +174,9 @@ class InventoryCommandsIT extends IntegrationTest {
         @Test
         void nonErpReasonProducesNoGoodsMovement() throws Exception {
             receive("SKU-EA", "10", "EA", "A-01-01", null, null).andExpect(status().isCreated());
-            postAs("alice", "/adjustments", "k1", """
+            postApproved("alice", "/adjustments", "k1", """
                     {"ownerId":"ACME","itemNo":"SKU-EA","locationId":"A-01-01","qtyDelta":1,"uom":"EA",
-                     "reasonCode":"SYS_CORR","approvedBy":"bob"}""")
+                     "reasonCode":"SYS_CORR"}""", approvalToken("bob", Roles.SUPERVISOR))
                     .andExpect(status().isCreated()).andExpect(jsonPath("$.erpMovements", hasSize(0)));
             assertThat(outboxTypes()).doesNotContain("GoodsMovement");
         }

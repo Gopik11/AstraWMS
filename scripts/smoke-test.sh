@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# End-to-end smoke test against the local stack (deploy/docker-compose.yml):
+# End-to-end smoke test against the local stack (deploy/docker-compose.yml), through the API gateway with Keycloak
+# tokens:
 #   master data REST -> outbox -> Kafka -> inventory projection -> inventory commands -> GoodsMovement outbox -> Kafka
 set -euo pipefail
 
-MD="${MD_URL:-http://localhost:8081}"
-INV="${INV_URL:-http://localhost:8082}"
+GW="${GATEWAY_URL:-http://localhost:8080}"
+MD="$GW"; INV="$GW"
 TENANT="smoke-$(date +%s)"
-H=(-H "X-Tenant-Id: $TENANT" -H "X-User-Id: smoke" -H "Content-Type: application/json")
+source "$(dirname "$0")/lib/auth.sh"
 COMPOSE=(docker compose -f "$(dirname "$0")/../deploy/docker-compose.yml")
 
 step() { printf '\n== %s\n' "$*"; }
@@ -18,11 +19,21 @@ expect() { # expect <http-code> <curl args...>
   [[ "$code" == "$want" ]] || fail "expected HTTP $want, got $code: $BODY"
 }
 
-step "Waiting for services"
-for url in "$MD" "$INV"; do
-  for _ in $(seq 1 60); do curl -sf "$url/actuator/health" >/dev/null && break; sleep 2; done
-  curl -sf "$url/actuator/health" >/dev/null || fail "$url not healthy"
+step "Waiting for Keycloak and services"
+wait_for_keycloak
+for svc in master-data-service inventory-service; do
+  for _ in $(seq 1 60); do curl -sf "$GW/health/$svc" >/dev/null && break; sleep 2; done
+  curl -sf "$GW/health/$svc" >/dev/null || fail "$svc not healthy"
 done
+
+step "Identity: tenant $TENANT with an administrator and an inventory operator"
+provision "$TENANT" "$TENANT-admin" SOLUTION_ADMIN
+provision "$TENANT" "$TENANT-operator" RECEIVER INV_ANALYST
+bearer "$TENANT-admin";    H=("${AUTH[@]}" -H "Content-Type: application/json")
+bearer "$TENANT-operator"; OP=("${AUTH[@]}" -H "Content-Type: application/json")
+expect 401 "$INV/api/v1/sites/DC1/inventory/balances"
+expect 403 -X PUT "$MD/api/v1/sites/DC1" "${OP[@]}" -d '{"name":"x","timeZone":"UTC"}'
+echo "No token -> 401; operator changing master data -> 403"
 
 step "Master data: site, zones, 24 generated locations, item"
 expect 204 -X PUT "$MD/api/v1/sites/DC1" "${H[@]}" -d '{"name":"Dallas DC","timeZone":"America/Chicago","erpSite":"1000"}'
@@ -39,7 +50,7 @@ step "Inventory: receive 10 CS into A-01-101 (waits for the event-driven project
 RECEIPT='{"ownerId":"ACME","itemNo":"SKU-100","qty":10,"uom":"CS","locationId":"A-01-101","lpnId":"LPN-SMOKE-1"}'
 for i in $(seq 1 30); do
   code="$(curl -s -o /tmp/astra-smoke.json -w '%{http_code}' -X POST "$INV/api/v1/sites/DC1/inventory/receipts" \
-          "${H[@]}" -H "Idempotency-Key: receipt-1" -d "$RECEIPT")"
+          "${OP[@]}" -H "Idempotency-Key: receipt-1" -d "$RECEIPT")"
   [[ "$code" == "201" ]] && break
   sleep 1
 done
@@ -47,17 +58,17 @@ done
 cat /tmp/astra-smoke.json; echo
 
 step "Inventory: move LPN to QC-01 (different ERP bucket -> BUCKET_TRANSFER)"
-expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/moves" "${H[@]}" -H "Idempotency-Key: move-1" \
+expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/moves" "${OP[@]}" -H "Idempotency-Key: move-1" \
   -d '{"fromLocationId":"A-01-101","lpnId":"LPN-SMOKE-1","toLocationId":"QC-01"}'
 grep -q '"BUCKET_TRANSFER"' <<<"$BODY" || fail "no BUCKET_TRANSFER in $BODY"
 
 step "Inventory: cycle count adjustment -2 EA (ADJ_NEG)"
-expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/adjustments" "${H[@]}" -H "Idempotency-Key: adj-1" \
+expect 201 -X POST "$INV/api/v1/sites/DC1/inventory/adjustments" "${OP[@]}" -H "Idempotency-Key: adj-1" \
   -d '{"ownerId":"ACME","itemNo":"SKU-100","locationId":"QC-01","lpnId":"LPN-SMOKE-1","qtyDelta":-2,"uom":"EA","reasonCode":"CC_TOL"}'
 grep -q '"ADJ_NEG"' <<<"$BODY" || fail "no ADJ_NEG in $BODY"
 
 step "Inventory: balance check (118 EA in LPN-SMOKE-1 at QC-01)"
-expect 200 "$INV/api/v1/sites/DC1/inventory/lpns/LPN-SMOKE-1" "${H[@]}"
+expect 200 "$INV/api/v1/sites/DC1/inventory/lpns/LPN-SMOKE-1" "${OP[@]}"
 echo "$BODY"
 grep -q '"locationId":"QC-01"' <<<"$BODY" && grep -q '"qty":118' <<<"$BODY" || fail "unexpected LPN state"
 

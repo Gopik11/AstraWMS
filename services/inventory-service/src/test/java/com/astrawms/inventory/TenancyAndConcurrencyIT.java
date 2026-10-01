@@ -7,8 +7,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.inventory.support.IntegrationTest;
+import com.astrawms.test.TestTokens;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -51,11 +51,11 @@ class TenancyAndConcurrencyIT extends IntegrationTest {
     }
 
     @Test
-    void missingTenantHeaderIsRejected() throws Exception {
+    void requestsWithoutTokenAreRejected() throws Exception {
         mvc.perform(get("/api/v1/sites/DC1/inventory/balances"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code", is("TENANT_MISSING")));
-        mvc.perform(get("/api/v1/sites/DC1/inventory/balances").header(TenantFilter.TENANT_HEADER, tenant))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code", is("UNAUTHENTICATED")));
+        mvc.perform(get("/api/v1/sites/DC1/inventory/balances").with(TestTokens.as(tenant, "operator1", TestTokens.ALL_ROLES)))
                 .andExpect(status().isOk());
     }
 

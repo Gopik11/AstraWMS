@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.InventoryContracts;
 import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.common.contracts.MasterDataEvents;
@@ -15,9 +16,10 @@ import com.astrawms.common.contracts.MasterDataEvents.ItemUpserted;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.tenancy.TenantContext;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.task.inventory.InventoryClient;
 import com.astrawms.test.AstraContainers;
+import com.astrawms.test.AstraMockMvc;
+import com.astrawms.test.TestTokens;
 import com.jayway.jsonpath.JsonPath;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -41,7 +43,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
@@ -113,7 +114,7 @@ class TaskIT {
 
     @BeforeEach
     void setUp() throws Exception {
-        mvc = MockMvcBuilders.webAppContextSetup(context).addFilters(new TenantFilter()).build();
+        mvc = AstraMockMvc.create(context);
         tenant = "t-" + UUID.randomUUID().toString().substring(0, 8);
         item("SKU-1", null, false);
         item("SKU-FZ", "FROZEN", false);
@@ -312,6 +313,17 @@ class TaskIT {
                 {"checkDigit":"%s","qty":%s}""".formatted(checkDigit, qty));
     }
 
+    @Test
+    void receiversCannotPickAndOnlySupervisorsReplan_G5() throws Exception {
+        String id = java.util.UUID.randomUUID().toString();
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/pick").with(TestTokens.as(tenant, "rita", Roles.RECEIVER))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"checkDigit\":\"11\",\"qty\":1}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/replan").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isForbidden());
+    }
+
+
     // ------------------------------------------------------------------ helpers
 
     private void received(String lpn, String item) throws Exception {
@@ -372,7 +384,7 @@ class TaskIT {
 
     private ResultActions tasks(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder r, String body)
             throws Exception {
-        return mvc.perform(r.header(TenantFilter.TENANT_HEADER, tenant).header(TenantFilter.USER_HEADER, "driver1")
+        return mvc.perform(r.with(TestTokens.as(tenant, "driver1", TestTokens.ALL_ROLES))
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

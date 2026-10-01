@@ -1,5 +1,9 @@
 package com.astrawms.inventory.api;
 
+import com.astrawms.common.security.ApprovalVerifier;
+import com.astrawms.common.security.Roles;
+import com.astrawms.common.tenancy.TenantFilter;
+import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.api.InventoryDtos.AdjustRequest;
 import com.astrawms.inventory.api.InventoryDtos.BalanceView;
 import com.astrawms.inventory.api.InventoryDtos.ItemSummary;
@@ -21,6 +25,9 @@ import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -43,14 +50,17 @@ public class InventoryController {
     private final InventoryCommandService commands;
     private final InventoryQueryService queries;
     private final AllocationRepository allocationsRepo;
+    private final ApprovalVerifier approvals;
 
     public InventoryController(InventoryCommandService commands, InventoryQueryService queries,
-                               AllocationRepository allocationsRepo) {
+                               AllocationRepository allocationsRepo, ApprovalVerifier approvals) {
         this.commands = commands;
         this.queries = queries;
         this.allocationsRepo = allocationsRepo;
+        this.approvals = approvals;
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/receipts")
     public ResponseEntity<OperationResult> receive(@PathVariable String siteId,
                                                    @RequestHeader(IDEMPOTENCY_KEY) String key,
@@ -58,6 +68,7 @@ public class InventoryController {
         return created(commands.receive(siteId, key, body));
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/moves")
     public ResponseEntity<OperationResult> move(@PathVariable String siteId,
                                                 @RequestHeader(IDEMPOTENCY_KEY) String key,
@@ -65,22 +76,35 @@ public class InventoryController {
         return created(commands.move(siteId, key, body));
     }
 
+    @PreAuthorize("hasAnyRole('INV_ANALYST','INV_MANAGER','SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/adjustments")
     public ResponseEntity<OperationResult> adjust(@PathVariable String siteId,
                                                   @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                  @RequestHeader(value = ApprovalVerifier.APPROVAL_HEADER, required = false)
+                                                  String approvalToken,
                                                   @Valid @RequestBody AdjustRequest body) {
-        return created(commands.adjust(siteId, key, body));
+        return created(commands.adjust(siteId, key, body.withApprovedBy(approver(approvalToken, body.approvedBy()))));
     }
 
+    @PreAuthorize("hasAnyRole('INV_ANALYST','INV_MANAGER','SUPERVISOR','QA_MANAGER','WMS_SERVICE')")
     @PostMapping("/status-changes")
     public ResponseEntity<OperationResult> changeStatus(@PathVariable String siteId,
                                                         @RequestHeader(IDEMPOTENCY_KEY) String key,
+                                                        @RequestHeader(value = ApprovalVerifier.APPROVAL_HEADER, required = false)
+                                                        String approvalToken,
                                                         @Valid @RequestBody StatusChangeRequest body) {
-        return created(commands.changeStatus(siteId, key, body));
+        if (body.fromStatus() == StockStatus.QI && body.toStatus() == StockStatus.AVAILABLE
+                && !hasRole(Roles.QA_MANAGER) && !isService()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INV_QA_RELEASE_REQUIRED",
+                    "Releasing stock from quality inspection requires the QA_MANAGER role");
+        }
+        return created(commands.changeStatus(siteId, key,
+                body.withApprovedBy(approver(approvalToken, body.approvedBy()))));
     }
 
     // ------------------------------------------------------------------ allocation / pick / issue
 
+    @PreAuthorize("hasAnyRole('SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/allocations")
     public ResponseEntity<AllocationDtos.AllocationResult> allocate(@PathVariable String siteId,
                                                                    @RequestHeader(IDEMPOTENCY_KEY) String key,
@@ -95,6 +119,7 @@ public class InventoryController {
         return allocationsRepo.byOrder(siteId, orderRef);
     }
 
+    @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/allocations/{allocationId}/pick")
     public ResponseEntity<OperationResult> pick(@PathVariable String siteId, @PathVariable UUID allocationId,
                                                 @RequestHeader(IDEMPOTENCY_KEY) String key,
@@ -102,12 +127,14 @@ public class InventoryController {
         return created(commands.pick(siteId, allocationId, key, body));
     }
 
+    @PreAuthorize("hasAnyRole('SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/allocations/release")
     public AllocationDtos.ReleaseResult release(@PathVariable String siteId, @RequestHeader(IDEMPOTENCY_KEY) String key,
                                                 @Valid @RequestBody AllocationDtos.ReleaseRequest body) {
         return commands.release(siteId, key, body);
     }
 
+    @PreAuthorize("hasAnyRole('SUPERVISOR','WMS_SERVICE')")
     @PostMapping("/issues")
     public ResponseEntity<AllocationDtos.IssueResult> issue(@PathVariable String siteId,
                                                            @RequestHeader(IDEMPOTENCY_KEY) String key,
@@ -159,5 +186,32 @@ public class InventoryController {
 
     private static ResponseEntity<OperationResult> created(OperationResult result) {
         return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED).body(result);
+    }
+
+    // ------------------------------------------------------------------ approvals (NFR-101, §G.5)
+
+    /**
+     * The approver must prove their identity with their own fresh sign-in (X-Approval-Token). A plain
+     * {@code approvedBy} name is accepted only from AstraWMS services (e.g. an approval workflow) acting for a user.
+     */
+    private String approver(String approvalToken, String claimedApprover) {
+        if (approvalToken != null && !approvalToken.isBlank()) {
+            return approvals.approver(approvalToken, Roles.INV_MANAGER, Roles.SUPERVISOR);
+        }
+        if (claimedApprover != null && !claimedApprover.isBlank() && !isService()) {
+            throw ApiException.unprocessable("INV_APPROVAL_TOKEN_REQUIRED",
+                    "The approver must sign in to approve: send their token in " + ApprovalVerifier.APPROVAL_HEADER);
+        }
+        return claimedApprover;
+    }
+
+    private static boolean isService() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return auth != null && TenantFilter.isService(auth);
+    }
+
+    private static boolean hasRole(String role) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        return auth != null && auth.getAuthorities().stream().anyMatch(a -> ("ROLE_" + role).equals(a.getAuthority()));
     }
 }

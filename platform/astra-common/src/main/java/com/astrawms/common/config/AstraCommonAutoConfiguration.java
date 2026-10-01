@@ -7,7 +7,6 @@ import com.astrawms.common.messaging.MessagingHousekeeping;
 import com.astrawms.common.messaging.OutboxRelay;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.tenancy.TenantAwareDataSource;
-import com.astrawms.common.tenancy.TenantFilter;
 import com.astrawms.common.web.ProblemHandler;
 import java.time.Clock;
 import java.time.Duration;
@@ -18,9 +17,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.CommonErrorHandler;
@@ -66,13 +63,6 @@ public class AstraCommonAutoConfiguration {
     @Bean
     JsonMapperBuilderCustomizer astraJsonConventions() {
         return builder -> builder.disable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES);
-    }
-
-    @Bean
-    FilterRegistrationBean<TenantFilter> tenantFilter() {
-        FilterRegistrationBean<TenantFilter> registration = new FilterRegistrationBean<>(new TenantFilter());
-        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
-        return registration;
     }
 
     @Bean

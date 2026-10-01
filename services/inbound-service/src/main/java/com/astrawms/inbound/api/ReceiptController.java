@@ -11,6 +11,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,6 +42,7 @@ public class ReceiptController {
         return receiving.detail(siteId, erpDocNo);
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
     @PostMapping("/{erpDocNo}/lines/{lineRef}/receive")
     public ResponseEntity<ReceiveResult> receiveLine(@PathVariable String siteId, @PathVariable String erpDocNo,
                                                      @PathVariable String lineRef,
@@ -49,6 +51,7 @@ public class ReceiptController {
         return respond(receiving.receiveLine(siteId, erpDocNo, lineRef, key, body));
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
     @PostMapping("/{erpDocNo}/sscc/{sscc}/receive")
     public ResponseEntity<ReceiveResult> receiveSscc(@PathVariable String siteId, @PathVariable String erpDocNo,
                                                      @PathVariable String sscc,
@@ -57,12 +60,14 @@ public class ReceiptController {
         return respond(receiving.receiveSscc(siteId, erpDocNo, sscc, key, body));
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
     @PostMapping("/{erpDocNo}/close")
     public ExpectationSummary close(@PathVariable String siteId, @PathVariable String erpDocNo,
                                     @RequestBody(required = false) CloseRequest body) {
         return receiving.close(siteId, erpDocNo, body);
     }
 
+    @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/repost")
     public ExpectationSummary repost(@PathVariable String siteId, @PathVariable String erpDocNo) {
         return receiving.repost(siteId, erpDocNo);
