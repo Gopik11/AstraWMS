@@ -43,6 +43,12 @@ docker compose -f deploy/docker-compose.yml up -d --build
 scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh
 ```
 
+**Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, streams them over SSH and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.
+- Every container has hard memory and CPU limits (about 3.3 GB in total), so the stack can share a host with other applications.
+- Secrets are generated on the server (`/opt/astrawms/.env`, root-only).
+- Only the gateway is published. It also serves the `astrawms` realm's token endpoints. The Keycloak admin console is reachable only through an SSH tunnel to `127.0.0.1:8181`.
+- The smoke tests run against it with `GATEWAY_URL`, `KC_URL` (the tunnel), `PROVISIONER_SECRET` and `SMOKE_SKIP_DB_CHECKS=1`.
+
 **APIs.** All APIs go through the gateway at http://localhost:8080:
 
 | Service | Base path |

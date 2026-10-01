@@ -54,4 +54,11 @@ public class OutboundConfig {
     NewTopic taskEventsTopic() {
         return TopicBuilder.name(OutboundContracts.TOPIC_TASK_EVENTS).partitions(6).replicas(1).build();
     }
+
+    /** Consumed here; declared so that start order cannot leave it with one auto-created partition. */
+    @Bean
+    NewTopic erpPostingResultsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.IntegrationContracts.TOPIC_ERP_POSTING_RESULTS)
+                .partitions(6).replicas(1).build();
+    }
 }
