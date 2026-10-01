@@ -11,5 +11,7 @@ public enum TxnType {
     STATUS_IN,
     PICK_OUT,
     PICK_IN,
-    ISSUE
+    ISSUE,
+    RETURN_OUT,
+    RETURN_IN
 }

@@ -30,10 +30,14 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Outbound order lifecycle (scope §3–5): RELEASED (allocated, picks requested) or BACKORDERED (nothing allocable)
- * → PICKED → SHIPPED (ShipmentConfirmation sent) → CONFIRMED (ERP goods issue posted) or SHIP_ERROR.
- * Allocation happens on receipt of the order (hard allocation, §3.3); shortfalls are reported, not backordered in
- * WMS (OUT-EX-01: the ERP decides on the remainder from the confirmed quantities).
+ * Outbound order lifecycle (scope §3–5, ADR-0009, ADR-0011):
+ * <pre>
+ * POOLED (wave mode) ──wave release──┐
+ *                                    ├─▶ RELEASED (allocated, picks requested) or BACKORDERED (nothing allocable)
+ * (waveless mode: on receipt) ───────┘      → PICKED → SHIPPED → CONFIRMED or SHIP_ERROR
+ * cancel: POOLED/BACKORDERED → CANCELLED; after release → CANCEL_REQUESTED (picked stock returning) → CANCELLED
+ * </pre>
+ * Shortfalls are reported to the ERP (OUT-EX-01); a short pick is first re-allocated from other locations (PCK-003).
  */
 @Service
 public class OutboundService {
@@ -45,10 +49,12 @@ public class OutboundService {
     private final Clock clock;
     private final String stagingLocation;
     private final int pickPriority;
+    private final int returnPriority;
 
     public OutboundService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, JsonMapper json, Clock clock,
                            @Value("${astra.outbound.staging-location:STAGE-OUT}") String stagingLocation,
-                           @Value("${astra.outbound.pick-priority:60}") int pickPriority) {
+                           @Value("${astra.outbound.pick-priority:60}") int pickPriority,
+                           @Value("${astra.outbound.return-priority:70}") int returnPriority) {
         this.jdbc = jdbc;
         this.inventory = inventory;
         this.outbox = outbox;
@@ -56,10 +62,21 @@ public class OutboundService {
         this.clock = clock;
         this.stagingLocation = stagingLocation;
         this.pickPriority = pickPriority;
+        this.returnPriority = returnPriority;
     }
 
-    private record Order(UUID id, String siteId, String erpDocNo, String status, long revision, String pickLpn,
-                         String shipmentTxnId) {
+    record Order(UUID id, String siteId, String erpDocNo, String status, long revision, String pickLpn,
+                 String shipmentTxnId) {
+    }
+
+    /** Where the ERP acknowledgement of an order message goes (IF-OB-002); kept while a cancellation is pending. */
+    record AckTarget(String sourceSystem, String siteId, String ownerId, String messageId, String sourceIdocOrEventId,
+                     String erpDocNo) {
+
+        static AckTarget of(EventEnvelope envelope, OutboundOrder o) {
+            return new AckTarget(envelope.sourceSystem(), envelope.siteId(), envelope.ownerId(),
+                    envelope.messageId().toString(), o.sourceIdocOrEventId(), o.erpDocNo());
+        }
     }
 
     // =====================================================================================================
@@ -69,91 +86,154 @@ public class OutboundService {
     @Transactional
     public void onOrder(EventEnvelope envelope, OutboundOrder o) {
         String site = envelope.siteId();
+        AckTarget ack = AckTarget.of(envelope, o);
         Optional<Order> existing = lockOrder(site, o.erpDocNo());
         if (existing.isPresent()) {
             Order cur = existing.get();
             if (o.revision() <= cur.revision()) {
-                ack(envelope, o, null, null);                       // stale or duplicate: acknowledged, ignored
+                ack(ack, null, null);                       // stale or duplicate: acknowledged, ignored
                 return;
             }
             if ("CANCEL".equals(o.action())) {
-                cancel(envelope, o, cur);
+                cancel(ack, o, cur);
+            } else if ("POOLED".equals(cur.status())) {
+                replacePooled(envelope, o, cur);              // OUT-002: changes accepted until release
+                ack(ack, null, null);
             } else {
-                // IF-OB-002 §6.1: orders are released to picking on receipt, so changes are rejected (ERP re-plans).
-                ack(envelope, o, "RELEASED_TO_PICK", "Order is " + cur.status() + "; create a new delivery for changes");
+                // IF-OB-002 §6.1: after release, changes are rejected (the ERP re-plans with a new delivery).
+                ack(ack, "RELEASED_TO_PICK", "Order is " + cur.status() + "; create a new delivery for changes");
             }
             return;
         }
         if ("CANCEL".equals(o.action())) {
-            ack(envelope, o, null, null);
+            ack(ack, null, null);
             return;
         }
-        create(envelope, o);
-        ack(envelope, o, null, null);
-    }
-
-    private void create(EventEnvelope envelope, OutboundOrder o) {
-        String site = envelope.siteId();
+        boolean pooled = "WAVE".equals(releaseMode(site));
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(clock.instant());
-        String pickLpn = "PK-" + o.erpDocNo();
         jdbc.sql("""
                         insert into outbound_order (id, tenant_id, site_id, erp_doc_no, order_type, revision, source_system,
                             ship_to, carrier_scac, planned_gi_utc, status, staging_location, pick_lpn, created_at, updated_at)
-                        values (:id, :t, :site, :doc, :type, :rev, :src, cast(:shipTo as jsonb), :scac, :gi, 'RELEASED',
+                        values (:id, :t, :site, :doc, :type, :rev, :src, cast(:shipTo as jsonb), :scac, :gi, :status,
                                 :staging, :pickLpn, :now, :now)""")
                 .param("id", id).param("t", TenantContext.tenantId()).param("site", site).param("doc", o.erpDocNo())
                 .param("type", o.orderType()).param("rev", o.revision()).param("src", envelope.sourceSystem())
                 .param("shipTo", o.shipTo() == null ? null : json.writeValueAsString(o.shipTo()))
                 .param("scac", o.carrierScac())
                 .param("gi", o.plannedGoodsIssueUtc() == null ? null : Timestamp.from(o.plannedGoodsIssueUtc()))
-                .param("staging", stagingLocation).param("pickLpn", pickLpn).param("now", now).update();
-        BigDecimal totalAllocated = BigDecimal.ZERO;
-        for (OutboundOrder.Line l : o.lines()) {
-            InventoryClient.AllocateResult a = inventory.allocate(site, "OUT-" + o.erpDocNo() + "-" + o.revision() + "-" + l.erpLineRef(),
-                    o.erpDocNo(), l.erpLineRef(), l.ownerId(), l.itemNo(), l.qtyRequested(), l.uom(), l.lotNo());
+                .param("status", pooled ? "POOLED" : "RELEASED")
+                .param("staging", stagingLocation).param("pickLpn", "PK-" + o.erpDocNo()).param("now", now).update();
+        insertLines(id, o.lines());
+        if (!pooled) {
+            allocateAndRelease(lockOrder(id));
+        }
+        ack(ack, null, null);
+    }
+
+    private void replacePooled(EventEnvelope envelope, OutboundOrder o, Order cur) {
+        jdbc.sql("delete from outbound_line where order_id = :o").param("o", cur.id()).update();
+        insertLines(cur.id(), o.lines());
+        jdbc.sql("""
+                        update outbound_order set revision = :rev, order_type = :type, ship_to = cast(:shipTo as jsonb),
+                            carrier_scac = :scac, planned_gi_utc = :gi, source_system = :src, updated_at = :now
+                        where id = :id""")
+                .param("rev", o.revision()).param("type", o.orderType())
+                .param("shipTo", o.shipTo() == null ? null : json.writeValueAsString(o.shipTo()))
+                .param("scac", o.carrierScac())
+                .param("gi", o.plannedGoodsIssueUtc() == null ? null : Timestamp.from(o.plannedGoodsIssueUtc()))
+                .param("src", envelope.sourceSystem()).param("now", Timestamp.from(clock.instant()))
+                .param("id", cur.id()).update();
+    }
+
+    private void insertLines(UUID orderId, List<OutboundOrder.Line> lines) {
+        for (OutboundOrder.Line l : lines) {
             jdbc.sql("""
                             insert into outbound_line (order_id, tenant_id, erp_line_ref, owner_id, item_no, qty_requested,
-                                uom, lot_no, base_uom, qty_requested_base, qty_allocated, qty_short)
-                            values (:o, :t, :ref, :owner, :item, :qty, :uom, :lot, :baseUom, :reqBase, :alloc, :short)""")
-                    .param("o", id).param("t", TenantContext.tenantId()).param("ref", l.erpLineRef())
+                                uom, lot_no)
+                            values (:o, :t, :ref, :owner, :item, :qty, :uom, :lot)""")
+                    .param("o", orderId).param("t", TenantContext.tenantId()).param("ref", l.erpLineRef())
                     .param("owner", l.ownerId()).param("item", l.itemNo()).param("qty", l.qtyRequested())
-                    .param("uom", l.uom()).param("lot", l.lotNo()).param("baseUom", a.baseUom())
-                    .param("reqBase", a.requestedQty()).param("alloc", a.allocatedQty()).param("short", a.shortQty())
-                    .update();
-            for (InventoryClient.Allocation al : a.allocations()) {
-                jdbc.sql("""
-                                insert into outbound_allocation (allocation_id, tenant_id, order_id, erp_line_ref, location_id,
-                                    lpn_id, lot_no, qty, status)
-                                values (:a, :t, :o, :ref, :loc, :lpn, :lot, :qty, 'OPEN')""")
-                        .param("a", al.id()).param("t", TenantContext.tenantId()).param("o", id)
-                        .param("ref", l.erpLineRef()).param("loc", al.locationId()).param("lpn", al.lpnId())
-                        .param("lot", al.lotNo()).param("qty", al.qty()).update();
-                outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_TASK_REQUESTS,
-                        OutboundContracts.PickRequested.TYPE, OutboundContracts.PickRequested.VERSION, null, site,
-                        l.ownerId(), site + ":" + o.erpDocNo(),
-                        new OutboundContracts.PickRequested(al.id(), o.erpDocNo(), l.erpLineRef(), l.ownerId(),
-                                l.itemNo(), al.lotNo(), al.qty(), a.baseUom(), al.locationId(), al.lpnId(),
-                                stagingLocation, pickLpn, pickPriority)));
-            }
-            totalAllocated = totalAllocated.add(a.allocatedQty());
-        }
-        if (totalAllocated.signum() == 0) {
-            setStatus(id, "BACKORDERED");
+                    .param("uom", l.uom()).param("lot", l.lotNo()).update();
         }
     }
 
-    private void cancel(EventEnvelope envelope, OutboundOrder o, Order cur) {
-        if (!"RELEASED".equals(cur.status()) && !"BACKORDERED".equals(cur.status())) {
-            ack(envelope, o, cur.status(), "Order is " + cur.status() + "; it can no longer be cancelled");
-            return;
+    /**
+     * Hard-allocates every line (§3.4) and requests one pick task per allocation. The order becomes RELEASED, or
+     * BACKORDERED when nothing could be allocated. Inventory keys include the revision, so a retry allocates once.
+     */
+    void allocateAndRelease(Order order) {
+        record Line(String ref, String owner, String item, BigDecimal qty, String uom, String lot) {
         }
-        BigDecimal picked = jdbc.sql("select coalesce(sum(qty_picked), 0) from outbound_line where order_id = :o")
-                .param("o", cur.id()).query(BigDecimal.class).single();
-        if (picked.signum() > 0) {
-            ack(envelope, o, "PICK_STARTED", "Picked stock must be returned before the order can be cancelled");
-            return;
+        List<Line> lines = jdbc.sql("""
+                        select erp_line_ref, owner_id, item_no, qty_requested, uom, lot_no from outbound_line
+                        where order_id = :o order by erp_line_ref""")
+                .param("o", order.id())
+                .query((rs, n) -> new Line(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBigDecimal(4),
+                        rs.getString(5), rs.getString(6)))
+                .list();
+        BigDecimal totalAllocated = BigDecimal.ZERO;
+        for (Line l : lines) {
+            InventoryClient.AllocateResult a = inventory.allocate(order.siteId(),
+                    "OUT-" + order.erpDocNo() + "-" + order.revision() + "-" + l.ref(), order.erpDocNo(), l.ref(),
+                    l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of());
+            jdbc.sql("""
+                            update outbound_line set base_uom = :baseUom, qty_requested_base = :reqBase,
+                                qty_allocated = :alloc, qty_short = :short
+                            where order_id = :o and erp_line_ref = :ref""")
+                    .param("baseUom", a.baseUom()).param("reqBase", a.requestedQty()).param("alloc", a.allocatedQty())
+                    .param("short", a.shortQty()).param("o", order.id()).param("ref", l.ref()).update();
+            requestPicks(order, l.ref(), l.owner(), l.item(), a, null);
+            totalAllocated = totalAllocated.add(a.allocatedQty());
         }
+        setStatus(order.id(), totalAllocated.signum() == 0 ? "BACKORDERED" : "RELEASED");
+    }
+
+    private void requestPicks(Order order, String lineRef, String owner, String item, InventoryClient.AllocateResult a,
+                              UUID replaces) {
+        for (InventoryClient.Allocation al : a.allocations()) {
+            jdbc.sql("""
+                            insert into outbound_allocation (allocation_id, tenant_id, order_id, erp_line_ref, location_id,
+                                lpn_id, lot_no, qty, status, replaces)
+                            values (:a, :t, :o, :ref, :loc, :lpn, :lot, :qty, 'OPEN', :replaces)""")
+                    .param("a", al.id()).param("t", TenantContext.tenantId()).param("o", order.id())
+                    .param("ref", lineRef).param("loc", al.locationId()).param("lpn", al.lpnId())
+                    .param("lot", al.lotNo()).param("qty", al.qty()).param("replaces", replaces).update();
+            outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_TASK_REQUESTS,
+                    OutboundContracts.PickRequested.TYPE, OutboundContracts.PickRequested.VERSION, null, order.siteId(),
+                    owner, order.siteId() + ":" + order.erpDocNo(),
+                    new OutboundContracts.PickRequested(al.id(), order.erpDocNo(), lineRef, owner, item, al.lotNo(),
+                            al.qty(), a.baseUom(), al.locationId(), al.lpnId(), stagingLocation, order.pickLpn(),
+                            pickPriority)));
+        }
+    }
+
+    // =====================================================================================================
+    // Cancellation (OUT-EX-02)
+    // =====================================================================================================
+
+    /**
+     * Before release the order is simply cancelled. After release, open picks are cancelled and stock that was
+     * already picked is returned to stock by reverse-pick tasks; the ERP gets its acknowledgement only when all of it
+     * is back in stock.
+     */
+    private void cancel(AckTarget ack, OutboundOrder o, Order cur) {
+        switch (cur.status()) {
+            case "POOLED" -> {
+                jdbc.sql("update outbound_order set status = 'CANCELLED', wave_id = null, revision = :rev, updated_at = :now where id = :id")
+                        .param("rev", o.revision()).param("now", Timestamp.from(clock.instant())).param("id", cur.id()).update();
+                ack(ack, null, null);
+                return;
+            }
+            case "RELEASED", "BACKORDERED", "PICKED" -> {
+                // continue below
+            }
+            default -> {
+                ack(ack, cur.status(), "Order is " + cur.status() + "; it can no longer be cancelled");
+                return;
+            }
+        }
+        // Inventory serialises this with picks: afterwards each allocation is either released or PICKED there.
         inventory.release(cur.siteId(), "OUT-REL-" + o.erpDocNo() + "-" + o.revision(), o.erpDocNo());
         for (UUID allocation : jdbc.sql("select allocation_id from outbound_allocation where order_id = :o and status = 'OPEN'")
                 .param("o", cur.id()).query(UUID.class).list()) {
@@ -163,47 +243,134 @@ public class OutboundService {
         }
         jdbc.sql("update outbound_allocation set status = 'CANCELLED' where order_id = :o and status = 'OPEN'")
                 .param("o", cur.id()).update();
-        jdbc.sql("update outbound_order set status = 'CANCELLED', revision = :rev, updated_at = :now where id = :id")
-                .param("rev", o.revision()).param("now", Timestamp.from(clock.instant())).param("id", cur.id()).update();
-        ack(envelope, o, null, null);
+
+        int returning = 0;
+        for (InventoryClient.InventoryAllocation a : inventory.allocations(cur.siteId(), o.erpDocNo())) {
+            if (!"PICKED".equals(a.status())) {
+                continue;
+            }
+            jdbc.sql("update outbound_allocation set status = 'RETURNING' where allocation_id = :a")
+                    .param("a", a.id()).update();
+            String baseUom = jdbc.sql("select base_uom from outbound_line where order_id = :o and erp_line_ref = :ref")
+                    .param("o", cur.id()).param("ref", a.orderLineRef()).query(String.class).optional().orElse(null);
+            outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_TASK_REQUESTS,
+                    OutboundContracts.ReturnRequested.TYPE, OutboundContracts.ReturnRequested.VERSION, null, cur.siteId(),
+                    a.ownerId(), cur.siteId() + ":" + o.erpDocNo(),
+                    new OutboundContracts.ReturnRequested(a.id(), o.erpDocNo(), a.orderLineRef(), a.ownerId(),
+                            a.itemNo(), a.lotNo(), a.qtyPicked(), baseUom, a.pickedLocation(), a.pickedLpn(),
+                            a.locationId(), a.lpnId(), returnPriority)));
+            returning++;
+        }
+        if (returning == 0) {
+            jdbc.sql("update outbound_order set status = 'CANCELLED', revision = :rev, updated_at = :now where id = :id")
+                    .param("rev", o.revision()).param("now", Timestamp.from(clock.instant())).param("id", cur.id()).update();
+            ack(ack, null, null);
+        } else {
+            jdbc.sql("""
+                            update outbound_order set status = 'CANCEL_REQUESTED', revision = :rev,
+                                pending_cancel_ack = cast(:ack as jsonb), updated_at = :now where id = :id""")
+                    .param("rev", o.revision()).param("ack", json.writeValueAsString(ack))
+                    .param("now", Timestamp.from(clock.instant())).param("id", cur.id()).update();
+        }
     }
 
-    private void ack(EventEnvelope envelope, OutboundOrder o, String rejectCode, String rejectText) {
+    private void ack(AckTarget t, String rejectCode, String rejectText) {
         outbox.append(new OutboxWriter.Message(IntegrationContracts.TOPIC_APPLICATION_ACKS, ApplicationAck.TYPE,
-                ApplicationAck.VERSION, envelope.sourceSystem(), envelope.siteId(), envelope.ownerId(),
-                envelope.siteId() + ":" + o.erpDocNo(),
-                new ApplicationAck(envelope.sourceSystem(), envelope.messageId().toString(), o.sourceIdocOrEventId(),
-                        o.erpDocNo(), rejectCode == null ? ApplicationAck.ACCEPTED : ApplicationAck.REJECTED,
-                        rejectCode, rejectText)));
+                ApplicationAck.VERSION, t.sourceSystem(), t.siteId(), t.ownerId(), t.siteId() + ":" + t.erpDocNo(),
+                new ApplicationAck(t.sourceSystem(), t.messageId(), t.sourceIdocOrEventId(), t.erpDocNo(),
+                        rejectCode == null ? ApplicationAck.ACCEPTED : ApplicationAck.REJECTED, rejectCode, rejectText)));
     }
 
     // =====================================================================================================
-    // Pick progress
+    // Pick and return progress
     // =====================================================================================================
 
     @Transactional
     public void onTaskCompleted(TaskCompleted t) {
-        if (!"PICK".equals(t.taskType()) || t.allocationId() == null) {
+        if (t.allocationId() == null) {
             return;
         }
+        if ("RETURN".equals(t.taskType())) {
+            onReturned(t);
+        } else if ("PICK".equals(t.taskType())) {
+            onPicked(t);
+        }
+    }
+
+    private void onPicked(TaskCompleted t) {
         Optional<UUID> orderId = jdbc.sql("""
                         update outbound_allocation set qty_picked = :picked, qty_short = :short, status = 'DONE'
                         where allocation_id = :a and status = 'OPEN' returning order_id""")
                 .param("picked", t.qtyPicked()).param("short", t.qtyShort()).param("a", t.allocationId())
                 .query(UUID.class).optional();
         if (orderId.isEmpty()) {
-            return;   // duplicate or cancelled
+            return;   // duplicate, or the order was cancelled (inventory decided whether stock must be returned)
         }
-        jdbc.sql("""
-                        update outbound_line set qty_picked = qty_picked + :picked, qty_short = qty_short + :short
-                        where order_id = :o and erp_line_ref = :line""")
-                .param("picked", t.qtyPicked()).param("short", t.qtyShort()).param("o", orderId.get())
-                .param("line", t.orderLineRef()).update();
+        Order order = lockOrder(orderId.get());
+        jdbc.sql("update outbound_line set qty_picked = qty_picked + :picked where order_id = :o and erp_line_ref = :line")
+                .param("picked", t.qtyPicked()).param("o", order.id()).param("line", t.orderLineRef()).update();
+        if (t.qtyShort().signum() > 0) {
+            reallocateShort(order, t);
+        }
         boolean open = jdbc.sql("select exists (select 1 from outbound_allocation where order_id = :o and status = 'OPEN')")
-                .param("o", orderId.get()).query(Boolean.class).single();
+                .param("o", order.id()).query(Boolean.class).single();
         if (!open) {
             jdbc.sql("update outbound_order set status = 'PICKED', updated_at = :now where id = :id and status = 'RELEASED'")
-                    .param("now", Timestamp.from(clock.instant())).param("id", orderId.get()).update();
+                    .param("now", Timestamp.from(clock.instant())).param("id", order.id()).update();
+        }
+    }
+
+    /**
+     * PCK-003 (c): the short-picked quantity is allocated again, avoiding every location of this line where a pick
+     * came up short. What cannot be re-allocated is reported as SHORT_PICK in the shipment confirmation (PCK-003 d).
+     */
+    private void reallocateShort(Order order, TaskCompleted t) {
+        record Line(String owner, String item, String lot, String baseUom) {
+        }
+        Line l = jdbc.sql("""
+                        select owner_id, item_no, lot_no, base_uom from outbound_line
+                        where order_id = :o and erp_line_ref = :line""")
+                .param("o", order.id()).param("line", t.orderLineRef())
+                .query((rs, n) -> new Line(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4))).single();
+        InventoryClient.AllocateResult a = new InventoryClient.AllocateResult(l.baseUom(), t.qtyShort(), BigDecimal.ZERO,
+                t.qtyShort(), List.of());
+        if ("RELEASED".equals(order.status())) {
+            List<String> shortLocations = jdbc.sql("""
+                            select distinct location_id from outbound_allocation
+                            where order_id = :o and erp_line_ref = :line and qty_short > 0""")
+                    .param("o", order.id()).param("line", t.orderLineRef()).query(String.class).list();
+            a = inventory.allocate(order.siteId(), "OUT-RA-" + t.allocationId(), order.erpDocNo(), t.orderLineRef(),
+                    l.owner(), l.item(), t.qtyShort(), l.baseUom(), l.lot(), shortLocations);
+            requestPicks(order, t.orderLineRef(), l.owner(), l.item(), a, t.allocationId());
+        }
+        jdbc.sql("""
+                        update outbound_line set qty_allocated = qty_allocated - :short + :realloc,
+                            qty_short = qty_short + :unrecovered, qty_short_pick = qty_short_pick + :unrecovered
+                        where order_id = :o and erp_line_ref = :line""")
+                .param("short", t.qtyShort()).param("realloc", a.allocatedQty()).param("unrecovered", a.shortQty())
+                .param("o", order.id()).param("line", t.orderLineRef()).update();
+    }
+
+    private void onReturned(TaskCompleted t) {
+        Optional<UUID> orderId = jdbc.sql("""
+                        update outbound_allocation set status = 'RETURNED'
+                        where allocation_id = :a and status = 'RETURNING' returning order_id""")
+                .param("a", t.allocationId()).query(UUID.class).optional();
+        if (orderId.isEmpty()) {
+            return;
+        }
+        Order order = lockOrder(orderId.get());
+        boolean pending = jdbc.sql("select exists (select 1 from outbound_allocation where order_id = :o and status = 'RETURNING')")
+                .param("o", order.id()).query(Boolean.class).single();
+        if (pending || !"CANCEL_REQUESTED".equals(order.status())) {
+            return;
+        }
+        String ackJson = jdbc.sql("select pending_cancel_ack::text from outbound_order where id = :id")
+                .param("id", order.id()).query(String.class).single();
+        jdbc.sql("update outbound_order set status = 'CANCELLED', pending_cancel_ack = null, updated_at = :now where id = :id")
+                .param("now", Timestamp.from(clock.instant())).param("id", order.id()).update();
+        if (ackJson != null) {
+            ack(json.readValue(ackJson, AckTarget.class), null, null);
         }
     }
 
@@ -259,10 +426,10 @@ public class OutboundService {
                                      List<InventoryClient.IssuedLine> issued) {
         Map<String, InventoryClient.IssuedLine> byLine = new HashMap<>();
         issued.forEach(l -> byLine.put(l.orderLineRef(), l));
-        record Line(String ref, String item, BigDecimal requestedBase, BigDecimal allocated, String baseUom) {
+        record Line(String ref, String item, BigDecimal requestedBase, BigDecimal shortPick, String baseUom) {
         }
         List<Line> lines = jdbc.sql("""
-                        select erp_line_ref, item_no, qty_requested_base, qty_allocated, base_uom
+                        select erp_line_ref, item_no, qty_requested_base, qty_short_pick, base_uom
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", orderId)
                 .query((rs, n) -> new Line(rs.getString(1), rs.getString(2), rs.getBigDecimal(3), rs.getBigDecimal(4),
@@ -274,7 +441,7 @@ public class OutboundService {
             BigDecimal qty = shipped == null ? BigDecimal.ZERO : shipped.qty();
             String shortReason = null;
             if (qty.compareTo(l.requestedBase()) < 0) {
-                shortReason = l.allocated().compareTo(l.requestedBase()) < 0 ? "NO_STOCK" : "SHORT_PICK";
+                shortReason = l.shortPick().signum() > 0 ? "SHORT_PICK" : "NO_STOCK";
             }
             out.add(new ShipmentConfirmation.Line(l.ref(), l.item(), strip(qty), l.baseUom(),
                     shipped == null ? List.of() : shipped.lots().stream()
@@ -312,6 +479,31 @@ public class OutboundService {
     }
 
     // =====================================================================================================
+    // Site release mode (§C.4)
+    // =====================================================================================================
+
+    /** WAVELESS (default): orders are allocated and released on receipt. WAVE: they wait in the pool. */
+    public String releaseMode(String siteId) {
+        return jdbc.sql("select release_mode from outbound_site_config where site_id = :site")
+                .param("site", siteId).query(String.class).optional().orElse("WAVELESS");
+    }
+
+    @Transactional
+    public Map<String, Object> setReleaseMode(String siteId, String mode) {
+        if (!List.of("WAVE", "WAVELESS").contains(mode)) {
+            throw ApiException.badRequest("OUT_RELEASE_MODE_INVALID", "releaseMode must be WAVE or WAVELESS");
+        }
+        jdbc.sql("""
+                        insert into outbound_site_config (tenant_id, site_id, release_mode, updated_by, updated_at)
+                        values (:t, :site, :mode, :user, :now)
+                        on conflict (tenant_id, site_id) do update set release_mode = excluded.release_mode,
+                            updated_by = excluded.updated_by, updated_at = excluded.updated_at""")
+                .param("t", TenantContext.tenantId()).param("site", siteId).param("mode", mode)
+                .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
+        return Map.of("siteId", siteId, "releaseMode", mode);
+    }
+
+    // =====================================================================================================
     // Queries and helpers
     // =====================================================================================================
 
@@ -327,32 +519,46 @@ public class OutboundService {
     @Transactional(readOnly = true)
     public Map<String, Object> detail(String siteId, String erpDocNo) {
         Map<String, Object> header = jdbc.sql("""
-                        select id, erp_doc_no, order_type, revision, status, carrier_scac, staging_location, pick_lpn,
-                               shipment_txn_id, tracking_no, erp_document, erp_error_class, erp_error_text
-                        from outbound_order where site_id = :site and erp_doc_no = :doc""")
+                        select o.id, o.erp_doc_no, o.order_type, o.revision, o.status, o.carrier_scac, o.staging_location,
+                               o.pick_lpn, o.shipment_txn_id, o.tracking_no, o.erp_document, o.erp_error_class,
+                               o.erp_error_text, w.wave_no
+                        from outbound_order o left join outbound_wave w on w.id = o.wave_id
+                        where o.site_id = :site and o.erp_doc_no = :doc""")
                 .param("site", siteId).param("doc", erpDocNo).query().listOfRows().stream().findFirst()
                 .orElseThrow(() -> unknown(erpDocNo));
         Map<String, Object> result = new HashMap<>(header);
         result.put("lines", jdbc.sql("""
                         select erp_line_ref, item_no, qty_requested, uom, base_uom, qty_requested_base, qty_allocated,
-                               qty_picked, qty_short
+                               qty_picked, qty_short, qty_short_pick
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         result.put("allocations", jdbc.sql("""
-                        select allocation_id, erp_line_ref, location_id, lpn_id, lot_no, qty, qty_picked, qty_short, status
+                        select allocation_id, erp_line_ref, location_id, lpn_id, lot_no, qty, qty_picked, qty_short,
+                               status, replaces
                         from outbound_allocation where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         return result;
     }
 
-    private Optional<Order> lockOrder(String siteId, String erpDocNo) {
+    Optional<Order> lockOrder(String siteId, String erpDocNo) {
         return jdbc.sql("""
                         select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id from outbound_order
                         where site_id = :site and erp_doc_no = :doc for update""")
                 .param("site", siteId).param("doc", erpDocNo)
-                .query((rs, n) -> new Order(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4),
-                        rs.getLong(5), rs.getString(6), rs.getString(7)))
+                .query(OutboundService::mapOrder)
                 .optional();
+    }
+
+    Order lockOrder(UUID id) {
+        return jdbc.sql("""
+                        select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id from outbound_order
+                        where id = :id for update""")
+                .param("id", id).query(OutboundService::mapOrder).single();
+    }
+
+    private static Order mapOrder(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
+        return new Order(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4),
+                rs.getLong(5), rs.getString(6), rs.getString(7));
     }
 
     private void setStatus(UUID id, String status) {
@@ -364,7 +570,7 @@ public class OutboundService {
         return ApiException.notFound("OUT_ORDER_UNKNOWN", "No outbound order " + erpDocNo);
     }
 
-    private static Map<String, Object> stripRow(Map<String, Object> row) {
+    static Map<String, Object> stripRow(Map<String, Object> row) {
         Map<String, Object> out = new HashMap<>(row);
         out.replaceAll((k, v) -> v instanceof BigDecimal b ? strip(b) : v);
         return out;

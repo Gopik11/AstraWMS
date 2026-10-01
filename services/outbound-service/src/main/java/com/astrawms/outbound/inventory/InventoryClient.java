@@ -21,8 +21,18 @@ public interface InventoryClient {
                       List<String> serials) {
     }
 
+    /** Inventory's view of an allocation; picked stock sits at {@code pickedLocation} / {@code pickedLpn}. */
+    record InventoryAllocation(UUID id, String orderLineRef, String ownerId, String itemNo, String lotNo, String lpnId,
+                               String locationId, BigDecimal qtyPicked, String pickedLocation, String pickedLpn,
+                               String status) {
+    }
+
+    /** @param excludeLocationIds locations not to allocate from (e.g. where a pick came up short) */
     AllocateResult allocate(String siteId, String key, String orderRef, String orderLineRef, String ownerId,
-                            String itemNo, BigDecimal qty, String uom, String lotNo);
+                            String itemNo, BigDecimal qty, String uom, String lotNo, List<String> excludeLocationIds);
+
+    /** All allocations of an order, as inventory sees them (the authority on what was actually picked). */
+    List<InventoryAllocation> allocations(String siteId, String orderRef);
 
     List<IssuedLine> issue(String siteId, String key, String orderRef);
 

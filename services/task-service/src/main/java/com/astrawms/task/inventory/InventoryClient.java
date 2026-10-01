@@ -16,4 +16,7 @@ public interface InventoryClient {
     /** Picks (part of) an allocation into outbound staging; {@code shortClose} releases the remainder. */
     UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,
               String toLpnId, java.util.List<String> serials, boolean shortClose);
+
+    /** Returns the picked stock of an allocation from outbound staging to the given location and LPN. */
+    UUID returnToStock(String siteId, String idempotencyKey, UUID allocationId, String toLocationId, String toLpnId);
 }

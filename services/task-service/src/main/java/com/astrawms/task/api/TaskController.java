@@ -59,6 +59,13 @@ public class TaskController {
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
+    @PostMapping("/{taskId}/return")
+    public TaskView returnToStock(@PathVariable String siteId, @PathVariable UUID taskId,
+                                  @Valid @RequestBody TaskDtos.ReturnConfirmRequest body) {
+        return tasks.confirmReturn(siteId, taskId, body.checkDigit());
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/exception")
     public TaskView exception(@PathVariable String siteId, @PathVariable UUID taskId,
                               @Valid @RequestBody ExceptionRequest body) {

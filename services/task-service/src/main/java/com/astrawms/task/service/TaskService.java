@@ -150,6 +150,83 @@ public class TaskService {
         return view(siteId, taskId);
     }
 
+    // =====================================================================================================
+    // RETURN tasks (OUT-EX-02 reverse pick)
+    // =====================================================================================================
+
+    /** Creates the return task for a picked allocation of a cancelled order; redeliveries are ignored. */
+    @Transactional
+    public void onReturnRequested(String siteId, OutboundContracts.ReturnRequested r) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, allocation_id, order_ref,
+                                          order_line_ref, item_no, lot_no, qty, uom, to_lpn, created_at, updated_at)
+                        values (:id, :t, :site, 'RETURN', 'RELEASED', :prio, :owner, :lpn, :from, :to, 'REVERSE_PICK',
+                                :alloc, :order, :line, :item, :lot, :qty, :uom, :toLpn, :now, :now)
+                        on conflict (tenant_id, allocation_id) where task_type = 'RETURN' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", r.priority())
+                .param("owner", r.ownerId()).param("lpn", r.fromLpn() == null ? "" : r.fromLpn())
+                .param("from", r.fromLocation()).param("to", r.toLocation()).param("alloc", r.allocationId())
+                .param("order", r.orderRef()).param("line", r.orderLineRef()).param("item", r.itemNo())
+                .param("lot", r.lotNo()).param("qty", r.qty()).param("uom", r.uom())
+                .param("toLpn", r.toLpn() == null ? "" : r.toLpn())
+                .param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", "Return " + r.qty().toPlainString() + " " + r.itemNo() + " of cancelled " + r.orderRef());
+        }
+    }
+
+    /**
+     * RF return: the operator takes the stock from outbound staging and scans the check digit of the location it is
+     * put back to. The whole picked quantity is returned. Idempotent via the inventory key {@code TSK-<taskId>}.
+     */
+    @Transactional
+    public TaskView confirmReturn(String siteId, UUID taskId, String checkDigit) {
+        record Ret(String status, String type, String assignedTo, String to, String toLpn, UUID allocation,
+                   String order, String line, java.math.BigDecimal qty) {
+        }
+        Ret r = jdbc.sql("""
+                        select status, task_type, assigned_to, target_location, to_lpn, allocation_id, order_ref,
+                               order_line_ref, qty
+                        from task where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Ret(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getString(5), rs.getObject(6, UUID.class), rs.getString(7), rs.getString(8),
+                        rs.getBigDecimal(9)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"RETURN".equals(r.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + r.type() + " task");
+        }
+        if ("COMPLETED".equals(r.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(r.status()) || !user.equals(r.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + r.status() + " and not assigned to " + user);
+        }
+        Projections.Location target = projections.location(siteId, r.to()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + r.to() + " is not known"));
+        if (target.checkDigit() == null || !target.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + r.to());
+        }
+        UUID operation = inventory.returnToStock(siteId, "TSK-" + taskId, r.allocation(), r.to(),
+                r.toLpn() == null || r.toLpn().isEmpty() ? null : r.toLpn());
+        Instant now = clock.instant();
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', qty_picked = qty, confirmed_location = target_location,
+                            inventory_operation_id = :op, completed_at = :now, updated_at = :now
+                        where id = :id""")
+                .param("op", operation).param("now", Timestamp.from(now)).param("id", taskId).update();
+        event(taskId, "COMPLETED", "returned to " + r.to());
+        outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_TASK_EVENTS, OutboundContracts.TaskCompleted.TYPE,
+                OutboundContracts.TaskCompleted.VERSION, null, siteId, null, siteId + ":" + r.order(),
+                new OutboundContracts.TaskCompleted(taskId, "RETURN", r.allocation(), r.order(), r.line(), r.qty(),
+                        java.math.BigDecimal.ZERO, user, now)));
+        return view(siteId, taskId);
+    }
+
     private record Task(UUID id, String siteId, String status, String ownerId, String lpnId, String fromLocation,
                         String targetLocation, String assignedTo, List<String> excluded, UUID inventoryOperationId,
                         String type) {
@@ -290,7 +367,8 @@ public class TaskService {
     public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit) {
         Task t = lockTask(siteId, taskId);
         if (!"PUTAWAY".equals(t.type())) {
-            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Confirm pick tasks with /pick");
+            throw ApiException.unprocessable("TSK_WRONG_TYPE",
+                    "Confirm " + t.type().toLowerCase() + " tasks with /" + ("PICK".equals(t.type()) ? "pick" : "return"));
         }
         if ("COMPLETED".equals(t.status())) {
             return view(siteId, taskId);
