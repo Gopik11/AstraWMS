@@ -12,8 +12,8 @@ The VPS test environment served the UI over plain HTTP on port 8088. Browsers re
 
 ## Decision
 
-1. **HTTPS at the host nginx.** A new vhost (`deploy/vps/host-nginx-astrawms.conf`) serves `https://145-223-90-247.sslip.io` with a Let's Encrypt certificate.
-   - sslip.io resolves the name to the VPS address, so no domain purchase is needed.
+1. **HTTPS at the host nginx.** A new vhost (`deploy/vps/host-nginx-astrawms.conf`) serves `https://astrawms.cloud` with a Let's Encrypt certificate; `www.astrawms.cloud` redirects to it.
+   - The first address, `https://145-223-90-247.sslip.io` (sslip.io resolves the name to the VPS address), now only redirects to the domain.
    - The host's certbot timer renews the certificate.
    - The gateway port is bound to 127.0.0.1 (`PUBLIC_BIND`).
    - Keycloak's public hostname and the web client's redirect URIs follow `PUBLIC_URL`.

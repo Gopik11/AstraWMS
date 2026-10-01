@@ -53,7 +53,7 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh &
 **Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, uploads them over SSH in checksummed chunks and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.
 - Every container has hard memory and CPU limits (about 3.3 GB in total), so the stack can share a host with other applications.
 - Secrets are generated on the server (`/opt/astrawms/.env`, root-only).
-- The application is served at https://145-223-90-247.sslip.io: the host nginx terminates TLS (Let's Encrypt) and proxies to the gateway on `127.0.0.1:8088`. The gateway also serves the `astrawms` realm's token endpoints. The Keycloak admin console (`127.0.0.1:8181`) and Prometheus (`127.0.0.1:9090`) are reachable only through an SSH tunnel.
+- The application is served at https://astrawms.cloud: the host nginx terminates TLS (Let's Encrypt) and proxies to the gateway on `127.0.0.1:8088`. The gateway also serves the `astrawms` realm's token endpoints. The Keycloak admin console (`127.0.0.1:8181`) and Prometheus (`127.0.0.1:9090`) are reachable only through an SSH tunnel.
 - Kafka requires SASL authentication, with one generated account per service.
 - The smoke tests run against it with `GATEWAY_URL`, `KC_URL` (the tunnel), `PROVISIONER_SECRET` and `SMOKE_SKIP_DB_CHECKS=1`.
 

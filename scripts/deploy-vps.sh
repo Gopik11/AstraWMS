@@ -13,7 +13,7 @@ set -euo pipefail
 VPS="${VPS:-root@145.223.90.247}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/astrawms_vps}"
 PUBLIC_PORT="${PUBLIC_PORT:-8088}"
-PUBLIC_URL="${PUBLIC_URL:-https://145-223-90-247.sslip.io}"
+PUBLIC_URL="${PUBLIC_URL:-https://astrawms.cloud}"
 PUBLIC_BIND="${PUBLIC_BIND:-127.0.0.1}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="$(git -C "$ROOT" rev-parse --short HEAD)"
