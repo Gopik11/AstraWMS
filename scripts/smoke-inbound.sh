@@ -9,6 +9,7 @@ MD="${MD_URL:-http://localhost:8081}"
 INV="${INV_URL:-http://localhost:8082}"
 INB="${INB_URL:-http://localhost:8083}"
 SAP="${SAP_URL:-http://localhost:8090}"
+TSK="${TSK_URL:-http://localhost:8084}"
 TENANT="inb-$(date +%s)"
 H=(-H "X-Tenant-Id: $TENANT" -H "X-User-Id: receiver1" -H "Content-Type: application/json")
 
@@ -30,7 +31,7 @@ receipt_status() { curl -sf "$INB/api/v1/sites/DC1/receipts/$1" "${H[@]}" | json
 has_status() { [[ "$(receipt_status "$1")" == "$2" ]]; }
 
 step "Waiting for services"
-for url in "$MD" "$INV" "$INB" "$SAP"; do
+for url in "$MD" "$INV" "$INB" "$SAP" "$TSK"; do
   wait_for "$url healthy" curl -sf "$url/actuator/health"
 done
 
@@ -39,6 +40,9 @@ expect 204 -X PUT "$MD/api/v1/sites/DC1" "${H[@]}" -d '{"name":"Dallas DC","time
 expect 200 -X PUT "$MD/api/v1/sites/DC1/zones/DOCK" "${H[@]}" -d '{"zoneType":"DOCK","erpBucket":"0001"}'
 expect 200 -X PUT "$MD/api/v1/sites/DC1/zones/QC" "${H[@]}" -d '{"zoneType":"QC","erpBucket":"0002"}'
 expect 200 -X PUT "$MD/api/v1/sites/DC1/locations/DOCK-01" "${H[@]}" -d '{"zoneId":"DOCK","locationType":"DOOR"}'
+expect 200 -X PUT "$MD/api/v1/sites/DC1/zones/STOR" "${H[@]}" -d '{"zoneType":"RESERVE","erpBucket":"0001"}'
+expect 200 -X PUT "$MD/api/v1/sites/DC1/locations/R-01" "${H[@]}" -d '{"zoneId":"STOR","locationType":"RACK","pickSeq":1}'
+expect 200 -X PUT "$MD/api/v1/sites/DC1/locations/R-02" "${H[@]}" -d '{"zoneId":"STOR","locationType":"RACK","pickSeq":2}'
 for sku in SKU-1 SKU-2; do
   expect 200 -X PUT "$MD/api/v1/items/ACME/$sku" "${H[@]}" \
     -d '{"description":"Smoke item","baseUom":"EA","status":"ACTIVE","sites":[{"siteId":"DC1","lotControlled":false,"serialControl":"NONE"}],"uoms":[{"uom":"CS","numerator":12,"denominator":1}]}'
@@ -113,5 +117,19 @@ txn="$(json "['erpMovements'][0]['wmsTxnId']" <<<"$BODY")"
 wait_for "goods movement $txn in SAP" sh -c "curl -sf '$SAP/mock-sap/documents?xblnr=$txn' -H 'X-Tenant-Id: $TENANT' | grep -q GOODS_MOVEMENT"
 curl -sf "$SAP/mock-sap/documents?xblnr=$txn" -H "X-Tenant-Id: $TENANT" | grep -q '702' || fail "movement type 702 not posted"
 echo "Goods movement $txn posted with movement type 702"
+
+step "Directed putaway: RF next task -> scan LPN + location check digit -> pallet in storage"
+wait_for "putaway task released" sh -c "curl -sf '$TSK/api/v1/sites/DC1/tasks?status=RELEASED' -H 'X-Tenant-Id: $TENANT' | grep -q 106141410000000019"
+expect 200 -X POST "$TSK/api/v1/sites/DC1/tasks/next" -H "X-Tenant-Id: $TENANT" -H "X-User-Id: driver1" -H "Content-Type: application/json"
+task="$(json "['id']" <<<"$BODY")"; lpn="$(json "['lpnId']" <<<"$BODY")"; target="$(json "['targetLocation']" <<<"$BODY")"
+echo "Task $task: LPN $lpn -> $target ($(json "['strategy']" <<<"$BODY"))"
+expect 200 "$MD/api/v1/sites/DC1/locations/$target" "${H[@]}"
+cd="$(json "['checkDigit']" <<<"$BODY")"
+expect 200 -X POST "$TSK/api/v1/sites/DC1/tasks/$task/confirm" -H "X-Tenant-Id: $TENANT" -H "X-User-Id: driver1" \
+  -H "Content-Type: application/json" -d "{\"lpnId\":\"$lpn\",\"locationId\":\"$target\",\"checkDigit\":\"$cd\"}"
+grep -q '"status":"COMPLETED"' <<<"$BODY" || fail "putaway not completed: $BODY"
+expect 200 "$INV/api/v1/sites/DC1/inventory/lpns/$lpn" "${H[@]}"
+grep -q "\"locationId\":\"$target\"" <<<"$BODY" || fail "LPN $lpn not at $target in inventory: $BODY"
+echo "LPN $lpn is in storage at $target"
 
 printf '\nINBOUND SMOKE TEST PASSED (tenant %s)\n' "$TENANT"

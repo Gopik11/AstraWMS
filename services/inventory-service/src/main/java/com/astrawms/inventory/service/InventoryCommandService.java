@@ -13,7 +13,7 @@ import com.astrawms.inventory.domain.ErpMovementType;
 import com.astrawms.inventory.domain.StockStatus;
 import com.astrawms.inventory.domain.TxnType;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
-import com.astrawms.inventory.events.InventoryEvents.InventoryChanged;
+import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.inventory.events.InventoryEvents.Topics;
 import com.astrawms.inventory.persistence.InventoryRepository;
 import com.astrawms.inventory.persistence.InventoryRepository.Balance;
@@ -579,7 +579,7 @@ public class InventoryCommandService {
         eventLines.forEach((itemKey, lines) -> {
             String owner = owners.get(itemKey);
             String itemNo = itemKey.substring(owner.length() + 1);
-            outbox.append(new OutboxWriter.Message(topics.inventoryEvents(), "InventoryChanged", "1.0", null,
+            outbox.append(new OutboxWriter.Message(topics.inventoryEvents(), InventoryChanged.TYPE, InventoryChanged.VERSION, null,
                     ctx.siteId, owner, ctx.siteId + ":" + itemNo,
                     new InventoryChanged(ctx.operationId, ctx.wmsTxnId, ctx.opType, owner, itemNo, lines, ctx.now)));
         });

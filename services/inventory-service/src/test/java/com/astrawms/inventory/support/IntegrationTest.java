@@ -92,7 +92,7 @@ public abstract class IntegrationTest {
     protected void location(String id, String zone, String bucket, String temperature, boolean hazmat,
                             boolean mixedItems, boolean mixedLots) {
         asTenant(() -> refs.upsertLocation(new LocationUpserted(SITE, id, zone, "RACK", bucket, temperature, hazmat,
-                mixedItems, mixedLots, "ACTIVE", Instant.now())));
+                mixedItems, mixedLots, "ACTIVE", Instant.now(), "10", null)));
     }
 
     protected void asTenant(Runnable work) {

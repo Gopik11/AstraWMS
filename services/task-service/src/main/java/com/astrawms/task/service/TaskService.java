@@ -1,0 +1,343 @@
+package com.astrawms.task.service;
+
+import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
+import com.astrawms.common.tenancy.TenantContext;
+import com.astrawms.common.web.ApiException;
+import com.astrawms.task.api.TaskDtos.Content;
+import com.astrawms.task.api.TaskDtos.TaskView;
+import com.astrawms.task.inventory.InventoryClient;
+import com.astrawms.task.projection.Projections;
+import com.astrawms.task.projection.Projections.Stock;
+import com.astrawms.task.putaway.PutawayEngine;
+import java.sql.Array;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Putaway tasks: created when an LPN arrives at an inbound staging location, directed by {@link PutawayEngine},
+ * executed on RF (get next → scan LPN → scan location check digit → confirm), with re-planning on exceptions.
+ */
+@Service
+public class TaskService {
+
+    private static final Logger log = LoggerFactory.getLogger(TaskService.class);
+    private static final Set<String> OPEN = Set.of("RELEASED", "ASSIGNED", "EXCEPTION");
+    private static final Set<String> REPLAN_REASONS = Set.of("LOCATION_BLOCKED", "LOCATION_OCCUPIED");
+
+    private final JdbcClient jdbc;
+    private final Projections projections;
+    private final PutawayEngine engine;
+    private final InventoryClient inventory;
+    private final Clock clock;
+
+    public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
+                       Clock clock) {
+        this.jdbc = jdbc;
+        this.projections = projections;
+        this.engine = engine;
+        this.inventory = inventory;
+        this.clock = clock;
+    }
+
+    private record Task(UUID id, String siteId, String status, String ownerId, String lpnId, String fromLocation,
+                        String targetLocation, String assignedTo, List<String> excluded, UUID inventoryOperationId) {
+    }
+
+    // =====================================================================================================
+    // Event-driven creation and cancellation
+    // =====================================================================================================
+
+    /**
+     * Reacts to inventory changes after the projection was updated: LPNs arriving at staging get a putaway task;
+     * open tasks whose LPN left its source by other means are cancelled.
+     */
+    @Transactional
+    public void onInventoryChanged(String siteId, InventoryChanged e) {
+        for (InventoryChanged.Line l : e.lines()) {
+            String lpn = l.lpnId() == null ? "" : l.lpnId();
+            if (lpn.isEmpty()) {
+                continue;   // putaway is LPN-based; loose dock stock is handled by the dock check (§1.2)
+            }
+            if (("RECEIPT".equals(l.txnType()) || "MOVE_IN".equals(l.txnType())) && isStaging(siteId, l.locationId())) {
+                createPutaway(siteId, e.ownerId(), lpn, l.locationId(), e.operationId());
+            }
+            if ("MOVE_OUT".equals(l.txnType())) {
+                cancelIfMovedElsewhere(siteId, lpn, l.locationId(), e.operationId());
+            }
+        }
+    }
+
+    private boolean isStaging(String siteId, String locationId) {
+        return projections.location(siteId, locationId)
+                .map(loc -> PutawayEngine.STAGING_TYPES.contains(loc.locationType())).orElse(false);
+    }
+
+    private void createPutaway(String siteId, String ownerId, String lpn, String from, UUID sourceOperation) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, owner_id, lpn_id, from_location,
+                                          source_operation_id, created_at, updated_at)
+                        values (:id, :t, :site, 'PUTAWAY', 'EXCEPTION', :owner, :lpn, :from, :src, :now, :now)
+                        on conflict (tenant_id, site_id, lpn_id)
+                            where task_type = 'PUTAWAY' and status in ('RELEASED', 'ASSIGNED', 'EXCEPTION')
+                        do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("owner", ownerId)
+                .param("lpn", lpn).param("from", from).param("src", sourceOperation).param("now", Timestamp.from(now))
+                .update();
+        if (inserted == 1) {
+            event(id, "CREATED", "LPN " + lpn + " at " + from);
+            plan(lockTask(siteId, id));   // a second item of the same LPN re-plans the existing task below
+        } else {
+            findOpenByLpn(siteId, lpn).filter(t -> !"ASSIGNED".equals(t.status())).ifPresent(this::plan);
+        }
+    }
+
+    private void cancelIfMovedElsewhere(String siteId, String lpn, String fromLocation, UUID operationId) {
+        findOpenByLpn(siteId, lpn)
+                .filter(t -> t.fromLocation().equals(fromLocation) && !operationId.equals(t.inventoryOperationId()))
+                .ifPresent(t -> {
+                    setStatus(t.id(), "CANCELLED", "LPN_MOVED_OUTSIDE_TASK");
+                    event(t.id(), "CANCELLED", "LPN moved by operation " + operationId);
+                });
+    }
+
+    // =====================================================================================================
+    // Planning
+    // =====================================================================================================
+
+    /** Plans (or re-plans) the target; serialised per site so two tasks never reserve the same slot. */
+    private void plan(Task t) {
+        jdbc.sql("select 1 from pg_advisory_xact_lock(hashtext(:k))")
+                .param("k", TenantContext.tenantId() + "|" + t.siteId() + "|putaway").query(Integer.class).single();
+        List<Stock> contents = projections.lpnContents(t.siteId(), t.lpnId(), t.fromLocation());
+        Optional<PutawayEngine.Plan> plan = engine.plan(t.siteId(), contents, t.excluded(), reservations(t.siteId(), t.id()));
+        if (plan.isPresent()) {
+            jdbc.sql("""
+                            update task set status = 'RELEASED', target_location = :target, strategy = :strategy,
+                                exception_reason = null, assigned_to = null, updated_at = :now where id = :id""")
+                    .param("target", plan.get().locationId()).param("strategy", plan.get().strategy())
+                    .param("now", Timestamp.from(clock.instant())).param("id", t.id()).update();
+            event(t.id(), "PLANNED", plan.get().strategy() + " → " + plan.get().locationId());
+        } else {
+            String reason = contents.isEmpty() ? "LPN_CONTENTS_UNKNOWN" : "NO_LOCATION";   // PUT-EX-01
+            jdbc.sql("""
+                            update task set status = 'EXCEPTION', target_location = null, strategy = null,
+                                exception_reason = :reason, assigned_to = null, updated_at = :now where id = :id""")
+                    .param("reason", reason).param("now", Timestamp.from(clock.instant())).param("id", t.id()).update();
+            event(t.id(), "EXCEPTION", reason);
+            log.warn("Putaway task {} for LPN {} has no target: {}", t.id(), t.lpnId(), reason);
+        }
+    }
+
+    private Map<String, Integer> reservations(String siteId, UUID excludeTask) {
+        Map<String, Integer> map = new HashMap<>();
+        jdbc.sql("""
+                        select target_location, count(*) from task
+                        where site_id = :site and status in ('RELEASED', 'ASSIGNED') and target_location is not null
+                          and id <> :id
+                        group by target_location""")
+                .param("site", siteId).param("id", excludeTask)
+                .query((rs, n) -> map.put(rs.getString(1), rs.getInt(2))).list();
+        return map;
+    }
+
+    // =====================================================================================================
+    // RF execution
+    // =====================================================================================================
+
+    /** Returns the operator's current task, or assigns the highest-priority released task (oldest first). */
+    @Transactional
+    public Optional<TaskView> next(String siteId) {
+        String user = TenantContext.require().userId();
+        Optional<UUID> current = jdbc.sql("""
+                        select id from task where site_id = :site and status = 'ASSIGNED' and assigned_to = :user
+                        order by assigned_at limit 1""")
+                .param("site", siteId).param("user", user).query(UUID.class).optional();
+        if (current.isPresent()) {
+            return Optional.of(view(siteId, current.get()));
+        }
+        Optional<UUID> next = jdbc.sql("""
+                        select id from task where site_id = :site and status = 'RELEASED'
+                        order by priority desc, created_at limit 1 for update skip locked""")
+                .param("site", siteId).query(UUID.class).optional();
+        next.ifPresent(id -> {
+            jdbc.sql("update task set status = 'ASSIGNED', assigned_to = :user, assigned_at = :now, updated_at = :now where id = :id")
+                    .param("user", user).param("now", Timestamp.from(clock.instant())).param("id", id).update();
+            event(id, "ASSIGNED", null);
+        });
+        return next.map(id -> view(siteId, id));
+    }
+
+    /**
+     * Confirms a putaway (PUT-002): the scanned LPN must be the task's; the scanned location must carry the right
+     * check digit; a location other than the target is accepted only if it passes the engine's hard constraints.
+     * Idempotent: confirming a completed task returns it unchanged.
+     */
+    @Transactional
+    public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit) {
+        Task t = lockTask(siteId, taskId);
+        if ("COMPLETED".equals(t.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(t.status()) || !user.equals(t.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + t.status() + " and not assigned to " + user);
+        }
+        if (!t.lpnId().equals(lpnId)) {
+            throw ApiException.unprocessable("TSK_WRONG_LPN", "Scanned LPN " + lpnId + " but the task is for " + t.lpnId());   // PUT-EX-05
+        }
+        Projections.Location loc = projections.location(siteId, locationId).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + locationId + " is not known"));
+        if (loc.checkDigit() == null || !loc.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + locationId);
+        }
+        String strategy = null;
+        if (!locationId.equals(t.targetLocation())) {
+            List<Stock> contents = projections.lpnContents(siteId, t.lpnId(), t.fromLocation());
+            int reservedThere = reservations(siteId, t.id()).getOrDefault(locationId, 0);
+            Optional<PutawayEngine.Rejection> rejection = engine.validate(siteId, contents, locationId, reservedThere);
+            if (rejection.isPresent()) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, rejection.get().code(), rejection.get().reason());
+            }
+            strategy = "OVERRIDE";
+        }
+        UUID operation = inventory.moveLpn(siteId, "TSK-" + taskId, t.lpnId(), t.fromLocation(), locationId);
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', confirmed_location = :loc, inventory_operation_id = :op,
+                            strategy = coalesce(:strategy, strategy), completed_at = :now, updated_at = :now
+                        where id = :id""")
+                .param("loc", locationId).param("op", operation).param("strategy", strategy)
+                .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        event(taskId, "COMPLETED", (strategy != null ? "override " : "") + "at " + locationId);
+        return view(siteId, taskId);
+    }
+
+    /** RF exception at the target: the location is excluded and the task re-planned (PUT-EX-02). */
+    @Transactional
+    public TaskView reportException(String siteId, UUID taskId, String reason, String detail) {
+        Task t = lockTask(siteId, taskId);
+        if (!OPEN.contains(t.status())) {
+            throw ApiException.conflict("TSK_NOT_OPEN", "Task is " + t.status());
+        }
+        event(taskId, "EXCEPTION_REPORTED", reason + (detail == null ? "" : ": " + detail));
+        if (REPLAN_REASONS.contains(reason)) {
+            if (t.targetLocation() != null) {
+                jdbc.sql("update task set excluded_locations = array_append(excluded_locations, :loc) where id = :id")
+                        .param("loc", t.targetLocation()).param("id", taskId).update();
+            }
+            plan(lockTask(siteId, taskId));
+        } else if ("LPN_NOT_FOUND".equals(reason)) {
+            jdbc.sql("update task set status = 'EXCEPTION', exception_reason = :r, assigned_to = null, updated_at = :now where id = :id")
+                    .param("r", reason).param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        } else {
+            throw ApiException.unprocessable("TSK_REASON_UNKNOWN", "Unknown exception reason " + reason);
+        }
+        return view(siteId, taskId);
+    }
+
+    /** Supervisor: re-plan an EXCEPTION task after the cause was fixed (e.g. capacity freed, master data added). */
+    @Transactional
+    public TaskView replan(String siteId, UUID taskId) {
+        Task t = lockTask(siteId, taskId);
+        if (!OPEN.contains(t.status())) {
+            throw ApiException.conflict("TSK_NOT_OPEN", "Task is " + t.status());
+        }
+        plan(t);
+        return view(siteId, taskId);
+    }
+
+    // =====================================================================================================
+    // Queries and helpers
+    // =====================================================================================================
+
+    @Transactional(readOnly = true)
+    public List<TaskView> list(String siteId, String status) {
+        List<UUID> ids = jdbc.sql("""
+                        select id from task where site_id = :site and (cast(:status as text) is null or status = :status)
+                        order by priority desc, created_at limit 500""")
+                .param("site", siteId).param("status", status).query(UUID.class).list();
+        List<TaskView> views = new ArrayList<>();
+        ids.forEach(id -> views.add(view(siteId, id)));
+        return views;
+    }
+
+    @Transactional(readOnly = true)
+    public TaskView get(String siteId, UUID taskId) {
+        return view(siteId, taskId);
+    }
+
+    private TaskView view(String siteId, UUID id) {
+        TaskView base = jdbc.sql("""
+                        select id, task_type, status, priority, owner_id, lpn_id, from_location, target_location, strategy,
+                               exception_reason, assigned_to, confirmed_location, inventory_operation_id, created_at,
+                               completed_at
+                        from task where site_id = :site and id = :id""")
+                .param("site", siteId).param("id", id)
+                .query((rs, n) -> new TaskView(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getInt(4),
+                        rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
+                        rs.getString(10), rs.getString(11), rs.getString(12), rs.getObject(13, UUID.class), List.of(),
+                        rs.getTimestamp(14).toInstant(), rs.getTimestamp(15) == null ? null : rs.getTimestamp(15).toInstant()))
+                .optional()
+                .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
+        String where = base.status().equals("COMPLETED") ? base.confirmedLocation() : base.fromLocation();
+        List<Content> contents = projections.lpnContents(siteId, base.lpnId(), where).stream()
+                .map(s -> new Content(s.ownerId(), s.itemNo(), s.lotNo(), s.qty().stripTrailingZeros()))
+                .toList();
+        return new TaskView(base.id(), base.taskType(), base.status(), base.priority(), base.ownerId(), base.lpnId(),
+                base.fromLocation(), base.targetLocation(), base.strategy(), base.exceptionReason(), base.assignedTo(),
+                base.confirmedLocation(), base.inventoryOperationId(), contents, base.createdAt(), base.completedAt());
+    }
+
+    private Task lockTask(String siteId, UUID id) {
+        return jdbc.sql(TASK + " where site_id = :site and id = :id for update")
+                .param("site", siteId).param("id", id).query(TaskService::task).optional()
+                .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
+    }
+
+    private Optional<Task> findOpenByLpn(String siteId, String lpn) {
+        return jdbc.sql(TASK + " where site_id = :site and lpn_id = :lpn and task_type = 'PUTAWAY'"
+                        + " and status in ('RELEASED', 'ASSIGNED', 'EXCEPTION') for update")
+                .param("site", siteId).param("lpn", lpn).query(TaskService::task).optional();
+    }
+
+    private static final String TASK = """
+            select id, site_id, status, owner_id, lpn_id, from_location, target_location, assigned_to,
+                   excluded_locations, inventory_operation_id from task""";
+
+    private static Task task(ResultSet rs, int n) throws SQLException {
+        Array excluded = rs.getArray(9);
+        return new Task(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
+                rs.getString(6), rs.getString(7), rs.getString(8),
+                excluded == null ? List.of() : List.of((String[]) excluded.getArray()), rs.getObject(10, UUID.class));
+    }
+
+    private void setStatus(UUID id, String status, String reason) {
+        jdbc.sql("update task set status = :s, exception_reason = :r, updated_at = :now where id = :id")
+                .param("s", status).param("r", reason).param("now", Timestamp.from(clock.instant())).param("id", id).update();
+    }
+
+    private void event(UUID taskId, String event, String detail) {
+        jdbc.sql("""
+                        insert into task_event (tenant_id, task_id, event, detail, user_id, at)
+                        values (:t, :task, :event, :detail, :user, :now)""")
+                .param("t", TenantContext.tenantId()).param("task", taskId).param("event", event).param("detail", detail)
+                .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
+    }
+}
