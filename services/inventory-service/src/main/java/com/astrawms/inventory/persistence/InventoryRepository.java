@@ -186,7 +186,7 @@ public class InventoryRepository {
 
     // ------------------------------------------------------------------ ledger
 
-    public record TxnLine(TxnType type, BalanceKey key, BigDecimal qtyDelta, BigDecimal qtyAfter) {
+    public record TxnLine(TxnType type, BalanceKey key, BigDecimal qtyDelta, BigDecimal qtyAfter, List<String> serials) {
     }
 
     public void insertTxn(UUID operationId, TxnLine line, String reasonCode, String sourceDoc, String userId,
@@ -195,14 +195,16 @@ public class InventoryRepository {
         jdbc.sql("""
                         insert into inventory_txn (tenant_id, site_id, operation_id, txn_type, owner_id, item_no,
                                                    lot_no, lpn_id, location_id, stock_status, qty_delta, qty_after,
-                                                   reason_code, source_doc, user_id, channel, occurred_at)
+                                                   reason_code, source_doc, user_id, channel, occurred_at, serials)
                         values (:tenant, :site, :op, :type, :owner, :item, :lot, :lpn, :loc, :status, :delta,
-                                :after, :reason, :sourceDoc, :user, :channel, :at)""")
+                                :after, :reason, :sourceDoc, :user, :channel, :at, :serials)""")
                 .params(keyParams(k))
                 .param("tenant", TenantContext.tenantId()).param("op", operationId).param("type", line.type().name())
                 .param("delta", line.qtyDelta()).param("after", line.qtyAfter()).param("reason", reasonCode)
                 .param("sourceDoc", sourceDoc).param("user", userId).param("channel", channel)
                 .param("at", Timestamp.from(occurredAt))
+                .param("serials", line.serials() == null || line.serials().isEmpty() ? null
+                        : line.serials().toArray(String[]::new))
                 .update();
     }
 

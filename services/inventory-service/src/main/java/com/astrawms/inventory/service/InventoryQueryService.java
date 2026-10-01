@@ -8,6 +8,7 @@ import com.astrawms.inventory.api.InventoryDtos.Page;
 import com.astrawms.inventory.api.InventoryDtos.TxnView;
 import com.astrawms.inventory.domain.Quantities;
 import com.astrawms.inventory.domain.StockStatus;
+import com.astrawms.inventory.persistence.SerialRepository;
 import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -28,9 +29,16 @@ public class InventoryQueryService {
     public static final int MAX_LIMIT = 500;
 
     private final JdbcClient jdbc;
+    private final SerialRepository serials;
 
-    public InventoryQueryService(JdbcClient jdbc) {
+    public InventoryQueryService(JdbcClient jdbc, SerialRepository serials) {
         this.jdbc = jdbc;
+        this.serials = serials;
+    }
+
+    public SerialRepository.SerialView serial(String ownerId, String itemNo, String serialNo) {
+        return serials.find(ownerId, itemNo, serialNo).orElseThrow(() -> ApiException.notFound("INV_SERIAL_UNKNOWN",
+                "Serial " + serialNo + " of item " + itemNo + " is not known"));
     }
 
     public record BalanceFilter(String ownerId, String itemNo, String lotNo, String lpnId, String locationId,
@@ -76,7 +84,7 @@ public class InventoryQueryService {
                         select lpn_id, owner_id, location_id, lpn_type from lpn where site_id = :site and lpn_id = :lpn""")
                 .param("site", siteId).param("lpn", lpnId)
                 .query((rs, n) -> new LpnView(rs.getString("lpn_id"), rs.getString("owner_id"),
-                        rs.getString("location_id"), rs.getString("lpn_type"), List.of()))
+                        rs.getString("location_id"), rs.getString("lpn_type"), List.of(), List.of()))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("INV_LPN_UNKNOWN", "LPN " + lpnId + " does not exist"));
         List<BalanceView> contents = jdbc.sql("""
@@ -85,7 +93,8 @@ public class InventoryQueryService {
                         from inventory_balance where site_id = :site and lpn_id = :lpn order by id""")
                 .param("site", siteId).param("lpn", lpnId)
                 .query(InventoryQueryService::balance).list();
-        return new LpnView(header.lpnId(), header.ownerId(), header.locationId(), header.lpnType(), contents);
+        List<String> lpnSerials = serials.inLpn(siteId, lpnId).stream().map(SerialRepository.SerialView::serialNo).toList();
+        return new LpnView(header.lpnId(), header.ownerId(), header.locationId(), header.lpnType(), contents, lpnSerials);
     }
 
     public record TxnFilter(String itemNo, String lpnId, String locationId, UUID operationId) {

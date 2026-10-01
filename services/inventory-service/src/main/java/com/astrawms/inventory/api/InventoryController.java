@@ -11,6 +11,7 @@ import com.astrawms.inventory.api.InventoryDtos.ReceiveRequest;
 import com.astrawms.inventory.api.InventoryDtos.StatusChangeRequest;
 import com.astrawms.inventory.api.InventoryDtos.TxnView;
 import com.astrawms.inventory.domain.StockStatus;
+import com.astrawms.inventory.persistence.SerialRepository;
 import com.astrawms.inventory.service.InventoryCommandService;
 import com.astrawms.inventory.service.InventoryQueryService;
 import com.astrawms.inventory.service.InventoryQueryService.BalanceFilter;
@@ -96,6 +97,12 @@ public class InventoryController {
     @GetMapping("/lpns/{lpnId}")
     public LpnView lpn(@PathVariable String siteId, @PathVariable String lpnId) {
         return queries.lpn(siteId, lpnId);
+    }
+
+    @GetMapping("/serials/{ownerId}/{itemNo}/{serialNo}")
+    public SerialRepository.SerialView serial(@PathVariable String siteId, @PathVariable String ownerId,
+                                              @PathVariable String itemNo, @PathVariable String serialNo) {
+        return queries.serial(ownerId, itemNo, serialNo);
     }
 
     @GetMapping("/transactions")

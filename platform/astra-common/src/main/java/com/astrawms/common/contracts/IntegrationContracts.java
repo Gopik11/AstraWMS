@@ -72,8 +72,9 @@ public final class IntegrationContracts {
         public static final String TYPE = "ReceiptConfirmation";
         public static final String VERSION = "3.0";
 
+        /** {@code serials}: mandatory for INBOUND/FULL serial-controlled items; count = qtyReceived (base UoM). */
         public record Line(String erpLineRef, String itemNo, BigDecimal qtyReceived, String uom,
-                           List<LotSplit> lotSplits, String stockStatus, String reasonCode) {
+                           List<LotSplit> lotSplits, List<String> serials, String stockStatus, String reasonCode) {
         }
 
         public record LotSplit(String lotNo, String vendorLotNo, BigDecimal qty, LocalDate expiryDate) {
@@ -97,7 +98,7 @@ public final class IntegrationContracts {
 
         /** {@code stockType}: ERP stock type of the source stock (UNRESTRICTED, QUALITY_INSPECTION, BLOCKED). */
         public record Item(String itemNo, BigDecimal qty, String uom, String fromBucket, String toBucket,
-                           String lotNo, String toLotNo, String stockType, String text) {
+                           String lotNo, String toLotNo, List<String> serials, String stockType, String text) {
         }
     }
 

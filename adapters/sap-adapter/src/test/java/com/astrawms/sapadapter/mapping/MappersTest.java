@@ -99,11 +99,13 @@ class MappersTest {
                     Instant.parse("2026-10-02T14:05:00Z"), true,
                     List.of(new ReceiptConfirmation.Line("000010", "SKU-1", new BigDecimal("24"), "EA",
                                     List.of(new ReceiptConfirmation.LotSplit("B1", null, new BigDecimal("24"), LocalDate.parse("2027-01-31"))),
-                                    "AVAILABLE", null),
+                                    null, "AVAILABLE", null),
                             new ReceiptConfirmation.Line("000020", "SKU-2", new BigDecimal("9"), "CS",
                                     List.of(new ReceiptConfirmation.LotSplit("L1", null, new BigDecimal("5"), null),
                                             new ReceiptConfirmation.LotSplit("L2", null, new BigDecimal("4"), null)),
-                                    "QI", "SHORT_VENDOR")),
+                                    null, "QI", "SHORT_VENDOR"),
+                            new ReceiptConfirmation.Line("000030", "SCANNER", new BigDecimal("2"), "EA", List.of(),
+                                    List.of("SN-1", "SN-2"), "AVAILABLE", null)),
                     List.of(new ReceiptConfirmation.HandlingUnit("106141410000000019", null,
                             List.of(new ReceiptConfirmation.HuContent("000010", "B1", new BigDecimal("24"))))));
 
@@ -114,7 +116,10 @@ class MappersTest {
             assertThat(call.headerDeadlines().getFirst().timestampUtc()).isEqualTo("20261002140500");
             assertThat(call.wmsTxnId()).isEqualTo("W1M3S5G87458N692");
             assertThat(call.itemData()).extracting(Bapi.ItemData::delivItem)
-                    .containsExactly("000010", "000020", "900001", "900002");
+                    .containsExactly("000010", "000020", "900001", "900002", "000030");
+            assertThat(call.itemSerialNo()).extracting(Bapi.ItemSerialNo::itmNumber, Bapi.ItemSerialNo::serialNo)
+                    .containsExactly(org.assertj.core.groups.Tuple.tuple("000030", "SN-1"),
+                            org.assertj.core.groups.Tuple.tuple("000030", "SN-2"));
             assertThat(call.itemData().get(0).batch()).isEqualTo("B1");
             assertThat(call.itemData().get(0).salesUnit()).isEqualTo("ST");
             assertThat(call.itemData().get(1).batch()).isNull();
@@ -139,7 +144,7 @@ class MappersTest {
             GoodsMovement adj = new GoodsMovement("W1M3S5G87458N693", "ADJ_NEG", "CC_TOL",
                     Instant.parse("2026-10-01T04:30:00Z"), null,
                     List.of(new GoodsMovement.Item("SKU-1", new BigDecimal("2"), "EA", "0001", null, "B1", null,
-                            "UNRESTRICTED", "ADJUSTMENT x")));
+                            null, "UNRESTRICTED", "ADJUSTMENT x")));
             Bapi.GoodsmvtCreate call = BapiMapper.goodsMovement(adj, "1000", ZoneId.of("America/Chicago"));
             assertThat(call.gmCode()).isEqualTo("03");
             // 04:30 UTC is still 30 Sep in Chicago: posting date is plant-local
@@ -155,11 +160,15 @@ class MappersTest {
 
             GoodsMovement fromQi = new GoodsMovement("W1M3S5G87458N694", "STATUS_QI_TO_BLK", "QA_REJ", NOW, "qa1",
                     List.of(new GoodsMovement.Item("SKU-1", BigDecimal.ONE, "EA", "0001", null, null, null,
-                            "QUALITY_INSPECTION", null)));
+                            List.of("SN-9"), "QUALITY_INSPECTION", null)));
             Bapi.GoodsmvtCreate qi = BapiMapper.goodsMovement(fromQi, "1000", ZoneId.of("UTC"));
             assertThat(qi.gmCode()).isEqualTo("04");
             assertThat(qi.items().getFirst().moveType()).isEqualTo("350");
             assertThat(qi.items().getFirst().stckType()).isEqualTo("X");
+            assertThat(qi.serials()).singleElement().satisfies(sn -> {
+                assertThat(sn.matdocItm()).isEqualTo("0001");
+                assertThat(sn.serialNo()).isEqualTo("SN-9");
+            });
         }
 
         @Test

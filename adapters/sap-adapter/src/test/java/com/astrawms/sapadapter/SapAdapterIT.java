@@ -162,7 +162,7 @@ class SapAdapterIT {
         send(IntegrationContracts.TOPIC_GOODS_MOVEMENTS, GoodsMovement.TYPE, "DC1:SKU-1", "ASTRAWMS",
                 new GoodsMovement(txn, "STATUS_AVL_TO_QI", "QA_HOLD", Instant.now(), null,
                         List.of(new GoodsMovement.Item("SKU-1", new BigDecimal("4"), "EA", "0001", null, null, null,
-                                "UNRESTRICTED", "test"))));
+                                null, "UNRESTRICTED", "test"))));
         assertThat(awaitResult(txn, 1).getFirst().get("success").asBoolean()).isTrue();
         String payload = queryAsTenant(() -> jdbc.sql("select payload::text from mock_sap_document where xblnr = :x")
                 .param("x", txn).query(String.class).single());
@@ -177,7 +177,8 @@ class SapAdapterIT {
     private ReceiptConfirmation confirmation(String txn, String vbeln) {
         return new ReceiptConfirmation(txn, vbeln, false, "V-100", Instant.now(), true,
                 List.of(new ReceiptConfirmation.Line("000010", "SKU-1", new BigDecimal("24"), "EA",
-                        List.of(new ReceiptConfirmation.LotSplit("B1", null, new BigDecimal("24"), null)), "AVAILABLE", null)),
+                        List.of(new ReceiptConfirmation.LotSplit("B1", null, new BigDecimal("24"), null)), null,
+                        "AVAILABLE", null)),
                 List.of());
     }
 

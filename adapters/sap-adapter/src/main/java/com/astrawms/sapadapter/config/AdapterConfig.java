@@ -13,11 +13,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.kafka.config.TopicBuilder;
-import org.springframework.kafka.listener.CommonErrorHandler;
-import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.util.backoff.ExponentialBackOff;
 import tools.jackson.databind.json.JsonMapper;
 
 @Configuration
@@ -36,21 +33,6 @@ public class AdapterConfig {
     SapGateway mockSapGateway(JdbcClient jdbc, JsonMapper json, Clock clock) {
         log.warn("Using MockSapGateway: postings go to a simulated SAP backend, not to a real SAP system");
         return new MockSapGateway(jdbc, json, clock);
-    }
-
-    /**
-     * Transient SAP failures (locks, communication) are retried with exponential backoff (1 s → 30 s, ~5 min in
-     * total, ISD-00 §6). Exhausted messages are logged and skipped. Parking them in a dead-letter topic is the next
-     * platform increment; until then the reconciliation run (IF-INV-003) detects unposted confirmations.
-     */
-    @Bean
-    CommonErrorHandler kafkaErrorHandler() {
-        ExponentialBackOff backOff = new ExponentialBackOff(1_000, 2.0);
-        backOff.setMaxInterval(30_000);
-        backOff.setMaxElapsedTime(300_000);
-        return new DefaultErrorHandler((record, e) ->
-                log.error("Giving up on {} offset {} after retries: {}", record.topic(), record.offset(), e.getMessage()),
-                backOff);
     }
 
     @Bean

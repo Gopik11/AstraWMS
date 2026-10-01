@@ -27,7 +27,8 @@ public final class InventoryDtos {
             @Size(max = 40) String lpnId,
             @NotBlank String locationId,
             StockStatus status,
-            String sourceDoc) {
+            String sourceDoc,
+            List<String> serials) {
     }
 
     /**
@@ -44,7 +45,8 @@ public final class InventoryDtos {
             @Positive BigDecimal qty,
             String uom,
             @NotBlank String toLocationId,
-            @Size(max = 40) String toLpnId) {
+            @Size(max = 40) String toLpnId,
+            List<String> serials) {
 
         public boolean wholeLpn() {
             return lpnId != null && !lpnId.isBlank() && (itemNo == null || itemNo.isBlank());
@@ -62,7 +64,8 @@ public final class InventoryDtos {
             @NotNull BigDecimal qtyDelta,
             @NotBlank String uom,
             @NotBlank String reasonCode,
-            String approvedBy) {
+            String approvedBy,
+            List<String> serials) {
     }
 
     public record StatusChangeRequest(
@@ -76,7 +79,8 @@ public final class InventoryDtos {
             @NotNull @Positive BigDecimal qty,
             @NotBlank String uom,
             @NotBlank String reasonCode,
-            String approvedBy) {
+            String approvedBy,
+            List<String> serials) {
     }
 
     public record OperationResult(UUID operationId, String wmsTxnId, String opType, List<Line> lines,
@@ -107,7 +111,8 @@ public final class InventoryDtos {
         }
     }
 
-    public record LpnView(String lpnId, String ownerId, String locationId, String lpnType, List<BalanceView> contents) {
+    public record LpnView(String lpnId, String ownerId, String locationId, String lpnType, List<BalanceView> contents,
+                          List<String> serials) {
     }
 
     public record TxnView(long id, UUID operationId, String txnType, String ownerId, String itemNo, String lotNo,

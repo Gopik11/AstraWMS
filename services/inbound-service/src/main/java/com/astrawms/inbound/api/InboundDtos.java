@@ -26,7 +26,8 @@ public final class InboundDtos {
             @Size(max = 40) String lpnId,
             @NotBlank String locationId,
             String overrideReason,
-            String approvedBy) {
+            String approvedBy,
+            List<String> serials) {
     }
 
     /** SSCC single-scan receipt of an expected handling unit (INB-011). */

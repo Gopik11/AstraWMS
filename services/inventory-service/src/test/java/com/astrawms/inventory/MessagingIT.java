@@ -26,6 +26,8 @@ class MessagingIT extends IntegrationTest {
     KafkaTemplate<String, String> kafka;
     @Autowired
     JsonMapper json;
+    @Autowired
+    com.astrawms.common.messaging.MessagingHousekeeping housekeeping;
 
     @Test
     void goodsMovementIsRelayedToKafkaInCanonicalEnvelope_IFINV001() throws Exception {
@@ -92,6 +94,47 @@ class MessagingIT extends IntegrationTest {
         receive("SKU-NEW", "2", "EA", "A-01-01", null, null).andExpect(status().isCreated());
     }
 
+    @Test
+    void poisonMessagesGoToTheDeadLetterTopic_F81() throws Exception {
+        String key = tenant + ":poison";
+        kafka.send("wms.masterdata.events.v1", key, "{not json").get();
+
+        ConsumerRecord<String, String> dead = awaitRecord("wms.masterdata.events.v1.dlq", key);
+        assertThat(dead.value()).isEqualTo("{not json");
+        assertThat(header(dead, "kafka_dlt-original-topic")).isEqualTo("wms.masterdata.events.v1");
+        assertThat(header(dead, "kafka_dlt-exception-fqcn")).contains("Exception");
+        // the listener keeps consuming after the poison message
+        receive("SKU-EA", "1", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+    }
+
+    @Test
+    void housekeepingPurgesOldPublishedOutboxAndInboxRowsOnly() {
+        Instant old = Instant.now().minus(Duration.ofDays(40));
+        UUID oldPublished = UUID.randomUUID();
+        UUID oldUnpublished = UUID.randomUUID();
+        asTenant(() -> {
+            for (UUID id : List.of(oldPublished, oldUnpublished)) {
+                jdbc.sql("""
+                                insert into outbox (message_id, topic, message_key, message_type, tenant_id, envelope,
+                                                    created_at, published_at)
+                                values (:id, 't', 'k', 'Test', :tenant, '{}'::jsonb, :at, :published)""")
+                        .param("id", id).param("tenant", tenant).param("at", java.sql.Timestamp.from(old))
+                        .param("published", id.equals(oldPublished) ? java.sql.Timestamp.from(old) : null)
+                        .update();
+            }
+            jdbc.sql("insert into inbox (source_system, message_id, message_type, processed_at) values ('T', :id, 'Test', :at)")
+                    .param("id", tenant + "-old").param("at", java.sql.Timestamp.from(old)).update();
+        });
+
+        housekeeping.purge();
+
+        assertThat(queryAsTenant(() -> jdbc.sql("select message_id from outbox where message_id in (:ids)")
+                .param("ids", List.of(oldPublished, oldUnpublished)).query(UUID.class).list()))
+                .containsExactly(oldUnpublished);   // never published: must stay for the relay
+        assertThat(queryAsTenant(() -> jdbc.sql("select count(*) from inbox where message_id = :id")
+                .param("id", tenant + "-old").query(Integer.class).single())).isZero();
+    }
+
     private String itemEvent(UUID messageId, String itemNo, String baseUom, Instant changedAt) {
         Map<String, Object> payload = Map.of(
                 "ownerId", OWNER, "itemNo", itemNo, "baseUom", baseUom, "status", "ACTIVE", "hazardous", false,
@@ -108,6 +151,10 @@ class MessagingIT extends IntegrationTest {
     }
 
     private ConsumerRecord<String, String> awaitRecord(String topic) {
+        return awaitRecord(topic, null);
+    }
+
+    private ConsumerRecord<String, String> awaitRecord(String topic, String exactKey) {
         Map<String, Object> config = Map.of(
                 ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers(),
                 ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID(),
@@ -119,7 +166,7 @@ class MessagingIT extends IntegrationTest {
             Instant deadline = Instant.now().plusSeconds(30);
             while (Instant.now().isBefore(deadline)) {
                 for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofMillis(500))) {
-                    if (r.key().startsWith(tenant + ":")) {
+                    if (exactKey == null ? r.key().startsWith(tenant + ":") : exactKey.equals(r.key())) {
                         return r;
                     }
                 }

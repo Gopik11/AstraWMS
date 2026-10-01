@@ -116,9 +116,9 @@ public class ReceivingService {
         InventoryClient.ReceiveResult inv = inventory.receive(siteId, "INB-" + idempotencyKey,
                 new InventoryClient.ReceiveCommand(line.ownerId(), line.itemNo(), lot, r.expiryDate(), r.qty(),
                         r.uom(), blankToNull(r.lpnId()), r.locationId(), line.stockTypeTarget(),
-                        erpDocNo + "/" + lineRef));
+                        erpDocNo + "/" + lineRef, r.serials()));
         recordTxn(h, line, idempotencyKey, r.qty(), r.uom(), lot, r.vendorLotNo(), r.expiryDate(), r.lpnId(),
-                r.locationId(), inv.operationId(), r.overrideReason(), r.approvedBy());
+                r.locationId(), inv.operationId(), r.overrideReason(), r.approvedBy(), r.serials());
         ReceiveResult result = new ReceiveResult(erpDocNo, progress(h.id()), List.of(inv.operationId()),
                 blankToNull(r.lpnId()), false);
         saveResponse(idempotencyKey, result);
@@ -159,9 +159,9 @@ public class ReceivingService {
             String key = idempotencyKey + "#" + c.lineRef();
             InventoryClient.ReceiveResult inv = inventory.receive(siteId, "INB-" + key,
                     new InventoryClient.ReceiveCommand(line.ownerId(), line.itemNo(), c.lotNo(), null, c.qty(), c.uom(),
-                            sscc, r.locationId(), line.stockTypeTarget(), erpDocNo + "/" + c.lineRef()));
+                            sscc, r.locationId(), line.stockTypeTarget(), erpDocNo + "/" + c.lineRef(), null));
             recordTxn(h, line, key, c.qty(), c.uom(), c.lotNo(), null, null, sscc, r.locationId(),
-                    inv.operationId(), null, null);
+                    inv.operationId(), null, null, null);
             operations.add(inv.operationId());
         }
         jdbc.sql("update expected_hu set received = true where expectation_id = :id and sscc = :sscc")
@@ -259,17 +259,18 @@ public class ReceivingService {
     private void publishConfirmation(Header h, String txnId, Instant completedAt) {
         List<Line> lines = lines(h.id());
         record Txn(String lineRef, String lotNo, String vendorLotNo, LocalDate expiry, BigDecimal qty, String lpn,
-                   String status) {
+                   String status, List<String> serials) {
         }
         List<Txn> txns = jdbc.sql("""
-                        select erp_line_ref, lot_no, vendor_lot_no, expiry_date, qty, lpn_id, stock_status
+                        select erp_line_ref, lot_no, vendor_lot_no, expiry_date, qty, lpn_id, stock_status, serials
                         from receipt_txn where expectation_id = :id and qty > 0 order by received_at""")
                 .param("id", h.id())
                 .query((rs, n) -> {
                     Date expiry = rs.getDate("expiry_date");
                     return new Txn(rs.getString(1), rs.getString(2), rs.getString(3),
                             expiry == null ? null : expiry.toLocalDate(), rs.getBigDecimal(5), rs.getString(6),
-                            rs.getString(7));
+                            rs.getString(7), rs.getArray(8) == null ? List.of()
+                                    : List.of((String[]) rs.getArray(8).getArray()));
                 })
                 .list();
         Map<String, String> shortReasons = new LinkedHashMap<>();
@@ -286,10 +287,13 @@ public class ReceivingService {
                                     a.expiryDate() != null ? a.expiryDate() : b.expiryDate()));
                 }
             }
+            List<String> lineSerials = txns.stream().filter(t -> t.lineRef().equals(l.erpLineRef()))
+                    .flatMap(t -> t.serials().stream()).toList();
             int cmp = l.qtyReceived().compareTo(l.qtyExpected());
             String reason = cmp < 0 ? shortReasons.get(l.erpLineRef()) : cmp > 0 ? "OVER_ACCEPTED" : null;
             confirmationLines.add(new ReceiptConfirmation.Line(l.erpLineRef(), l.itemNo(), strip(l.qtyReceived()),
-                    l.uom(), new ArrayList<>(splits.values()), l.stockTypeTarget(), reason));
+                    l.uom(), new ArrayList<>(splits.values()), lineSerials.isEmpty() ? null : lineSerials,
+                    l.stockTypeTarget(), reason));
         }
         Map<String, List<ReceiptConfirmation.HuContent>> hus = new LinkedHashMap<>();
         for (Txn t : txns) {
@@ -433,14 +437,15 @@ public class ReceivingService {
 
     private void recordTxn(Header h, Line line, String key, BigDecimal qty, String uom, String lot,
                            String vendorLot, LocalDate expiry, String lpn, String location, UUID inventoryOperation,
-                           String overrideReason, String approvedBy) {
+                           String overrideReason, String approvedBy, List<String> serials) {
         TenantContext.Scope scope = TenantContext.require();
         jdbc.sql("""
                         insert into receipt_txn (id, tenant_id, expectation_id, erp_line_ref, idempotency_key,
                             qty, uom, lot_no, vendor_lot_no, expiry_date, lpn_id, location_id,
-                            stock_status, inventory_operation_id, override_reason, approved_by, received_by, received_at)
+                            stock_status, inventory_operation_id, override_reason, approved_by, received_by, received_at,
+                            serials)
                         values (:id, :tenant, :exp, :ref, :key, :qty, :uom, :lot, :vlot, :expiry, :lpn, :loc,
-                                :status, :op, :override, :approvedBy, :user, :now)""")
+                                :status, :op, :override, :approvedBy, :user, :now, :serials)""")
                 .param("id", UUID.randomUUID()).param("tenant", scope.tenantId()).param("exp", h.id())
                 .param("ref", line.erpLineRef()).param("key", key).param("qty", qty)
                 .param("uom", uom).param("lot", lot).param("vlot", blankToNull(vendorLot))
@@ -448,6 +453,7 @@ public class ReceivingService {
                 .param("loc", location).param("status", line.stockTypeTarget()).param("op", inventoryOperation)
                 .param("override", blankToNull(overrideReason)).param("approvedBy", blankToNull(approvedBy))
                 .param("user", scope.userId()).param("now", Timestamp.from(clock.instant()))
+                .param("serials", serials == null || serials.isEmpty() ? null : serials.toArray(String[]::new))
                 .update();
         jdbc.sql("""
                         update receipt_expectation_line set qty_received = qty_received + :qty

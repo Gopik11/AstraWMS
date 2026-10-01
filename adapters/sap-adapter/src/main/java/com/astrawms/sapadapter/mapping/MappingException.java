@@ -1,7 +1,9 @@
 package com.astrawms.sapadapter.mapping;
 
+import com.astrawms.common.messaging.PoisonMessageException;
+
 /** A message that cannot be mapped (ISD class "Permanent technical"): rejected with IDoc status 51, never retried. */
-public class MappingException extends RuntimeException {
+public class MappingException extends PoisonMessageException {
 
     private final String code;
 

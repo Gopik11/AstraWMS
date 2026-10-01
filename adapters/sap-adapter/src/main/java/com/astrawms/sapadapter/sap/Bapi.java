@@ -25,6 +25,7 @@ public final class Bapi {
             @JsonProperty("ITEM_CONTROL") List<ItemControl> itemControl,
             @JsonProperty("HANDLING_UNIT_HEADER") List<HuHeader> handlingUnitHeader,
             @JsonProperty("HANDLING_UNIT_ITEM") List<HuItem> handlingUnitItem,
+            @JsonProperty("ITEM_SERIAL_NO") List<ItemSerialNo> itemSerialNo,
             /** Not a BAPI parameter: the reference the adapter uses for the duplicate check (XBLNR). */
             @JsonProperty("X_WMS_TXN_ID") String wmsTxnId) {
     }
@@ -51,6 +52,10 @@ public final class Bapi {
                               @JsonProperty("CHG_DELQTY") String chgDelqty) {
     }
 
+    public record ItemSerialNo(@JsonProperty("DELIV_NUMB") String delivNumb, @JsonProperty("ITM_NUMBER") String itmNumber,
+                               @JsonProperty("SERIALNO") String serialNo) {
+    }
+
     public record HuHeader(@JsonProperty("DELIV_NUMB") String delivNumb, @JsonProperty("HDL_UNIT_EXID") String hdlUnitExid,
                            @JsonProperty("HDL_UNIT_EXID_TY") String hdlUnitExidTy,
                            @JsonProperty("SHIP_MAT") String shipMat) {
@@ -66,7 +71,12 @@ public final class Bapi {
     public record GoodsmvtCreate(
             @JsonProperty("GOODSMVT_HEADER") GoodsmvtHeader header,
             @JsonProperty("GOODSMVT_CODE") String gmCode,
-            @JsonProperty("GOODSMVT_ITEM") List<GoodsmvtItem> items) {
+            @JsonProperty("GOODSMVT_ITEM") List<GoodsmvtItem> items,
+            @JsonProperty("GOODSMVT_SERIALNUMBER") List<GoodsmvtSerial> serials) {
+    }
+
+    /** MATDOC_ITM: 4-digit position of the item within GOODSMVT_ITEM (0001-based). */
+    public record GoodsmvtSerial(@JsonProperty("MATDOC_ITM") String matdocItm, @JsonProperty("SERIALNO") String serialNo) {
     }
 
     /** REF_DOC_NO → MKPF-XBLNR carries the WMS transaction ID (INT-014). Dates yyyyMMdd, plant local. */
