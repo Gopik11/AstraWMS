@@ -126,23 +126,24 @@ public class ReferenceRepository {
         jdbc.sql("""
                         insert into ref_location (tenant_id, site_id, location_id, zone_id, location_type, erp_bucket,
                                                   temperature_class, hazmat_allowed, allow_mixed_items,
-                                                  allow_mixed_lots, status, source_changed_at, zone_type)
+                                                  allow_mixed_lots, status, source_changed_at, zone_type, pick_seq)
                         values (:tenant, :site, :loc, :zone, :type, :bucket, :temp, :haz, :mixItems, :mixLots,
-                                :status, :changedAt, :zoneType)
+                                :status, :changedAt, :zoneType, :seq)
                         on conflict (tenant_id, site_id, location_id) do update set
                             zone_id = excluded.zone_id, location_type = excluded.location_type,
                             erp_bucket = excluded.erp_bucket, temperature_class = excluded.temperature_class,
                             hazmat_allowed = excluded.hazmat_allowed, allow_mixed_items = excluded.allow_mixed_items,
                             allow_mixed_lots = excluded.allow_mixed_lots, status = excluded.status,
                             source_changed_at = excluded.source_changed_at,
-                            zone_type = coalesce(excluded.zone_type, ref_location.zone_type)
+                            zone_type = coalesce(excluded.zone_type, ref_location.zone_type),
+                            pick_seq = excluded.pick_seq
                         where ref_location.source_changed_at <= excluded.source_changed_at""")
                 .param("tenant", TenantContext.tenantId()).param("site", e.siteId()).param("loc", e.locationId())
                 .param("zone", e.zoneId()).param("type", e.locationType()).param("bucket", e.erpBucket())
                 .param("temp", e.temperatureClass()).param("haz", e.hazmatAllowed())
                 .param("mixItems", e.allowMixedItems()).param("mixLots", e.allowMixedLots())
                 .param("status", e.status()).param("changedAt", Timestamp.from(e.sourceChangedAt()))
-                .param("zoneType", e.zoneType())
+                .param("zoneType", e.zoneType()).param("seq", e.pickSeq())
                 .update();
     }
 }

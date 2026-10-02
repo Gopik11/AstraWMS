@@ -101,6 +101,7 @@ export default function Returns() {
 
 function Detail({ rma, site, canReceive, canRepost, onChange }:
   { rma: string; site: string; canReceive: boolean; canRepost: boolean; onChange: () => void }) {
+  const { hasRole } = useAuth()
   const base = `/api/v1/sites/${site}/returns/${encodeURIComponent(rma)}`
   const detail = useLoad(() => get<ReturnDetail>(base), [base])
   const close = useAction(() => post<Row>(`${base}/close`))
@@ -140,7 +141,11 @@ function Detail({ rma, site, canReceive, canRepost, onChange }:
             { header: 'Flags', cell: (u) => [u.wrong_item && 'wrong item', u.serial_flag && 'serial mismatch', u.over_rma && 'over RMA'].filter(Boolean).join(', ') },
             { header: 'By', cell: (u) => `${u.received_by} · ${fmtDate(u.received_at)}` },
           ]} />
-          {canReceive && open && <ReceiveForm base={base} lines={d.lines} onDone={() => done(true)} />}
+          {canReceive && open && !hasRole('SUPERVISOR') && (
+            <div className="alert">Receive returned units on RF (Work → the RMA's receiving task); the desktop receives
+              only as a supervisor's exception.</div>
+          )}
+          {hasRole('SUPERVISOR') && open && <ReceiveForm base={base} lines={d.lines} onDone={() => done(true)} />}
           <div className="actions">
             {canReceive && d.status === 'IN_PROGRESS' && (
               <button className="primary" disabled={close.busy} onClick={async () => done(await close.run())}>Close and post to ERP</button>

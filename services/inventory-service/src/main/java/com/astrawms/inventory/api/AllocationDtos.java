@@ -30,12 +30,19 @@ public final class AllocationDtos {
             List<String> excludeLocationIds) {
     }
 
+    /**
+     * {@code shortReason} / {@code shortDetail} explain a shortfall (ADR-0021): NO_STOCK, AWAITING_PUTAWAY (stock is at
+     * the dock or in receiving), NOT_AVAILABLE (stock in QI, blocked or damaged status), ALLOCATED_ELSEWHERE,
+     * WAITING_FOR_REPLENISHMENT (the item's pick face is being refilled), POLICY_NO_SPLIT (reserve pallets larger than
+     * the open quantity are not split), LOT_UNAVAILABLE (the requested lot or expiry is not in stock). Null when not short.
+     */
     public record AllocationResult(String orderRef, String orderLineRef, String itemNo, String baseUom,
                                    BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
-                                   List<AllocationView> allocations, boolean replayed) {
+                                   List<AllocationView> allocations, boolean replayed, String shortReason,
+                                   String shortDetail) {
         public AllocationResult asReplay() {
             return new AllocationResult(orderRef, orderLineRef, itemNo, baseUom, requestedQty, allocatedQty, shortQty,
-                    allocations, true);
+                    allocations, true, shortReason, shortDetail);
         }
     }
 

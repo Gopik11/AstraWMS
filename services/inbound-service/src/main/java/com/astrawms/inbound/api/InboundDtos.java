@@ -73,7 +73,7 @@ public final class InboundDtos {
     public record ExpectationSummary(UUID id, String erpDocNo, String erpDocType, long revision, String vendorId,
                                      Instant expectedArrivalUtc, String status, int lineCount,
                                      String confirmationTxnId, String erpDocument, String erpErrorClass,
-                                     String erpErrorText) {
+                                     String erpErrorText, Instant createdAt, Instant updatedAt) {
     }
 
     public record ExpectationDetail(ExpectationSummary header, List<LineDetail> lines, List<HuDetail> handlingUnits) {

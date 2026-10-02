@@ -1,13 +1,30 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { get, post, type Row } from '../api'
+import { get, post, put, type Row } from '../api'
 import { useAuth } from '../auth'
-import { Badge, Card, ErrorBox, Field, Page, Table, fmtQty, useAction, useLoad, useSite } from '../ui'
+import { Badge, Card, ErrorBox, Field, Page, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 interface OrderDetailView extends Row {
   status: string
   lines: Row[]
   allocations: Row[]
+}
+
+/** Release policy of one order (ADR-0021): priority, and ship complete while nothing is released to picking. */
+function OrderPolicy({ base, order, onDone }: { base: string; order: OrderDetailView; onDone: () => void }) {
+  const [priority, setPriority] = useState(String(order.priority ?? 50))
+  const [complete, setComplete] = useState(order.ship_complete === true)
+  const save = useAction(() => put(`${base}/policy`, { priority: Number(priority), shipComplete: complete }))
+  return (
+    <div className="row">
+      <Field label="Priority" hint="0–100, higher first"><input type="number" min={0} max={100} value={priority}
+                                                              onChange={(e) => setPriority(e.target.value)} size={4} /></Field>
+      <label className="check"><input type="checkbox" checked={complete} disabled={order.status === 'RELEASED'}
+                                      onChange={(e) => setComplete(e.target.checked)} /> Ship complete (no partial shipment)</label>
+      <button disabled={save.busy} onClick={async () => { if (await save.run()) onDone() }}>Save</button>
+      <ErrorBox error={save.error} />
+    </div>
+  )
 }
 
 /** One outbound delivery: lines, allocations and picks; ship and repost (IF-OB-003). */
@@ -31,11 +48,17 @@ export default function OrderDetail() {
               <span>Carrier {String(d.carrier_scac ?? '—')}</span>
               {d.ship_to_name != null && <span>Customer {String(d.ship_to_name)}</span>}
               {d.wave_no != null && <span>Wave {String(d.wave_no)}</span>}
+              {d.cutoff_at != null && <span>Cutoff {fmtDate(d.cutoff_at)}</span>}
+              <span>Priority {String(d.priority ?? 50)}</span>
+              {d.ship_complete === true && <span><Badge value="SHIP COMPLETE" /></span>}
               <span>Pick LPN {String(d.pick_lpn)} at {String(d.staging_location)}</span>
               {d.tracking_no != null && <span>Tracking {String(d.tracking_no)}</span>}
               {d.erp_document != null && <span>ERP document {String(d.erp_document)}</span>}
             </div>
             {d.erp_error_text != null && <div className="alert error">ERP: {String(d.erp_error_text)}</div>}
+            {hasRole('SUPERVISOR') && ['POOLED', 'BACKORDERED', 'RELEASED'].includes(d.status) && (
+              <OrderPolicy base={base} order={d} onDone={detail.reload} />
+            )}
           </Card>
           <Card title="Lines">
             <Table rows={d.lines} columns={[
@@ -46,12 +69,25 @@ export default function OrderDetail() {
               { header: 'Picked', cell: (l) => fmtQty(l.qty_picked), align: 'right' },
               { header: 'Short', cell: (l) => fmtQty(l.qty_short), align: 'right' },
               { header: 'Short (picks)', cell: (l) => fmtQty(l.qty_short_pick), align: 'right' },
+              { header: 'Why short', cell: (l) => (Number(l.qty_short) > 0 && l.short_reason
+                  ? <span title={String(l.short_detail ?? '')}>{String(l.short_reason).toLowerCase().replace(/_/g, ' ')}: {String(l.short_detail ?? '')}</span> : '') },
               { header: 'Short state', cell: (l) => Number(l.qty_short) <= 0 ? ''
                   : l.short_hold ? 'waiting for stock' : Number(l.qty_short_closed) >= Number(l.qty_short) ? 'ships short' : 'recoverable' },
               { header: 'From', cell: (l) => d.allocations.filter((a) => a.erp_line_ref === l.erp_line_ref && a.status !== 'CANCELLED')
                   .map((a) => `${String(a.location_id)}${a.lpn_id ? ` / ${String(a.lpn_id)}` : ''}`).join(', ') },
             ]} />
           </Card>
+          {(d.recoveries as Row[] | undefined)?.length ? (
+            <Card title="Recovered shorts">
+              <Table rows={d.recoveries as Row[]} columns={[
+                { header: 'When', cell: (r) => fmtDate(r.recovered_at) },
+                { header: 'Line', cell: (r) => String(r.erp_line_ref) },
+                { header: 'Qty', cell: (r) => fmtQty(r.qty), align: 'right' },
+                { header: 'Freed by', cell: (r) => (r.trigger === 'MANUAL' ? `supervisor reallocation (${String(r.recovered_by)})`
+                    : `${String(r.txn_type ?? 'stock')}${r.lpn_id ? ` of ${String(r.lpn_id)}` : ''} at ${String(r.location_id ?? '?')}`) },
+              ]} />
+            </Card>
+          ) : null}
           <Card title="Allocations and picks">
             <Table rows={d.allocations} empty="Not allocated (pooled or backordered)" columns={[
               { header: 'Line', cell: (a) => String(a.erp_line_ref) },

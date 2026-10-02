@@ -203,6 +203,13 @@ class OutboundIT {
         stockArrived("SKU-SER", "ADJUST_POS");
         await(() -> shortOf("000020").signum() == 0);
         assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+        // ADR-0021: which stock freed which line.
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.recoveries[0].erp_line_ref", is("000010")))
+                .andExpect(jsonPath("$.recoveries[0].trigger", is("AUTOMATIC")))
+                .andExpect(jsonPath("$.recoveries[0].txn_type", is("MOVE_IN")))
+                .andExpect(jsonPath("$.recoveries[0].lpn_id", is("LPN-NEW")))
+                .andExpect(jsonPath("$.recoveries[1].txn_type", is("ADJUST_POS")));
     }
 
     @Test
@@ -484,6 +491,90 @@ class OutboundIT {
                 .andExpect(jsonPath("$.lines[0].qty_allocated", is(5)));
     }
 
+    // ------------------------------------------------------------------ ADR-0021 release policy
+
+    @Test
+    void releaseByCarrierCutoffTakesOnlyOrdersDueSoonAndRaisesTheirPickPriority() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE","timezone":"UTC"}""").andExpect(jsonPath("$.timezone", is("UTC")));
+        String soon = java.time.LocalTime.now(java.time.ZoneOffset.UTC).plusMinutes(30)
+                .truncatedTo(java.time.temporal.ChronoUnit.MINUTES).toString();
+        call(put("/api/v1/sites/DC1/outbound/carrier-cutoffs/upsn"), "{\"cutoffTime\":\"" + soon + "\"}")
+                .andExpect(jsonPath("$[0].carrier_scac", is("UPSN")))
+                .andExpect(jsonPath("$[0].cutoff_time", is(soon)));
+        call(put("/api/v1/sites/DC1/outbound/carrier-cutoffs/upsn"), "{\"cutoffTime\":\"25:00\"}")
+                .andExpect(jsonPath("$.code", is("OUT_CUTOFF_INVALID")));
+        String due = doc;
+        orderFor("UPSN", Instant.now());
+        await(() -> "POOLED".equals(statusOf(due)));
+        doc = "08" + (System.nanoTime() % 100_000_000L);
+        String later = doc;
+        orderFor("DHLX", Instant.now().plusSeconds(2 * 86_400));
+        await(() -> "POOLED".equals(statusOf(later)));
+
+        call(post("/api/v1/sites/DC1/outbound/waves/plan"), "{\"cutoffWithinMinutes\":120}")
+                .andExpect(jsonPath("$.orderCount", is(1)))
+                .andExpect(jsonPath("$.orders[0].erpDocNo", is(due)));
+        call(post("/api/v1/sites/DC1/outbound/waves/release-by-cutoff"), "{\"withinMinutes\":120}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.orders.length()", is(1)));
+        assertThat(statusOf(due)).isEqualTo("RELEASED");
+        assertThat(statusOf(later)).isEqualTo("POOLED");
+        // Due within the hour: picks rise above other picks (60) but stay below replenishment (70).
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE))
+                .allSatisfy(p -> assertThat(p.get("payload").get("priority").asInt()).isEqualTo(69));
+    }
+
+    @Test
+    void heldWaveCannotBeReleasedUntilTheHoldIsLifted() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE"}""").andExpect(status().isOk());
+        order(1, "CREATE", "3", "1");
+        await(() -> "POOLED".equals(orderStatus()));
+        String waveNo = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/waves"), "{}")
+                .andReturn().getResponse().getContentAsString(), "$.wave_no");
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/hold"), "{}")
+                .andExpect(jsonPath("$.code", is("OUT_HOLD_REASON_REQUIRED")));
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/hold"), "{\"reason\":\"Carrier late\"}")
+                .andExpect(jsonPath("$.status", is("HELD")))
+                .andExpect(jsonPath("$.hold_reason", is("Carrier late")));
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/release"), "")
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("OUT_WAVE_HELD")));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).isEmpty();
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/unhold"), "").andExpect(jsonPath("$.status", is("PLANNED")));
+        call(post("/api/v1/sites/DC1/outbound/waves/" + waveNo + "/release"), "").andExpect(jsonPath("$.status", is("RELEASED")));
+    }
+
+    @Test
+    void shipCompleteOrderHoldsNoStockUntilEveryLineCanBeFilled() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/owner-policies/acme"), "{\"shipComplete\":true}")
+                .andExpect(jsonPath("$.ship_complete", is(true)));
+        inventory.stock.put("SKU-SER", BigDecimal.ZERO);
+        order(1, "CREATE", "3", "1");
+        await(() -> "BACKORDERED".equals(orderStatus()));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).isEmpty();
+        assertThat(inventory.releases).contains(doc);                    // line 10 was allocable: given back
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.ship_complete", is(true)))
+                .andExpect(jsonPath("$.lines[0].qty_allocated", is(0)))
+                .andExpect(jsonPath("$.lines[0].short_reason", is("SHIP_COMPLETE")))
+                .andExpect(jsonPath("$.lines[1].qty_short", is(1)));
+        call(put("/api/v1/sites/DC1/outbound/orders/" + doc + "/policy"), "{\"priority\":90}")
+                .andExpect(jsonPath("$.priority", is(90)));
+
+        inventory.stock.put("SKU-SER", new BigDecimal("5"));
+        stockArrived("SKU-SER", "MOVE_IN");
+        await(() -> "RELEASED".equals(orderStatus()));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+        assertThat(shortOf("000010")).isEqualByComparingTo("0");
+        assertThat(shortOf("000020")).isEqualByComparingTo("0");
+        call(put("/api/v1/sites/DC1/outbound/orders/" + doc + "/policy"), "{\"shipComplete\":false}")
+                .andExpect(jsonPath("$.code", is("OUT_ORDER_POLICY_LOCKED")));
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.recoveries.length()", is(2)));
+    }
+
     @Test
     void pooledOrderCancelsWithoutTouchingInventory() throws Exception {
         call(put("/api/v1/sites/DC1/outbound/config"), """
@@ -513,6 +604,8 @@ class OutboundIT {
 
     @Test
     void packingWithSsccAndLabelsThenLoadCloseShips_SHP001_SHP002_SHP003() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/owner-policies/ACME"), """
+                {"packList":true,"labelTemplate":"retail"}""").andExpect(jsonPath("$.label_template", is("RETAIL")));
         order(1, "CREATE", "3", "1");
         await(() -> "RELEASED".equals(orderStatus()));
         for (JsonNode pick : outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList()) {
@@ -569,6 +662,10 @@ class OutboundIT {
         String label = JsonPath.read(call(get("/api/v1/sites/DC1/outbound/cartons/" + box1), "")
                 .andReturn().getResponse().getContentAsString(), "$.label");
         assertThat(label).contains("^XA", box1, "Customer One");
+        assertThat(label).contains("CONTENTS", "SKU-1 x 3");                      // the owner's retail content label
+        call(get("/api/v1/sites/DC1/outbound/cartons/" + box1), "")
+                .andExpect(jsonPath("$.owner_id", is("ACME")))
+                .andExpect(jsonPath("$.pack_list", org.hamcrest.Matchers.containsString("PACK LIST")));
     }
 
     @Test
@@ -593,6 +690,13 @@ class OutboundIT {
                 List.of(new OutboundOrder.Line("000010", "ACME", "SKU-1", new BigDecimal(qty10), "EA", null),
                         new OutboundOrder.Line("000020", "ACME", "SKU-SER", new BigDecimal(qty20), "EA", null)),
                 Instant.now());
+        send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
+    }
+
+    private void orderFor(String scac, Instant plannedGi) throws Exception {
+        OutboundOrder o = new OutboundOrder(doc, "CUSTOMER", "CREATE", 1, "IDOC-1",
+                new OutboundOrder.ShipTo("C-3", "Customer Three", "Reno", "US"), scac, plannedGi,
+                List.of(new OutboundOrder.Line("000010", "ACME", "SKU-1", new BigDecimal("3"), "EA", null)), Instant.now());
         send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
     }
 

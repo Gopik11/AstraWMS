@@ -19,6 +19,12 @@ public final class Roles {
     public static final String ERP_INTEGRATION = "ERP_INTEGRATION";
 
     /**
+     * Technical role of a device controller (pick-to-light, robots, AS/RS; ADR-0021). Its token carries the tenant
+     * claim; it may only claim, confirm and raise exceptions on tasks of automated zones.
+     */
+    public static final String AUTOMATION = "AUTOMATION";
+
+    /**
      * Technical role of an AstraWMS service account (OAuth2 client credentials). Service tokens carry no tenant: the
      * calling service names the tenant and acting user in {@code X-Tenant-Id} / {@code X-User-Id}, which are trusted
      * only for this role (trusted subsystem, ADR-0010).

@@ -59,7 +59,8 @@ class AllocationPolicyIT extends IntegrationTest {
         //    for the replenishment (backorder recovery allocates it when it arrives).
         allocate("SO-B", "12")
                 .andExpect(jsonPath("$.allocatedQty", is(2)))
-                .andExpect(jsonPath("$.shortQty", is(10)));
+                .andExpect(jsonPath("$.shortQty", is(10)))
+                .andExpect(jsonPath("$.shortReason", is("WAITING_FOR_REPLENISHMENT")));   // ADR-0021
 
         // 3. A full reserve pallet goes to an order that needs all of it.
         allocate("SO-C", "35")
@@ -101,7 +102,8 @@ class AllocationPolicyIT extends IntegrationTest {
     void neverSplitTakesOnlyWholeReservePallets() throws Exception {
         policy("{\"fullLpn\":\"NEVER_SPLIT\"}", Roles.SOLUTION_ADMIN).andExpect(status().isOk());
         receive("SKU-EA", "20", "EA", "A-01-01", "LPN-W", null).andExpect(status().isCreated());
-        allocate("SO-N1", "5").andExpect(jsonPath("$.allocatedQty", is(0))).andExpect(jsonPath("$.shortQty", is(5)));
+        allocate("SO-N1", "5").andExpect(jsonPath("$.allocatedQty", is(0))).andExpect(jsonPath("$.shortQty", is(5)))
+                .andExpect(jsonPath("$.shortReason", is("POLICY_NO_SPLIT")));
         allocate("SO-N2", "25").andExpect(jsonPath("$.allocatedQty", is(20)))
                 .andExpect(jsonPath("$.allocations[0].lpnId", is("LPN-W")));
     }
@@ -132,6 +134,48 @@ class AllocationPolicyIT extends IntegrationTest {
     }
 
     @Test
+    void ownerPolicyWithLotAffinityFillsALineFromOneLot_ADR0021() throws Exception {
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"LOT-A","expiryDate":"2027-01-01","qty":3,"uom":"EA","locationId":"A-01-01"}""")
+                .andExpect(status().isCreated());
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"LOT-B","expiryDate":"2028-01-01","qty":10,"uom":"EA","locationId":"A-01-02"}""")
+                .andExpect(status().isCreated());
+        String line = """
+                {"orderRef":"%s","orderLineRef":"000010","ownerId":"ACME","itemNo":"SKU-LOT","qty":5,"uom":"EA"}""";
+        policy("{\"ownerId\":\"acme\",\"lotAffinity\":true}", Roles.SOLUTION_ADMIN)
+                .andExpect(jsonPath("$.ownerId", is("ACME"))).andExpect(jsonPath("$.lotAffinity", is(true)));
+        getJson("/allocation-policy").andExpect(jsonPath("$.lotAffinity", is(false)));          // the site's is unchanged
+        getJson("/allocation-policy/owners").andExpect(jsonPath("$[*].ownerId", contains("ACME")));
+        // LOT-A (earliest expiry) cannot cover 5: the line comes whole from LOT-B.
+        post("/allocations", line.formatted("SO-AF1"))
+                .andExpect(jsonPath("$.allocations", hasSize(1)))
+                .andExpect(jsonPath("$.allocations[0].lotNo", is("LOT-B")));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/v1/sites/" + SITE + "/inventory/allocation-policy/owners/ACME")
+                        .with(TestTokens.as(tenant, "ada", Roles.SOLUTION_ADMIN)))
+                .andExpect(status().isNoContent());
+        // Site policy (plain FEFO): LOT-A first, the rest from LOT-B.
+        post("/allocations", line.formatted("SO-AF2"))
+                .andExpect(jsonPath("$.allocations[*].lotNo", contains("LOT-A", "LOT-B")));
+    }
+
+    @Test
+    void shortfallsSayWhy_ADR0021() throws Exception {
+        allocate("SO-W1", "2").andExpect(jsonPath("$.shortReason", is("NO_STOCK")));
+        receive("SKU-EA", "4", "EA", "A-01-01", "LPN-Q", null).andExpect(status().isCreated());
+        allocate("SO-W2", "4").andExpect(jsonPath("$.allocatedQty", is(4)));
+        allocate("SO-W3", "1").andExpect(jsonPath("$.shortReason", is("ALLOCATED_ELSEWHERE")));
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-FROZEN","qty":3,"uom":"EA","locationId":"F-01-01","status":"QI"}""")
+                .andExpect(status().isCreated());
+        post("/allocations", """
+                {"orderRef":"SO-W4","orderLineRef":"000010","ownerId":"ACME","itemNo":"SKU-FROZEN","qty":1,"uom":"EA"}""")
+                .andExpect(jsonPath("$.shortReason", is("NOT_AVAILABLE")))
+                .andExpect(jsonPath("$.shortDetail", org.hamcrest.Matchers.containsString("QI")));
+    }
+
+    @Test
     void stockInReceivingReturnsShippingOrQcZonesIsNotAllocable() throws Exception {
         zoned("RET-01", "RETURNS", "FLOOR");
         zoned("QC-02", "QC", "FLOOR");
@@ -139,7 +183,9 @@ class AllocationPolicyIT extends IntegrationTest {
         for (String loc : new String[] {"RET-01", "QC-02", "SHIP-01"}) {
             receive("SKU-EA", "5", "EA", loc, null, null).andExpect(status().isCreated());
         }
-        allocate("SO-E", "3").andExpect(jsonPath("$.allocatedQty", is(0))).andExpect(jsonPath("$.shortQty", is(3)));
+        allocate("SO-E", "3").andExpect(jsonPath("$.allocatedQty", is(0))).andExpect(jsonPath("$.shortQty", is(3)))
+                .andExpect(jsonPath("$.shortReason", is("AWAITING_PUTAWAY")))
+                .andExpect(jsonPath("$.shortDetail", org.hamcrest.Matchers.containsString("RET-01")));
         getJson("/inbound-staging").andExpect(jsonPath("$[*].location_id", contains("RET-01")));
     }
 }

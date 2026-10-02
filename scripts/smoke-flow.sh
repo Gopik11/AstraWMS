@@ -100,7 +100,7 @@ expect 422 -X POST "$GW/api/v1/sites/DC1/tasks/$putaway/confirm" "${RCV[@]}" \
   -d "{\"lpnId\":\"LPN1800001\",\"locationId\":\"STAGE-OUT\",\"checkDigit\":\"$(check_digit STAGE-OUT)\"}"
 grep -q TSK_LOCATION_NOT_ALLOWED <<<"$BODY" || fail "override to STAGE-OUT should be refused: $BODY"
 expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$putaway/confirm" "${RCV[@]}" \
-  -d "{\"lpnId\":\"LPN1800001\",\"locationId\":\"A-01-11\",\"checkDigit\":\"$(check_digit A-01-11)\"}"
+  -d "{\"lpnId\":\"LPN1800001\",\"locationId\":\"A-01-11\",\"checkDigit\":\"$(check_digit A-01-11)\",\"overrideReason\":\"CLOSER_LOCATION\"}"
 expect 200 "$GW/api/v1/sites/DC1/tasks?q=LPN1800001&type=PUTAWAY" "${SUP[@]}"
 [[ "$(json "[0]['targetLocation']" <<<"$BODY")" == A-01-11 ]] || fail "task list does not show A-01-11: $BODY"
 echo "Task list shows A-01-11 (suggested $(json "[0]['suggestedLocation']" <<<"$BODY"))"

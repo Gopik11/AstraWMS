@@ -58,12 +58,12 @@ public class OutboundListeners {
             return;
         }
         var change = codec.payload(e, com.astrawms.common.contracts.InventoryContracts.InventoryChanged.class);
-        boolean increased = change.lines().stream().anyMatch(l -> l.qtyDelta().signum() > 0
-                && "AVAILABLE".equals(l.status()) && !l.txnType().startsWith("PICK"));
-        if (increased) {
-            process(e, "EVENT", () -> outbound.onStockAvailable(e.siteId(), change.ownerId(), change.itemNo(),
-                    change.operationId()));
-        }
+        change.lines().stream().filter(l -> l.qtyDelta().signum() > 0
+                        && "AVAILABLE".equals(l.status()) && !l.txnType().startsWith("PICK"))
+                .findFirst()
+                .ifPresent(l -> process(e, "EVENT", () -> outbound.onStockAvailable(e.siteId(), change.ownerId(),
+                        change.itemNo(), new com.astrawms.outbound.service.OutboundService.StockArrival(l.txnType(),
+                                l.locationId(), l.lpnId(), change.operationId()))));
     }
 
     @KafkaListener(topics = IntegrationContracts.TOPIC_ERP_POSTING_RESULTS, groupId = "outbound-service.posting-results")

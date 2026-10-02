@@ -13,7 +13,10 @@ import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
-/** REST client for inbound-service; the RF user's token is relayed, so the inbound role and owner checks apply. */
+/**
+ * REST client for inbound-service; the RF user's token is relayed, so the inbound role and owner checks apply, on the
+ * RF channel.
+ */
 public class HttpInboundClient implements InboundClient {
 
     private static final Set<String> STANDARD = Set.of("type", "title", "status", "detail", "code", "instance");
@@ -48,7 +51,14 @@ public class HttpInboundClient implements InboundClient {
     }
 
     private JsonNode post(String path, String siteId, String docNo, String idempotencyKey, Object payload) {
-        TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
+        // ServiceCallInterceptor adds tenant, user, channel and bearer token. The work comes from RF tasks, so the
+        // call is on the RF channel: inbound accepts floor receiving only from RF (ADR-0021).
+        TenantContext.Scope scope = TenantContext.require();
+        return TenantContext.callAs(new TenantContext.Scope(scope.tenantId(), scope.userId(), "RF", scope.access()),
+                () -> send(path, siteId, docNo, idempotencyKey, payload));
+    }
+
+    private JsonNode send(String path, String siteId, String docNo, String idempotencyKey, Object payload) {
         try {
             RestClient.RequestBodySpec request = rest.post().uri(path, siteId, docNo).contentType(MediaType.APPLICATION_JSON);
             if (idempotencyKey != null) {

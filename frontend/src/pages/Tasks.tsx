@@ -3,7 +3,7 @@ import { get, query, type Task } from '../api'
 import { Badge, ErrorBox, Page, SearchBox, Table, fmtDate, fmtQty, useLoad, useParamSetter, useSite } from '../ui'
 
 const STATUSES = ['', 'RELEASED', 'ASSIGNED', 'EXCEPTION', 'COMPLETED', 'CANCELLED']
-const TYPES = ['', 'RECEIVE', 'PUTAWAY', 'PICK', 'REPLEN', 'COUNT', 'RETURN']
+const TYPES = ['', 'RECEIVE', 'PUTAWAY', 'PICK', 'REPLEN', 'MOVE', 'COUNT', 'RETURN']
 
 function what(t: Task): string {
   switch (t.taskType) {
@@ -11,6 +11,7 @@ function what(t: Task): string {
     case 'PUTAWAY': return `LPN ${t.lpnId}`
     case 'COUNT': return `Count ${t.fromLocation}`
     case 'REPLEN': return `${fmtQty(t.qty)} × ${t.itemNo}`
+    case 'MOVE': return `${t.strategy ?? 'Move'}: ${fmtQty(t.qty)} × ${t.itemNo}`
     default: return `${fmtQty(t.qty)} × ${t.itemNo} · ${t.orderRef ?? ''}`
   }
 }
@@ -19,7 +20,7 @@ function what(t: Task): string {
 function to(t: Task): string {
   const target = t.targetLocation ?? ''
   if (t.taskType === 'PUTAWAY' && t.status === 'COMPLETED' && t.suggestedLocation && t.suggestedLocation !== target) {
-    return `${target} (suggested ${t.suggestedLocation})`
+    return `${target} (suggested ${t.suggestedLocation}${t.overrideReason ? `; ${t.overrideReason.toLowerCase().replace(/_/g, ' ')}` : ''})`
   }
   return target
 }
@@ -54,7 +55,7 @@ export default function Tasks() {
         { header: 'From', cell: (t) => t.fromLocation },
         { header: 'To', cell: to },
         { header: 'Assigned to', cell: (t) => t.assignedTo },
-        { header: 'Exception', cell: (t) => t.exceptionReason },
+        { header: 'Exception', cell: (t) => [t.exceptionReason, t.shortReason && `${t.shortReason} → ${t.shortAction}`].filter(Boolean).join(' · ') },
         { header: 'Created', cell: (t) => fmtDate(t.createdAt) },
       ]} />
     </Page>

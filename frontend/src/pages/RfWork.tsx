@@ -41,6 +41,7 @@ export default function RfWork() {
       {task && task.taskType === 'RETURN' && <Return task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'COUNT' && <Count task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'REPLEN' && <Replen task={task} site={site} onDone={finished} />}
+      {task && task.taskType === 'MOVE' && <Move task={task} site={site} onDone={finished} />}
     </section>
   )
 }
@@ -55,13 +56,20 @@ function TaskHead({ task }: { task: Task }) {
   )
 }
 
+const OVERRIDE_REASONS = [['LOCATION_FULL', 'Location full'], ['LOCATION_BLOCKED', 'Location blocked'],
+  ['LOCATION_DAMAGED', 'Location damaged'], ['CLOSER_LOCATION', 'Closer location'], ['CONSOLIDATE', 'Consolidate with same item'],
+  ['OTHER', 'Other']]
+
 function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [lpn, setLpn] = useState('')
   const [location, setLocation] = useState(task.targetLocation)
   const [checkDigit, setCheckDigit] = useState('')
   const [reason, setReason] = useState('LOCATION_BLOCKED')
+  const [overrideReason, setOverrideReason] = useState('')
+  const overriding = location.trim().toUpperCase() !== (task.targetLocation ?? '').toUpperCase()
   const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/confirm`,
-    { lpnId: lpn.trim(), locationId: location.trim(), checkDigit: checkDigit.trim() }))
+    { lpnId: lpn.trim(), locationId: location.trim().toUpperCase(), checkDigit: checkDigit.trim(),
+      overrideReason: overriding ? overrideReason : null }))
   const exception = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/exception`, { reason }))
 
   const submit = async (e: FormEvent) => {
@@ -86,6 +94,14 @@ function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m:
       <Field label="Location" hint="Change only to override the suggested location">
         <input value={location} onChange={(e) => setLocation(e.target.value)} required />
       </Field>
+      {overriding && (
+        <Field label={`Why not ${task.targetLocation}?`}>
+          <select value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} required>
+            <option value="">Choose…</option>
+            {OVERRIDE_REASONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="Location check digit"><input inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required /></Field>
       <ErrorBox error={confirm.error ?? exception.error} />
       <div className="actions">
@@ -396,6 +412,34 @@ function Count({ task, site, onDone }: { task: Task; site: string; onDone: (m: s
       <div className="actions">
         <button className="primary big" disabled={confirm.busy}>{filled.length === 0 ? 'Location is empty' : 'Submit count'}</button>
       </div>
+    </form>
+  )
+}
+
+/** Move (ADR-0021, e.g. a reslot): take the stock at the source and drop it at the target location. */
+function Move({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
+  const [checkDigit, setCheckDigit] = useState('')
+  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/move`, { checkDigit: checkDigit.trim() }))
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (await confirm.run()) {
+      onDone(`Moved ${fmtQty(task.qty)} × ${task.itemNo} to ${task.targetLocation}`)
+    }
+  }
+  return (
+    <form className="card task" onSubmit={submit}>
+      <TaskHead task={task} />
+      <p className="muted">{task.strategy === 'RESLOT' ? 'The pick face of this item moved: bring its stock to the new face.' : 'Move stock.'}</p>
+      <dl className="big-facts">
+        <dt>Take from</dt><dd>{task.fromLocation}{task.lpnId ? ` · ${task.lpnId}` : ''}</dd>
+        <dt>Item</dt><dd>{fmtQty(task.qty)} {task.uom} × {task.itemNo}{task.lotNo ? ` · lot ${task.lotNo}` : ''}</dd>
+        <dt>Drop at</dt><dd className="target">{task.targetLocation}</dd>
+      </dl>
+      <Field label="Target location check digit">
+        <input autoFocus inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required />
+      </Field>
+      <ErrorBox error={confirm.error} />
+      <div className="actions"><button className="primary big" disabled={confirm.busy}>Confirm move</button></div>
     </form>
   )
 }

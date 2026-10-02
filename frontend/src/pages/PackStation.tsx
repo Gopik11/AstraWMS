@@ -148,7 +148,12 @@ function ShippingLabel({ carton }: { carton: Row }) {
         <div className="muted small">Weight {fmtQty(carton.weight_kg)} kg</div>
       </div>
       <Success>{carton.tracking_no ? 'Label ready to print' : null}</Success>
+      {carton.label_template === 'RETAIL' && <p className="muted">Owner {String(carton.owner_id)}: a content label prints after the carrier label.</p>}
       <details><summary>ZPL</summary><pre className="zpl">{String(carton.label ?? '')}</pre></details>
+      {carton.pack_list != null && (
+        <details open><summary>Pack list (owner {String(carton.owner_id)}): put it in the carton</summary>
+          <pre className="zpl">{String(carton.pack_list)}</pre></details>
+      )}
     </Card>
   )
 }

@@ -10,8 +10,14 @@ public interface InventoryClient {
     record Allocation(UUID id, String locationId, String lpnId, String lotNo, BigDecimal qty) {
     }
 
+    /** {@code shortReason}/{@code shortDetail}: why the allocation came up short (ADR-0021); null when not short. */
     record AllocateResult(String baseUom, BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
-                          List<Allocation> allocations) {
+                          List<Allocation> allocations, String shortReason, String shortDetail) {
+
+        public AllocateResult(String baseUom, BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
+                              List<Allocation> allocations) {
+            this(baseUom, requestedQty, allocatedQty, shortQty, allocations, null, null);
+        }
     }
 
     record LotQty(String lotNo, BigDecimal qty) {

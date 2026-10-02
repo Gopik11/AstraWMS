@@ -132,16 +132,43 @@ public class PutawayEngine {
                 empty.add(loc);
             }
         }
-        // Candidate lists are in travel-path order (pick_seq, location_id).
+        // Candidate lists are in travel-path order (pick_seq, location_id). Slotting (ADR-0021) refines reserve:
+        // the item's reserve zone first; slow movers (velocity C) take the empty slots furthest down the path, so the
+        // near ones stay free for fast movers.
         String prefix = toQc ? "QC_" : "";
+        String preferredZone = null;
+        boolean slow = false;
+        if (itemKeys.size() == 1) {
+            Stock s = contents.getFirst();
+            Optional<Projections.ItemSlotting> slot = projections.slotting(siteId, s.ownerId(), s.itemNo());
+            preferredZone = slot.map(Projections.ItemSlotting::reserveZone).orElse(null);
+            slow = slot.map(x -> "C".equals(x.velocityClass())).orElse(false);
+        }
+        if (preferredZone != null) {
+            String zone = preferredZone;
+            java.util.Comparator<Location> inZone = java.util.Comparator.comparing(l -> !zone.equals(l.zoneId()));
+            consolidate.sort(inZone);
+            empty.sort(inZone);
+        }
+        if (slow) {
+            java.util.Collections.reverse(empty);
+            if (preferredZone != null) {
+                String zone = preferredZone;
+                empty.sort(java.util.Comparator.comparing(l -> !zone.equals(l.zoneId())));
+            }
+        }
+        String rule = preferredZone == null ? "" : "_ZONE";
         if (!face.isEmpty()) {
             return Optional.of(new Plan(face.getFirst().locationId(), "PICK_FACE"));
         }
         if (!consolidate.isEmpty()) {
-            return Optional.of(new Plan(consolidate.getFirst().locationId(), prefix + "CONSOLIDATE"));
+            return Optional.of(new Plan(consolidate.getFirst().locationId(), prefix + "CONSOLIDATE"
+                    + (preferredZone != null && preferredZone.equals(consolidate.getFirst().zoneId()) ? rule : "")));
         }
         if (!empty.isEmpty()) {
-            return Optional.of(new Plan(empty.getFirst().locationId(), toQc ? "QC_EMPTY" : "EMPTY_NEAREST"));
+            boolean inZone = preferredZone != null && preferredZone.equals(empty.getFirst().zoneId());
+            return Optional.of(new Plan(empty.getFirst().locationId(),
+                    toQc ? "QC_EMPTY" : (slow ? "EMPTY_FAR_SLOW_MOVER" : "EMPTY_NEAREST") + (inZone ? rule : "")));
         }
         return Optional.empty();
     }

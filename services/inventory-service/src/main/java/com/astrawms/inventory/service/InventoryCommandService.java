@@ -242,13 +242,16 @@ public class InventoryCommandService {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             BigDecimal wanted = toBase(item, r.qty(), r.uom());
             String lot = blank(r.lotNo()) ? null : r.lotNo().trim();
-            AllocationPolicies.Policy policy = policies.of(siteId);
+            AllocationPolicies.Policy policy = policies.of(siteId, r.ownerId());
             boolean fefo = r.rotation() == null ? policy.fefo(item.lotControlled()) : r.rotation() == Rotation.FEFO;
             boolean faceFirst = policy.pickFaceFirst();
             AllocationPolicies.FullLpn fullLpn = policy.fullLpn();
             boolean hasFace = replenishments.hasPickFace(siteId, r.ownerId(), r.itemNo());
             List<AllocationRepository.Candidate> candidates = allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
                     r.minExpiryDate(), fefo, r.excludeLocationIds());
+            if (policy.lotAffinity() && item.lotControlled() && lot == null) {
+                candidates = singleLot(candidates, wanted);
+            }
             Map<AllocationRepository.Candidate, BigDecimal> free = new LinkedHashMap<>();
             candidates.forEach(c -> free.put(c, c.free()));
             BigDecimal remaining = wanted;
@@ -287,9 +290,62 @@ public class InventoryCommandService {
             if (hasFace) {
                 replenishments.onDemand(siteId, r.ownerId(), r.itemNo());
             }
+            String[] why = remaining.signum() == 0 ? new String[] {null, null}
+                    : explainShort(siteId, r, item, remaining, free.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add),
+                    hasFace, fullLpn);
             return new AllocationResult(r.orderRef(), r.orderLineRef(), r.itemNo(), item.baseUom(), wanted,
-                    wanted.subtract(remaining), remaining, views, false);
+                    wanted.subtract(remaining), remaining, views, false, why[0], why[1]);
         });
+    }
+
+    /**
+     * Lot affinity (ADR-0021): only the candidates of the first lot, in rotation order, whose free stock covers the
+     * whole line; all candidates (lots mixed) when no single lot can.
+     */
+    private static List<AllocationRepository.Candidate> singleLot(List<AllocationRepository.Candidate> candidates,
+                                                                  BigDecimal wanted) {
+        Map<String, BigDecimal> byLot = new LinkedHashMap<>();
+        candidates.forEach(c -> byLot.merge(c.key().lotNo(), c.free(), BigDecimal::add));
+        return byLot.entrySet().stream().filter(e -> e.getValue().compareTo(wanted) >= 0).findFirst()
+                .map(e -> candidates.stream().filter(c -> c.key().lotNo().equals(e.getKey())).toList())
+                .orElse(candidates);
+    }
+
+    /**
+     * Why an allocation came up short (ADR-0021), most actionable cause first: stock the policy held back (the face is
+     * being replenished, or pallets are not split), stock still on its way to storage, a requested lot or expiry not
+     * in stock, stock held by other orders, stock in a status that is not allocable, or none at all.
+     */
+    private String[] explainShort(String siteId, AllocateRequest r, ItemRef item, BigDecimal remaining, BigDecimal heldBack,
+                                  boolean hasFace, AllocationPolicies.FullLpn fullLpn) {
+        String unit = " " + item.baseUom();
+        if (heldBack.signum() > 0) {
+            return hasFace && fullLpn != AllocationPolicies.FullLpn.NEVER_SPLIT
+                    ? new String[] {"WAITING_FOR_REPLENISHMENT", heldBack.toPlainString() + unit
+                            + " are in reserve pallets; the pick face is being replenished and the line is allocated when it arrives"}
+                    : new String[] {"POLICY_NO_SPLIT", heldBack.toPlainString() + unit
+                            + " are in reserve pallets larger than the open quantity; the site's policy does not split pallets"};
+        }
+        AllocationRepository.ShortFacts f = allocations.shortFacts(siteId, r.ownerId(), r.itemNo(),
+                blank(r.lotNo()) ? null : r.lotNo().trim());
+        if (f.awaitingPutaway().signum() > 0) {
+            return new String[] {"AWAITING_PUTAWAY", f.awaitingPutaway().toPlainString() + unit + " at " + f.awaitingAt()
+                    + " wait for putaway; the line is allocated when they reach storage"};
+        }
+        if (f.otherLots().signum() > 0 || r.minExpiryDate() != null) {
+            return new String[] {"LOT_UNAVAILABLE", "No stock of the requested lot"
+                    + (r.minExpiryDate() == null ? "" : " / minimum expiry " + r.minExpiryDate())
+                    + (f.otherLots().signum() > 0 ? "; " + f.otherLots().toPlainString() + unit + " of other lots" : "")};
+        }
+        if (f.allocatedElsewhere().signum() > 0) {
+            return new String[] {"ALLOCATED_ELSEWHERE", f.allocatedElsewhere().toPlainString() + unit
+                    + " in storage are allocated to other orders"};
+        }
+        if (f.notAvailable().signum() > 0) {
+            return new String[] {"NOT_AVAILABLE", f.notAvailable().toPlainString() + unit + " in status " + f.statuses()
+                    + " cannot be allocated"};
+        }
+        return new String[] {"NO_STOCK", "No stock of " + r.itemNo() + " at " + siteId};
     }
 
     /**

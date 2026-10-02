@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.InventoryContracts;
@@ -63,16 +64,17 @@ class TaskIT {
 
         final List<Move> moves = new CopyOnWriteArrayList<>();
 
-        record QtyMove(String key, String item, String status, BigDecimal qty, String from, String to, String toLpn) {
+        record QtyMove(String key, String item, String status, BigDecimal qty, String from, String to, String toLpn,
+                       String fromLpn) {
         }
 
         final List<QtyMove> qtyMoves = new CopyOnWriteArrayList<>();
 
         @Override
         public UUID moveQuantity(String siteId, String key, String ownerId, String itemNo, String lotNo, String status,
-                                 BigDecimal qty, String from, String to, String toLpn) {
+                                 BigDecimal qty, String from, String fromLpn, String to, String toLpn) {
             if (qtyMoves.stream().noneMatch(m -> m.key().equals(key))) {
-                qtyMoves.add(new QtyMove(key, itemNo, status, qty, from, to, toLpn));
+                qtyMoves.add(new QtyMove(key, itemNo, status, qty, from, to, toLpn, fromLpn));
             }
             return UUID.nameUUIDFromBytes(key.getBytes());
         }
@@ -301,7 +303,11 @@ class TaskIT {
         confirm(id, "LPN-1", "F-01", "44")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
-        confirm(id, "LPN-1", "A-01", "33").andExpect(jsonPath("$.strategy", is("OVERRIDE")))
+        confirm(id, "LPN-1", "A-01", "33").andExpect(jsonPath("$.code", is("TSK_OVERRIDE_REASON_REQUIRED")));   // ADR-0021
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/confirm"), """
+                {"lpnId":"LPN-1","locationId":"A-01","checkDigit":"33","overrideReason":"LOCATION_FULL"}""")
+                .andExpect(jsonPath("$.strategy", is("OVERRIDE")))
+                .andExpect(jsonPath("$.overrideReason", is("LOCATION_FULL")))
                 .andExpect(jsonPath("$.confirmedLocation", is("A-01")))
                 // ADR-0019: the task shows where the LPN went; the engine's suggestion is kept beside it.
                 .andExpect(jsonPath("$.targetLocation", is("A-01")))
@@ -657,6 +663,140 @@ class TaskIT {
         return tasks(post("/api/v1/sites/DC1/tasks/" + id + "/pick"), """
                 {"checkDigit":"%s","qty":%s%s%s}""".formatted(checkDigit, qty,
                 item == null ? "" : ",\"item\":\"" + item + "\"", extra));
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 labor
+
+    @Test
+    void tasksGoOnlyToOperatorsWithTheSkillAndEquipmentAndTheBoardMeasuresAgainstStandard() throws Exception {
+        received("LPN-L", "SKU-1");
+        String id = awaitTask("LPN-L", "RELEASED");                     // DOCK-1 -> A-02, both in zone Z
+        tasks(put("/api/v1/sites/DC1/tasks/zone-equipment/z"), "{\"equipment\":\"reach_truck\"}")
+                .andExpect(jsonPath("$[0].equipment", is("REACH_TRUCK")));
+        tasks(put("/api/v1/sites/DC1/tasks/standards/PUTAWAY"), "{\"baseSeconds\":90,\"requiredSkill\":\"forklift\"}")
+                .andExpect(jsonPath("$[?(@.taskType == 'PUTAWAY')].requiredSkill", org.hamcrest.Matchers.contains("FORKLIFT")));
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(status().isNoContent());   // no profile
+        tasks(put("/api/v1/sites/DC1/tasks/operators/rita"), "{\"equipment\":[\"reach_truck\"],\"skills\":[]}")
+                .andExpect(jsonPath("$.equipment", is("REACH_TRUCK")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(status().isNoContent());   // lacks the skill
+        tasks(put("/api/v1/sites/DC1/tasks/operators/rita"), "{\"equipment\":[\"REACH_TRUCK\"],\"skills\":[\"FORKLIFT\"]}")
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(jsonPath("$.id", is(id)));
+
+        tasks(get("/api/v1/sites/DC1/tasks/labor"))
+                .andExpect(jsonPath("$.activeOperators", is(1)))
+                .andExpect(jsonPath("$.operators[0].userId", is("rita")))
+                .andExpect(jsonPath("$.operators[0].current.taskType", is("PUTAWAY")))
+                .andExpect(jsonPath("$.operators[0].current.expectedMinutes", is(1.5)));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/confirm").with(rita).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"lpnId\":\"LPN-L\",\"locationId\":\"A-02\",\"checkDigit\":\"22\"}"))
+                .andExpect(jsonPath("$.status", is("COMPLETED")));
+        tasks(get("/api/v1/sites/DC1/tasks/labor"))
+                .andExpect(jsonPath("$.operators[0].completed", is(1)))
+                .andExpect(jsonPath("$.operators[0].standardMinutes", is(1.5)))
+                .andExpect(jsonPath("$.operators[0].performancePct").isNumber());
+        mvc.perform(get("/api/v1/sites/DC1/tasks/labor").with(rita)).andExpect(status().isForbidden());
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 automation adapter
+
+    @Test
+    void devicesClaimConfirmAndHandBackTasksOfAutomatedZones() throws Exception {
+        tasks(put("/api/v1/sites/DC1/tasks/automation/zones/z"), "{\"deviceType\":\"pick_to_light\"}")
+                .andExpect(jsonPath("$[0].device_type", is("PICK_TO_LIGHT")));
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        pickRequested(first, "SO-A1", "A-01", "5");
+        pickRequested(second, "SO-A2", "A-02", "2");
+        awaitPickTask(first, "RELEASED");
+        awaitPickTask(second, "RELEASED");
+        // People do not get tasks of an automated zone on RF.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isNoContent());
+        var robot = TestTokens.as(tenant, "ptl-controller", "AUTOMATION");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(TestTokens.as(tenant, "pete", Roles.PICKER))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}")).andExpect(status().isForbidden());
+        String claimed = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andExpect(jsonPath("$.taskType", is("PICK"))).andExpect(jsonPath("$.fromZone", is("Z")))
+                .andExpect(jsonPath("$.deviceId", is("L-1")))
+                .andReturn().getResponse().getContentAsString(), "$.taskId");
+        // A short confirmation needs a reason, like on RF; then the device confirms what it picked.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\",\"qty\":1}"))
+                .andExpect(jsonPath("$.code", is("TSK_SHORT_REASON_REQUIRED")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-2\"}"))
+                .andExpect(jsonPath("$.code", is("TSK_NOT_ASSIGNED")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.assignedTo", is("device:L-1")));
+        // The next one the device cannot do: it goes to people.
+        String other = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andReturn().getResponse().getContentAsString(), "$.taskId");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + other + "/exception").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\",\"reason\":\"device_fault\"}"))
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.exceptionReason", is("AUTOMATION_DEVICE_FAULT")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(jsonPath("$.id", is(other)));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}")).andExpect(status().isNoContent());
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 slotting and MOVE tasks
+
+    private void slotting(String item, String zone, String velocity) throws Exception {
+        send(InventoryContracts.TOPIC, InventoryContracts.SlottingChanged.TYPE, "DC1:ACME:" + item,
+                new InventoryContracts.SlottingChanged("ACME", item, zone, null, velocity, Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_item_slotting where item_no = :i")
+                .param("i", item).query(Integer.class).single()) == 1);
+    }
+
+    @Test
+    void putawayPrefersTheItemsReserveZoneAndSendsSlowMoversFar() throws Exception {
+        location("R-NEAR", "RACK", null, false, "61", -5, "RESERVE");   // zone "RESERVE" (location helper uses type as id)
+        location("Z-FAR", "RACK", null, false, "62", 50, null);          // zone "Z"
+        await(() -> locations() == 6);
+        slotting("SKU-1", "Z", "A");
+        received("LPN-Z", "SKU-1");
+        String zoned = awaitTask("LPN-Z", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + zoned))
+                .andExpect(jsonPath("$.targetLocation", is("A-02")))            // nearest location of zone Z
+                .andExpect(jsonPath("$.strategy", is("EMPTY_NEAREST_ZONE")));
+        slotting("SKU-1", null, "C");
+        await(() -> asTenant(() -> jdbc.sql("select velocity_class from ref_item_slotting where item_no = 'SKU-1'")
+                .query(String.class).single()).equals("C"));
+        received("LPN-C", "SKU-1");
+        String slow = awaitTask("LPN-C", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + slow))
+                .andExpect(jsonPath("$.targetLocation", is("Z-FAR")))           // furthest empty slot
+                .andExpect(jsonPath("$.strategy", is("EMPTY_FAR_SLOW_MOVER")));
+    }
+
+    @Test
+    void reslotMoveTaskMovesTheStockToTheNewFace() throws Exception {
+        UUID move = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, InventoryContracts.MoveRequested.TYPE, "DC1:A-01",
+                new InventoryContracts.MoveRequested(move, "ACME", "SKU-1", "", "", new BigDecimal("3"), "EA", "A-01", "A-02",
+                        "RESLOT", 45));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from task where move_id = :m").param("m", move)
+                .query(Integer.class).single()) == 1);
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(jsonPath("$.taskType", is("MOVE"))).andExpect(jsonPath("$.strategy", is("RESLOT")))
+                .andReturn().getResponse().getContentAsString(), "$.id");
+        var pete = TestTokens.as(tenant, "pete", Roles.PICKER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/move").with(pete).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"checkDigit\":\"33\"}")).andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/move").with(pete).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"checkDigit\":\"22\"}")).andExpect(jsonPath("$.status", is("COMPLETED")));
+        StubInventory.QtyMove m = inventory.qtyMoves.getLast();
+        assertThat(m.from()).isEqualTo("A-01");
+        assertThat(m.to()).isEqualTo("A-02");
+        assertThat(m.qty()).isEqualByComparingTo("3");
     }
 
     // ------------------------------------------------------------------ ADR-0020 dock sweep

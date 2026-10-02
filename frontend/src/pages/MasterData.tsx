@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { get, post, put, query, type Page as ApiPage, type Row } from '../api'
+import { del, get, post, put, query, type Page as ApiPage, type Row } from '../api'
 import { Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 const LOCATION_TYPES = ['RACK', 'SHELF', 'FLOOR', 'BULK', 'DOOR', 'DOCK', 'STAGING_IN', 'STAGING_OUT', 'STAGING']
@@ -41,6 +41,7 @@ export default function MasterData() {
         <PlantMapping site={site} />
         <ReleaseMode site={site} />
         <AllocationPolicy site={site} />
+        <OwnerRules site={site} />
       </div>
       <Locations site={site} />
       <Items />
@@ -178,9 +179,11 @@ function PlantMapping({ site }: { site: string }) {
 }
 
 function ReleaseMode({ site }: { site: string }) {
-  const current = useLoad(() => get<{ releaseMode: string; packRequired: boolean }>(`/api/v1/sites/${site}/outbound/config`), [site])
+  const current = useLoad(() => get<{ releaseMode: string; packRequired: boolean; timezone: string; shipComplete: boolean }>(
+    `/api/v1/sites/${site}/outbound/config`), [site])
   const save = useAction((mode: string) => put(`/api/v1/sites/${site}/outbound/config`, { releaseMode: mode }))
-  const savePack = useAction((required: boolean) => put(`/api/v1/sites/${site}/outbound/config`, { packRequired: required }))
+  const savePack = useAction((body: Record<string, unknown>) => put(`/api/v1/sites/${site}/outbound/config`, body))
+  const [tz, setTz] = useState<string>()
   return (
     <Card title="Outbound release">
       <ErrorBox error={current.error ?? save.error} />
@@ -194,30 +197,102 @@ function ReleaseMode({ site }: { site: string }) {
       </div>
       <label className="check">
         <input type="checkbox" checked={current.data?.packRequired ?? false} disabled={savePack.busy}
-               onChange={async (e) => { await savePack.run(e.target.checked); current.reload() }} />
+               onChange={async (e) => { await savePack.run({ packRequired: e.target.checked }); current.reload() }} />
         Orders must be fully packed in closed cartons before loading / shipping
       </label>
+      <label className="check">
+        <input type="checkbox" checked={current.data?.shipComplete ?? false} disabled={savePack.busy}
+               onChange={async (e) => { await savePack.run({ shipComplete: e.target.checked }); current.reload() }} />
+        Orders ship complete (no partial shipments) unless the owner's rule says otherwise
+      </label>
+      <div className="row">
+        <Field label="Site time zone" hint="Carrier cutoffs are local times, e.g. America/Chicago">
+          <input value={tz ?? current.data?.timezone ?? ''} onChange={(e) => setTz(e.target.value)} />
+        </Field>
+        <button disabled={savePack.busy || tz == null}
+                onClick={async () => { if (await savePack.run({ timezone: tz })) { setTz(undefined); current.reload() } }}>Save time zone</button>
+      </div>
       <ErrorBox error={savePack.error} />
     </Card>
   )
 }
 
-interface Policy { lotRotation: string; otherRotation: string; pickFaceFirst: boolean; fullLpn: string; updatedBy?: string | null }
+/** Owner (3PL client) rules (ADR-0021): ship complete, pack list and label template per owner. */
+function OwnerRules({ site }: { site: string }) {
+  const url = `/api/v1/sites/${site}/outbound/owner-policies`
+  const list = useLoad(() => get<Row[]>(url), [url])
+  const [f, setF] = useState({ owner: '', shipComplete: '', packList: false, labelTemplate: '' })
+  const save = useAction(() => put(`${url}/${f.owner}`, {
+    shipComplete: f.shipComplete === '' ? null : f.shipComplete === 'true', packList: f.packList,
+    labelTemplate: f.labelTemplate || null,
+  }))
+  return (
+    <Card title="Owner rules">
+      <p className="muted">Rules of a client that replace the site's for its orders. Its allocation policy is set below
+        (allocation policy for an owner).</p>
+      <Table rows={list.data} empty="No owner rules" columns={[
+        { header: 'Owner', cell: (r) => String(r.owner_id) },
+        { header: 'Ship complete', cell: (r) => (r.ship_complete == null ? 'as site' : r.ship_complete ? 'yes' : 'no') },
+        { header: 'Pack list', cell: (r) => (r.pack_list ? 'yes' : 'no') },
+        { header: 'Label', cell: (r) => String(r.label_template ?? 'STANDARD') },
+        { header: 'Set by', cell: (r) => String(r.updated_by) },
+      ]} />
+      <div className="row">
+        <Field label="Owner"><input value={f.owner} onChange={(e) => setF({ ...f, owner: e.target.value.toUpperCase() })} size={8} required /></Field>
+        <Field label="Ship complete">
+          <select value={f.shipComplete} onChange={(e) => setF({ ...f, shipComplete: e.target.value })}>
+            <option value="">As the site</option><option value="true">Yes</option><option value="false">No</option>
+          </select>
+        </Field>
+        <Field label="Label">
+          <select value={f.labelTemplate} onChange={(e) => setF({ ...f, labelTemplate: e.target.value })}>
+            <option value="">Standard (carrier label)</option><option value="RETAIL">Retail (+ content label)</option>
+          </select>
+        </Field>
+        <label className="check"><input type="checkbox" checked={f.packList} onChange={(e) => setF({ ...f, packList: e.target.checked })} /> Pack list in each carton</label>
+        <button className="primary" disabled={save.busy || !f.owner} onClick={async () => { if (await save.run()) list.reload() }}>Save</button>
+      </div>
+      <ErrorBox error={list.error ?? save.error} />
+    </Card>
+  )
+}
 
-/** The site's allocation policy (ADR-0020): explicit rotation and full-LPN rules for every item. */
+interface Policy {
+  lotRotation: string; otherRotation: string; pickFaceFirst: boolean; fullLpn: string; lotAffinity: boolean
+  ownerId?: string | null; updatedBy?: string | null
+}
+
+/**
+ * The site's allocation policy (ADR-0020): explicit rotation and full-LPN rules for every item; an owner can have its
+ * own (ADR-0021).
+ */
 function AllocationPolicy({ site }: { site: string }) {
+  const [owner, setOwner] = useState('')
+  const [ownerInput, setOwnerInput] = useState('')
   const url = `/api/v1/sites/${site}/inventory/allocation-policy`
-  const current = useLoad(() => get<Policy>(url), [url])
+  const current = useLoad(() => get<Policy>(owner ? `${url}?ownerId=${encodeURIComponent(owner)}` : url), [url, owner])
+  const overrides = useLoad(() => get<Policy[]>(`${url}/owners`), [url])
   const [f, setF] = useState<Policy>()
   const p = f ?? current.data
-  const save = useAction(() => put<Policy>(url, p))
+  const save = useAction(() => put<Policy>(url, { ...p, ownerId: owner || null }))
+  const remove = useAction(() => del(`${url}/owners/${owner}`))
   if (!p) {
     return <Card title="Allocation policy"><ErrorBox error={current.error} /></Card>
   }
   const set = (k: keyof Policy, v: string | boolean) => setF({ ...p, [k]: v })
+  const own = owner !== '' && p.ownerId === owner
   return (
-    <Card title="Allocation policy">
-      <p className="muted">How orders take stock at {site}. {p.updatedBy ? `Set by ${p.updatedBy}.` : 'Defaults (not set yet).'}</p>
+    <Card title="Allocation policy" actions={
+      <div className="row">
+        <input placeholder="Owner (blank = site)" value={ownerInput} size={14}
+               onChange={(e) => setOwnerInput(e.target.value.toUpperCase())} />
+        <button className="small" onClick={() => { setF(undefined); setOwner(ownerInput.trim()) }}>Show</button>
+      </div>
+    }>
+      <p className="muted">How {owner ? `owner ${owner}'s orders` : 'orders'} take stock at {site}.{' '}
+        {owner && !own ? 'This owner follows the site policy; saving creates its own. ' : ''}
+        {p.updatedBy ? `Set by ${p.updatedBy}.` : 'Defaults (not set yet).'}
+        {overrides.data?.length ? ` Owners with their own policy: ${overrides.data.map((o) => o.ownerId).join(', ')}.` : ''}</p>
       <div className="row">
         <Field label="Lot-controlled items">
           <select value={p.lotRotation} onChange={(e) => set('lotRotation', e.target.value)}>
@@ -239,9 +314,16 @@ function AllocationPolicy({ site }: { site: string }) {
           </select>
         </Field>
         <label className="check"><input type="checkbox" checked={p.pickFaceFirst} onChange={(e) => set('pickFaceFirst', e.target.checked)} /> Pick faces first</label>
+        <label className="check"><input type="checkbox" checked={p.lotAffinity} onChange={(e) => set('lotAffinity', e.target.checked)} /> Lot affinity: one lot per line when a lot can cover it</label>
       </div>
-      <button className="primary" disabled={save.busy || !f} onClick={async () => { if (await save.run()) { setF(undefined); current.reload() } }}>Save policy</button>
-      <ErrorBox error={save.error} />
+      <div className="actions">
+        <button className="primary" disabled={save.busy || !f}
+                onClick={async () => { if (await save.run()) { setF(undefined); current.reload(); overrides.reload() } }}>Save policy</button>
+        {own && <button disabled={remove.busy}
+                        onClick={async () => { if (await remove.run()) { setF(undefined); current.reload(); overrides.reload() } }}>
+          Use the site policy for {owner}</button>}
+      </div>
+      <ErrorBox error={save.error ?? remove.error} />
       <Success>{save.done && 'Policy saved; it applies to the next allocation'}</Success>
     </Card>
   )

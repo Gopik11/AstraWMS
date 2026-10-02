@@ -79,13 +79,17 @@ wait_for "expectation in inbound-service" curl -sf "$INB/api/v1/sites/DC1/receip
 wait_for "IDoc status 53" sh -c "curl -sf '$SAP/api/v1/sap/idocs/0000000000001001' -H '$SAP_AUTH' | grep -q '\"status\":\"53\"'"
 echo "IDoc 0000000000001001 status 53 (accepted by AstraWMS)"
 
-step "RF: SSCC single-scan receipt of the pallet (line 000010, 24 EA)"
-expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000001/sscc/106141410000000019/receive" "${RCV[@]}" \
+step "Desktop receiving is RF-only for receivers (ADR-0021): 403 RF_ONLY; a supervisor receives as an exception"
+expect 403 -X POST "$INB/api/v1/sites/DC1/receipts/0180000001/lines/000020/receive" "${RCV[@]}"   -H "Idempotency-Key: desk-1" -d '{"qty":1,"uom":"CS","locationId":"DOCK-01"}'
+grep -q RF_ONLY <<<"$BODY" || fail "expected RF_ONLY: $BODY"
+
+step "Supervisor exception receipt: SSCC single-scan receipt of the pallet (line 000010, 24 EA)"
+expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000001/sscc/106141410000000019/receive" "${SUP[@]}" \
   -H "Idempotency-Key: rf-sscc-1" -d '{"locationId":"DOCK-01"}'
 echo "$BODY"
 
-step "RF: line receipt 000020, 8 of 10 CS"
-expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000001/lines/000020/receive" "${RCV[@]}" \
+step "Supervisor exception receipt: line 000020, 8 of 10 CS"
+expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000001/lines/000020/receive" "${SUP[@]}" \
   -H "Idempotency-Key: rf-line-1" -d '{"qty":8,"uom":"CS","lpnId":"LPN-INB-2","locationId":"DOCK-01"}'
 
 step "Inventory: stock on the dock (24 EA in LPN = SSCC, 96 EA in LPN-INB-2)"
@@ -108,9 +112,9 @@ step "Fault path: posting period closed for delivery 0180000002 -> POSTING_FAILE
 expect 204 -X POST "$SAP/mock-sap/faults" "${H[@]}" -d '{"faultKey":"0180000002","fault":"PERIOD_CLOSED"}'
 expect 202 -X POST "$SAP/api/v1/sap/idocs/delvry07" "${SAPH[@]}" -d "$(delvry 0000000000001002 0180000002 | sed 's/00106141410000000019/00106141410000000026/')"
 wait_for "expectation 0180000002" curl -sf "$INB/api/v1/sites/DC1/receipts/0180000002" "${RCV[@]}"
-expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000002/lines/000010/receive" "${RCV[@]}" \
+expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000002/lines/000010/receive" "${SUP[@]}" \
   -H "Idempotency-Key: rf-line-2" -d '{"qty":24,"uom":"EA","locationId":"DOCK-01"}'
-expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000002/lines/000020/receive" "${RCV[@]}" \
+expect 201 -X POST "$INB/api/v1/sites/DC1/receipts/0180000002/lines/000020/receive" "${SUP[@]}" \
   -H "Idempotency-Key: rf-line-3" -d '{"qty":10,"uom":"CS","locationId":"DOCK-01"}'
 expect 200 -X POST "$INB/api/v1/sites/DC1/receipts/0180000002/close" "${RCV[@]}" -d '{}'
 wait_for "POSTING_FAILED" has_status 0180000002 POSTING_FAILED

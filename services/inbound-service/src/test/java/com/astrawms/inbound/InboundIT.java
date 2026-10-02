@@ -364,6 +364,66 @@ class InboundIT {
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(acme)).andExpect(status().isOk());
     }
 
+    // ------------------------------------------------------------------ ADR-0021 RF-only floor work
+
+    @Test
+    void receiversReceiveOnRfOnlyTheDesktopIsForSupervisorsExceptions() throws Exception {
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        String body = """
+                {"qty":2,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""";
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive").with(rita)
+                        .header("Idempotency-Key", "desk-1").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("RF_ONLY")));
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive").with(rita).header("X-Channel", "RF")
+                        .header("Idempotency-Key", "rf-1").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive")
+                        .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .header("Idempotency-Key", "desk-2").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 yard and dock appointments
+
+    @Test
+    void doorIsBookedBeforeTheAsnThenTheTrailerIsTrackedFromGateToCheckOut() throws Exception {
+        Instant start = Instant.now().minusSeconds(3600);
+        String body = """
+                {"direction":"INBOUND","door":"d1","carrierScac":"upsn","docNo":"0180009999","start":"%s"}""".formatted(start);
+        String appt = com.jayway.jsonpath.JsonPath.read(call(post("/api/v1/sites/DC1/yard/appointments"), body)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status", is("SCHEDULED")))
+                .andExpect(jsonPath("$.door", is("D1")))
+                .andExpect(jsonPath("$.asn_known", is(false)))                    // booked before the ASN exists
+                .andReturn().getResponse().getContentAsString(), "$.appt_no");
+        call(post("/api/v1/sites/DC1/yard/appointments"), body.replace("0180009999", DOC))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("YRD_DOOR_BOOKED")));
+        call(get("/api/v1/sites/DC1/yard/summary"), "")
+                .andExpect(jsonPath("$.late[0].appt_no", is(appt)));               // an hour late
+        // The ASN arrives under another delivery number: link it.
+        call(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put("/api/v1/sites/DC1/yard/appointments/" + appt),
+                "{\"docNo\":\"" + DOC + "\"}")
+                .andExpect(jsonPath("$.asn_known", is(true)))
+                .andExpect(jsonPath("$.receipt_status", is("NOT_STARTED")));
+        call(post("/api/v1/sites/DC1/yard/appointments/" + appt + "/to-door"), "{}")
+                .andExpect(jsonPath("$.code", is("YRD_WRONG_STATUS")));
+        call(post("/api/v1/sites/DC1/yard/appointments/" + appt + "/check-in"), "{\"trailerNo\":\"tr-42\"}")
+                .andExpect(jsonPath("$.status", is("CHECKED_IN"))).andExpect(jsonPath("$.trailer_no", is("TR-42")))
+                .andExpect(jsonPath("$.dwell_minutes", is(0)));
+        call(post("/api/v1/sites/DC1/yard/appointments/" + appt + "/to-door"), "{}")
+                .andExpect(jsonPath("$.status", is("AT_DOOR")));
+        call(get("/api/v1/sites/DC1/yard/appointments?docNo=" + DOC), "")
+                .andExpect(jsonPath("$[0].appt_no", is(appt)));                    // shown next to the receipt
+        call(get("/api/v1/sites/DC1/yard/summary"), "")
+                .andExpect(jsonPath("$.inYard[0].trailer_no", is("TR-42")))
+                .andExpect(jsonPath("$.doors[0].current.appt_no", is(appt)));
+        call(post("/api/v1/sites/DC1/yard/appointments/" + appt + "/check-out"), "")
+                .andExpect(jsonPath("$.status", is("CHECKED_OUT")));
+        mvc.perform(post("/api/v1/sites/DC1/yard/appointments").with(TestTokens.as(tenant, "r1", Roles.RECEIVER))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden());
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void expectation(long revision, String action, String qty10, String qty20) throws Exception {

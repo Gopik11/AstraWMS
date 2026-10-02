@@ -23,9 +23,66 @@ import org.springframework.web.bind.annotation.RestController;
 public class TaskController {
 
     private final TaskService tasks;
+    private final com.astrawms.task.service.Labor labor;
 
-    public TaskController(TaskService tasks) {
+    public TaskController(TaskService tasks, com.astrawms.task.service.Labor labor) {
         this.tasks = tasks;
+        this.labor = labor;
+    }
+
+    // ------------------------------------------------------------------ labor (ADR-0021)
+
+    /** The supervisor's labor board: operators against standard, current task age, backlog in standard hours. */
+    @PreAuthorize("hasAnyRole('SUPERVISOR','SOLUTION_ADMIN')")
+    @GetMapping("/labor")
+    public java.util.Map<String, Object> labor(@PathVariable String siteId, @RequestParam(defaultValue = "8") int hours) {
+        return labor.board(siteId, Math.max(1, Math.min(hours, 72)));
+    }
+
+    @GetMapping("/standards")
+    public List<com.astrawms.task.service.Labor.Standard> standards(@PathVariable String siteId) {
+        return labor.standards(siteId);
+    }
+
+    public record StandardRequest(Integer baseSeconds, java.math.BigDecimal perUnitSeconds, String requiredSkill) {
+    }
+
+    @PreAuthorize("hasAnyRole('SUPERVISOR','SOLUTION_ADMIN')")
+    @org.springframework.web.bind.annotation.PutMapping("/standards/{taskType}")
+    public List<com.astrawms.task.service.Labor.Standard> putStandard(@PathVariable String siteId,
+                                                                      @PathVariable String taskType,
+                                                                      @RequestBody StandardRequest body) {
+        return labor.putStandard(siteId, taskType, body.baseSeconds(), body.perUnitSeconds(), body.requiredSkill());
+    }
+
+    @GetMapping("/operators")
+    public List<java.util.Map<String, Object>> operators(@PathVariable String siteId) {
+        return labor.operators();
+    }
+
+    public record OperatorRequest(List<String> equipment, List<String> skills) {
+    }
+
+    @PreAuthorize("hasAnyRole('SUPERVISOR','SOLUTION_ADMIN')")
+    @org.springframework.web.bind.annotation.PutMapping("/operators/{userId}")
+    public java.util.Map<String, Object> putOperator(@PathVariable String siteId, @PathVariable String userId,
+                                                     @RequestBody OperatorRequest body) {
+        return labor.putOperator(userId, body.equipment(), body.skills());
+    }
+
+    @GetMapping("/zone-equipment")
+    public List<java.util.Map<String, Object>> zoneEquipment(@PathVariable String siteId) {
+        return labor.zoneEquipment(siteId);
+    }
+
+    public record ZoneEquipmentRequest(String equipment) {
+    }
+
+    @PreAuthorize("hasAnyRole('SUPERVISOR','SOLUTION_ADMIN')")
+    @org.springframework.web.bind.annotation.PutMapping("/zone-equipment/{zoneId}")
+    public List<java.util.Map<String, Object>> putZoneEquipment(@PathVariable String siteId, @PathVariable String zoneId,
+                                                                @RequestBody ZoneEquipmentRequest body) {
+        return labor.putZoneEquipment(siteId, zoneId, body.equipment());
     }
 
     @GetMapping
@@ -49,7 +106,7 @@ public class TaskController {
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/confirm")
     public TaskView confirm(@PathVariable String siteId, @PathVariable UUID taskId, @Valid @RequestBody ConfirmRequest body) {
-        return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit());
+        return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit(), body.overrideReason());
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
@@ -72,6 +129,13 @@ public class TaskController {
     @PostMapping("/{taskId}/release")
     public TaskView release(@PathVariable String siteId, @PathVariable UUID taskId) {
         return tasks.release(siteId, taskId);
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/{taskId}/move")
+    public TaskView move(@PathVariable String siteId, @PathVariable UUID taskId,
+                         @Valid @RequestBody TaskDtos.ReplenConfirmRequest body) {
+        return tasks.confirmMove(siteId, taskId, body.checkDigit());
     }
 
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")

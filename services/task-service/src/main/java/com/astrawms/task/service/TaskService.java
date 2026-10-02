@@ -51,19 +51,21 @@ public class TaskService {
     private final Clock clock;
     private final com.astrawms.task.inbound.InboundClient inbound;
     private final tools.jackson.databind.json.JsonMapper json;
+    private final Labor labor;
 
     /**
      * Which task types each RF role works (ADR-0019); SUPERVISOR works all. A user with several roles gets the union.
      */
     static final Map<String, List<String>> TASK_TYPES_BY_ROLE = Map.of(
-            "RECEIVER", List.of("RECEIVE", "PUTAWAY", "RETURN", "REPLEN"),
-            "PICKER", List.of("PICK", "RETURN", "REPLEN", "COUNT"),
-            "INV_ANALYST", List.of("COUNT", "REPLEN"),
-            "SUPERVISOR", List.of("RECEIVE", "PUTAWAY", "PICK", "RETURN", "REPLEN", "COUNT"));
+            "RECEIVER", List.of("RECEIVE", "PUTAWAY", "RETURN", "REPLEN", "MOVE"),
+            "PICKER", List.of("PICK", "RETURN", "REPLEN", "COUNT", "MOVE"),
+            "INV_ANALYST", List.of("COUNT", "REPLEN", "MOVE"),
+            "SUPERVISOR", List.of("RECEIVE", "PUTAWAY", "PICK", "RETURN", "REPLEN", "COUNT", "MOVE"));
 
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
                        OutboxWriter outbox, Clock clock, com.astrawms.task.inbound.InboundClient inbound,
-                       tools.jackson.databind.json.JsonMapper json) {
+                       tools.jackson.databind.json.JsonMapper json, Labor labor) {
+        this.labor = labor;
         this.inbound = inbound;
         this.json = json;
         this.jdbc = jdbc;
@@ -152,7 +154,7 @@ public class TaskService {
             String lpn = "DK" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase();
             try {
                 inventory.moveQuantity(siteId, "SWEEP-" + lpn, s.ownerId(), s.itemNo(), s.lotNo(), s.status(), s.qty(),
-                        s.locationId(), s.locationId(), lpn);
+                        s.locationId(), null, s.locationId(), lpn);
                 lpns++;
             } catch (ApiException e) {
                 // stale projection or a concurrent move: the next sweep tries again
@@ -455,6 +457,72 @@ public class TaskService {
     }
 
     // =====================================================================================================
+    // MOVE tasks (ADR-0021: reslot)
+    // =====================================================================================================
+
+    @Transactional
+    public void onMoveRequested(String siteId, com.astrawms.common.contracts.InventoryContracts.MoveRequested m) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, move_id, item_no, lot_no, qty, uom,
+                                          created_at, updated_at)
+                        values (:id, :t, :site, 'MOVE', 'RELEASED', :prio, :owner, :lpn, :from, :to, :reason, :move,
+                                :item, :lot, :qty, :uom, :now, :now)
+                        on conflict (tenant_id, move_id) where task_type = 'MOVE' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", m.priority())
+                .param("owner", m.ownerId()).param("lpn", m.lpnId() == null ? "" : m.lpnId())
+                .param("from", m.fromLocation()).param("to", m.toLocation()).param("reason", m.reason())
+                .param("move", m.moveId()).param("item", m.itemNo()).param("lot", m.lotNo()).param("qty", m.qty())
+                .param("uom", m.uom()).param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", m.reason() + ": move " + m.qty().toPlainString() + " " + m.itemNo() + " "
+                    + m.fromLocation() + " → " + m.toLocation());
+        }
+    }
+
+    /** RF move: take the stock at the source, drop it at the target and scan the target's check digit. */
+    @Transactional
+    public TaskView confirmMove(String siteId, UUID taskId, String checkDigit) {
+        record Mv(String status, String type, String assignedTo, String owner, String lpn, String from, String to,
+                  String item, String lot, java.math.BigDecimal qty) {
+        }
+        Mv m = jdbc.sql("""
+                        select status, task_type, assigned_to, owner_id, lpn_id, from_location, target_location, item_no,
+                               lot_no, qty
+                        from task where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Mv(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
+                        rs.getBigDecimal(10)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"MOVE".equals(m.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + m.type() + " task");
+        }
+        if ("COMPLETED".equals(m.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(m.status()) || !user.equals(m.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + m.status() + " and not assigned to " + user);
+        }
+        Projections.Location target = projections.location(siteId, m.to()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + m.to() + " is not known"));
+        if (target.checkDigit() == null || checkDigit == null || !target.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + m.to());
+        }
+        UUID operation = inventory.moveQuantity(siteId, "TSK-" + taskId, m.owner(), m.item(), m.lot(), "AVAILABLE",
+                m.qty(), m.from(), m.lpn(), m.to(), null);
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', qty_picked = qty, confirmed_location = target_location,
+                            inventory_operation_id = :op, completed_at = :now, updated_at = :now where id = :id""")
+                .param("op", operation).param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        event(taskId, "COMPLETED", "moved to " + m.to());
+        return view(siteId, taskId);
+    }
+
+    // =====================================================================================================
     // COUNT tasks (§6.3 cycle counting)
     // =====================================================================================================
 
@@ -725,6 +793,8 @@ public class TaskService {
             return Optional.empty();
         }
         AccessScope scope = AccessScope.current();
+        // ADR-0021: the skill a task type requires and the equipment its zones require (labor policy).
+        String[] profile = labor.profileOfCurrentUser();
         Optional<UUID> next = jdbc.sql("""
                         select t.id from task t
                         left join ref_location f on f.site_id = t.site_id and f.location_id = t.from_location
@@ -733,8 +803,19 @@ public class TaskService {
                           and not (:user = any(t.excluded_users))
                           and (:zonesAll or t.task_type = 'RECEIVE' or exists (select 1 from ref_location l where l.site_id = t.site_id
                                  and l.location_id in (t.from_location, t.target_location) and l.zone_id in (:zones)))
+                          and not exists (select 1 from task_standard s where s.site_id = t.site_id
+                                 and s.task_type = t.task_type and s.required_skill is not null
+                                 and not (s.required_skill = any(string_to_array(:skills, ','))))
+                          and not exists (select 1 from ref_location l join zone_equipment z
+                                 on z.site_id = l.site_id and z.zone_id = l.zone_id
+                                 where l.site_id = t.site_id and l.location_id in (t.from_location, t.target_location)
+                                   and not (z.equipment = any(string_to_array(:equipment, ','))))
+                          and (t.automation_manual or not exists (select 1 from ref_location l join automation_zone a
+                                 on a.site_id = l.site_id and a.zone_id = l.zone_id and a.enabled
+                                 where l.site_id = t.site_id and l.location_id = t.from_location))
                         order by t.priority desc, f.pick_seq nulls last, t.from_location, t.created_at
                         limit 1 for update of t skip locked""")
+                .param("equipment", profile[0]).param("skills", profile[1])
                 .param("site", siteId).param("user", user).param("types", types)
                 .param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("zonesAll", scope.zonesAll()).param("zones", scope.zoneList())
@@ -752,8 +833,12 @@ public class TaskService {
      * check digit; a location other than the target is accepted only if it passes the engine's hard constraints.
      * Idempotent: confirming a completed task returns it unchanged.
      */
+    public static final List<String> OVERRIDE_REASONS = List.of("LOCATION_FULL", "LOCATION_BLOCKED", "LOCATION_DAMAGED",
+            "CLOSER_LOCATION", "CONSOLIDATE", "OTHER");
+
     @Transactional
-    public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit) {
+    public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit,
+                            String overrideReason) {
         Task t = lockTask(siteId, taskId);
         if (!"PUTAWAY".equals(t.type())) {
             throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + t.type() + " task");
@@ -774,6 +859,7 @@ public class TaskService {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + locationId);
         }
         String strategy = null;
+        String reason = null;
         if (!locationId.equals(t.targetLocation())) {
             List<Stock> contents = projections.lpnContents(siteId, t.lpnId(), t.fromLocation());
             int reservedThere = reservations(siteId, t.id()).getOrDefault(locationId, 0);
@@ -781,17 +867,25 @@ public class TaskService {
             if (rejection.isPresent()) {
                 throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, rejection.get().code(), rejection.get().reason());
             }
+            // ADR-0021: an override says why, so the task explains itself like the engine's own choice does.
+            reason = overrideReason == null || overrideReason.isBlank() ? null : overrideReason.trim().toUpperCase();
+            if (reason == null || !OVERRIDE_REASONS.contains(reason)) {
+                throw ApiException.unprocessable("TSK_OVERRIDE_REASON_REQUIRED",
+                        "Putting away to " + locationId + " instead of " + t.targetLocation() + " needs a reason: one of "
+                                + OVERRIDE_REASONS);
+            }
             strategy = "OVERRIDE";
         }
         UUID operation = inventory.moveLpn(siteId, "TSK-" + taskId, t.lpnId(), t.fromLocation(), locationId);
         jdbc.sql("""
                         update task set status = 'COMPLETED', confirmed_location = :loc, target_location = :loc,
                             inventory_operation_id = :op, strategy = coalesce(:strategy, strategy), completed_at = :now,
-                            updated_at = :now
+                            override_reason = :reason, updated_at = :now
                         where id = :id""")
-                .param("loc", locationId).param("op", operation).param("strategy", strategy)
+                .param("loc", locationId).param("op", operation).param("strategy", strategy).param("reason", reason)
                 .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
-        event(taskId, "COMPLETED", (strategy != null ? "override of " + t.targetLocation() + " → " : "at ") + locationId);
+        event(taskId, "COMPLETED", (strategy != null ? "override (" + reason + ") of " + t.targetLocation() + " → " : "at ")
+                + locationId);
         return view(siteId, taskId);
     }
 
@@ -881,7 +975,7 @@ public class TaskService {
                                exception_reason, assigned_to, confirmed_location, inventory_operation_id, created_at,
                                completed_at, allocation_id, order_ref, order_line_ref, item_no, lot_no, qty, uom, to_lpn,
                                qty_picked, count_id, count_sequence, suggested_location, receive_kind, doc_no, partner,
-                               expected_lines::text, scans
+                               expected_lines::text, scans, override_reason, short_reason, short_action, assigned_at
                         from task where site_id = :site and id = :id""")
                 .param("site", siteId).param("id", id)
                 .query((rs, n) -> new TaskView(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getInt(4),
@@ -892,7 +986,9 @@ public class TaskService {
                         strip(rs.getBigDecimal(21)), rs.getString(22), rs.getString(23), strip(rs.getBigDecimal(24)),
                         rs.getObject(25, UUID.class), (Integer) rs.getObject(26), rs.getString(27), rs.getString(28),
                         rs.getString(29), rs.getString(30),
-                        rs.getString(31) == null ? null : json.readTree(rs.getString(31)), rs.getInt(32)))
+                        rs.getString(31) == null ? null : json.readTree(rs.getString(31)), rs.getInt(32), rs.getString(33),
+                        rs.getString(34), rs.getString(35),
+                        rs.getTimestamp(36) == null ? null : rs.getTimestamp(36).toInstant()))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
         String where = base.status().equals("COMPLETED") ? base.confirmedLocation() : base.fromLocation();
@@ -906,7 +1002,7 @@ public class TaskService {
                 base.allocationId(), base.orderRef(), base.orderLineRef(), base.itemNo(), base.lotNo(), base.qty(),
                 base.uom(), base.toLpn(), base.qtyPicked(), base.countId(), base.countSequence(),
                 base.suggestedLocation(), base.receiveKind(), base.docNo(), base.partner(), base.expectedLines(),
-                base.scans());
+                base.scans(), base.overrideReason(), base.shortReason(), base.shortAction(), base.assignedAt());
     }
 
     private static java.math.BigDecimal strip(java.math.BigDecimal v) {

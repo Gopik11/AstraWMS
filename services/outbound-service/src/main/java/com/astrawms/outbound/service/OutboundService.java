@@ -51,9 +51,10 @@ public class OutboundService {
     private final int pickPriority;
     private final int returnPriority;
     private final com.astrawms.outbound.packing.PackingService packing;
+    private final ReleasePolicy policy;
 
     public OutboundService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, JsonMapper json, Clock clock,
-                           com.astrawms.outbound.packing.PackingService packing,
+                           com.astrawms.outbound.packing.PackingService packing, ReleasePolicy policy,
                            @Value("${astra.outbound.staging-location:STAGE-OUT}") String stagingLocation,
                            @Value("${astra.outbound.pick-priority:60}") int pickPriority,
                            @Value("${astra.outbound.return-priority:70}") int returnPriority) {
@@ -66,10 +67,11 @@ public class OutboundService {
         this.pickPriority = pickPriority;
         this.returnPriority = returnPriority;
         this.packing = packing;
+        this.policy = policy;
     }
 
     record Order(UUID id, String siteId, String erpDocNo, String status, long revision, String pickLpn,
-                 String shipmentTxnId) {
+                 String shipmentTxnId, boolean shipComplete, Instant cutoffAt) {
     }
 
     /** Where the ERP acknowledgement of an order message goes (IF-OB-002); kept while a cancellation is pending. */
@@ -115,11 +117,16 @@ public class OutboundService {
         boolean pooled = "WAVE".equals(releaseMode(site));
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(clock.instant());
+        Instant cutoff = policy.cutoffAt(site, o.carrierScac(), o.plannedGoodsIssueUtc());
+        boolean shipComplete = policy.shipComplete(site,
+                o.lines().stream().map(OutboundOrder.Line::ownerId).distinct().toList());
         jdbc.sql("""
                         insert into outbound_order (id, tenant_id, site_id, erp_doc_no, order_type, revision, source_system,
-                            ship_to, carrier_scac, planned_gi_utc, status, staging_location, pick_lpn, created_at, updated_at)
+                            ship_to, carrier_scac, planned_gi_utc, status, staging_location, pick_lpn, created_at, updated_at,
+                            cutoff_at, ship_complete)
                         values (:id, :t, :site, :doc, :type, :rev, :src, cast(:shipTo as jsonb), :scac, :gi, :status,
-                                :staging, :pickLpn, :now, :now)""")
+                                :staging, :pickLpn, :now, :now, :cutoff, :sc)""")
+                .param("cutoff", cutoff == null ? null : Timestamp.from(cutoff)).param("sc", shipComplete)
                 .param("id", id).param("t", TenantContext.tenantId()).param("site", site).param("doc", o.erpDocNo())
                 .param("type", o.orderType()).param("rev", o.revision()).param("src", envelope.sourceSystem())
                 .param("shipTo", o.shipTo() == null ? null : json.writeValueAsString(o.shipTo()))
@@ -129,7 +136,7 @@ public class OutboundService {
                 .param("staging", stagingLocation).param("pickLpn", "PK-" + o.erpDocNo()).param("now", now).update();
         insertLines(id, o.lines());
         if (!pooled) {
-            allocateAndRelease(lockOrder(id));
+            allocateAndRelease(lockOrder(id), null);
         }
         ack(ack, null, null);
     }
@@ -139,8 +146,11 @@ public class OutboundService {
         insertLines(cur.id(), o.lines());
         jdbc.sql("""
                         update outbound_order set revision = :rev, order_type = :type, ship_to = cast(:shipTo as jsonb),
-                            carrier_scac = :scac, planned_gi_utc = :gi, source_system = :src, updated_at = :now
+                            carrier_scac = :scac, planned_gi_utc = :gi, source_system = :src, updated_at = :now,
+                            cutoff_at = :cutoff
                         where id = :id""")
+                .param("cutoff", Optional.ofNullable(policy.cutoffAt(envelope.siteId(), o.carrierScac(),
+                        o.plannedGoodsIssueUtc())).map(Timestamp::from).orElse(null))
                 .param("rev", o.revision()).param("type", o.orderType())
                 .param("shipTo", o.shipTo() == null ? null : json.writeValueAsString(o.shipTo()))
                 .param("scac", o.carrierScac())
@@ -164,8 +174,10 @@ public class OutboundService {
     /**
      * Hard-allocates every line (§3.4) and requests one pick task per allocation. The order becomes RELEASED, or
      * BACKORDERED when nothing could be allocated. Inventory keys include the revision, so a retry allocates once.
+     * A ship-complete order (ADR-0021) that cannot be fully allocated gives its stock back and waits BACKORDERED; each
+     * later attempt passes its own {@code attempt} so that inventory allocates afresh.
      */
-    void allocateAndRelease(Order order) {
+    void allocateAndRelease(Order order, String attempt) {
         record Line(String ref, String owner, String item, BigDecimal qty, String uom, String lot) {
         }
         List<Line> lines = jdbc.sql("""
@@ -176,20 +188,53 @@ public class OutboundService {
                         rs.getString(5), rs.getString(6)))
                 .list();
         BigDecimal totalAllocated = BigDecimal.ZERO;
+        Map<String, InventoryClient.AllocateResult> results = new java.util.LinkedHashMap<>();
         for (Line l : lines) {
-            InventoryClient.AllocateResult a = inventory.allocate(order.siteId(),
-                    "OUT-" + order.erpDocNo() + "-" + order.revision() + "-" + l.ref(), order.erpDocNo(), l.ref(),
-                    l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of());
+            results.put(l.ref(), inventory.allocate(order.siteId(),
+                    "OUT-" + order.erpDocNo() + "-" + order.revision() + "-" + l.ref() + (attempt == null ? "" : "-" + attempt),
+                    order.erpDocNo(), l.ref(), l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of()));
+        }
+        String firstShort = results.entrySet().stream().filter(e -> e.getValue().shortQty().signum() > 0)
+                .map(Map.Entry::getKey).findFirst().orElse(null);
+        if (order.shipComplete() && firstShort != null) {
+            holdShipComplete(order, results, firstShort, attempt);
+            return;
+        }
+        for (Line l : lines) {
+            InventoryClient.AllocateResult a = results.get(l.ref());
             jdbc.sql("""
                             update outbound_line set base_uom = :baseUom, qty_requested_base = :reqBase,
-                                qty_allocated = :alloc, qty_short = :short
+                                qty_allocated = :alloc, qty_short = :short, short_reason = :reason, short_detail = :detail
                             where order_id = :o and erp_line_ref = :ref""")
                     .param("baseUom", a.baseUom()).param("reqBase", a.requestedQty()).param("alloc", a.allocatedQty())
-                    .param("short", a.shortQty()).param("o", order.id()).param("ref", l.ref()).update();
+                    .param("short", a.shortQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                    .param("o", order.id()).param("ref", l.ref()).update();
             requestPicks(order, l.ref(), l.owner(), l.item(), a, null);
             totalAllocated = totalAllocated.add(a.allocatedQty());
         }
         setStatus(order.id(), totalAllocated.signum() == 0 ? "BACKORDERED" : "RELEASED");
+    }
+
+    /** Ship complete but short: everything allocated goes back, and every line says why the order waits. */
+    private void holdShipComplete(Order order, Map<String, InventoryClient.AllocateResult> results, String firstShort,
+                                  String attempt) {
+        if (results.values().stream().anyMatch(a -> a.allocatedQty().signum() > 0)) {
+            inventory.release(order.siteId(), "OUT-SC-" + order.erpDocNo() + "-" + order.revision()
+                    + (attempt == null ? "" : "-" + attempt), order.erpDocNo());
+        }
+        results.forEach((ref, a) -> {
+            boolean isShort = a.shortQty().signum() > 0;
+            jdbc.sql("""
+                            update outbound_line set base_uom = :baseUom, qty_requested_base = :reqBase, qty_allocated = 0,
+                                qty_short = :reqBase, short_reason = :reason, short_detail = :detail
+                            where order_id = :o and erp_line_ref = :ref""")
+                    .param("baseUom", a.baseUom()).param("reqBase", a.requestedQty())
+                    .param("reason", isShort ? a.shortReason() : "SHIP_COMPLETE")
+                    .param("detail", isShort ? a.shortDetail()
+                            : "In stock, held: the order ships complete and line " + firstShort + " is short")
+                    .param("o", order.id()).param("ref", ref).update();
+        });
+        setStatus(order.id(), "BACKORDERED");
     }
 
     private void requestPicks(Order order, String lineRef, String owner, String item, InventoryClient.AllocateResult a,
@@ -207,7 +252,7 @@ public class OutboundService {
                     owner, order.siteId() + ":" + order.erpDocNo(),
                     new OutboundContracts.PickRequested(al.id(), order.erpDocNo(), lineRef, owner, item, al.lotNo(),
                             al.qty(), a.baseUom(), al.locationId(), al.lpnId(), stagingLocation, order.pickLpn(),
-                            pickPriority)));
+                            policy.pickPriority(pickPriority, order.cutoffAt()))));
         }
     }
 
@@ -228,10 +273,25 @@ public class OutboundService {
      * goods issue first, then the highest order priority. A recovered order is RELEASED with pick tasks. Picked orders
      * are left alone (they may be packed); a supervisor recovers them with {@link #reallocateShorts}.
      */
+    /** The inventory movement that made stock available, kept in the recovery log (ADR-0021). */
+    public record StockArrival(String txnType, String locationId, String lpnId, UUID operationId) {
+    }
+
     @Transactional
-    public void onStockAvailable(String siteId, String ownerId, String itemNo, UUID operationId) {
+    public void onStockAvailable(String siteId, String ownerId, String itemNo, StockArrival arrival) {
+        java.util.Set<UUID> retried = new java.util.HashSet<>();
         for (ShortLine s : shortLines(siteId, ownerId, itemNo, null, AUTO_RECOVERY, false)) {
-            BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + operationId + "-" + s.erpDocNo() + "-" + s.ref());
+            if (retried.contains(s.orderId())) {
+                continue;
+            }
+            Order o = lockOrder(s.orderId());
+            if (o.shipComplete() && "BACKORDERED".equals(o.status())) {
+                retried.add(o.id());       // the whole order or nothing; a failed attempt holds no stock
+                retryShipComplete(o, "AUTOMATIC", arrival, "R" + arrival.operationId().toString().substring(0, 8));
+                continue;
+            }
+            BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + arrival.operationId() + "-" + s.erpDocNo() + "-" + s.ref(),
+                    "AUTOMATIC", arrival);
             if (got.compareTo(s.shortQty()) < 0) {
                 break;   // the new stock is used up
             }
@@ -253,18 +313,21 @@ public class OutboundService {
         }
         String attempt = UUID.randomUUID().toString().substring(0, 8);
         BigDecimal recovered = BigDecimal.ZERO;
+        if (o.shipComplete() && "BACKORDERED".equals(o.status())) {
+            recovered = retryShipComplete(o, "MANUAL", null, "M" + attempt);
+            Map<String, Object> result = new HashMap<>(detail(siteId, erpDocNo));
+            result.put("recoveredQty", strip(recovered));
+            return result;
+        }
         for (ShortLine s : shortLines(siteId, null, null, o.id(), MANUAL_RECOVERY, true)) {
-            recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref()));
+            recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref(),
+                    "MANUAL", null));
         }
         Map<String, Object> result = new HashMap<>(detail(siteId, erpDocNo));
         result.put("recoveredQty", strip(recovered));
         return result;
     }
 
-    /**
-     * Short lines in recovery order. Automatic recovery takes only the open short ({@code qty_short - qty_short_closed});
-     * a supervisor's reallocation ({@code includeClosed}) also reopens shorts that were going to ship short.
-     */
     /**
      * Supervisor "close shorts": what is still short ships short. Shorts waiting for stock (BACKORDER) stop waiting; an
      * order with nothing left to pick and something picked becomes PICKED.
@@ -287,6 +350,10 @@ public class OutboundService {
         return detail(siteId, erpDocNo);
     }
 
+    /**
+     * Short lines in recovery order. Automatic recovery takes only the open short ({@code qty_short - qty_short_closed});
+     * a supervisor's reallocation ({@code includeClosed}) also reopens shorts that were going to ship short.
+     */
     private List<ShortLine> shortLines(String siteId, String ownerId, String itemNo, UUID orderId, List<String> statuses,
                                        boolean includeClosed) {
         String qty = includeClosed ? "l.qty_short" : "l.qty_short - l.qty_short_closed";
@@ -299,7 +366,8 @@ public class OutboundService {
                           and (cast(:owner as text) is null or l.owner_id = :owner)
                           and (cast(:item as text) is null or l.item_no = :item)
                           and (cast(:order as uuid) is null or o.id = :order)
-                        order by o.planned_gi_utc nulls last, o.priority desc, o.created_at, l.erp_line_ref""")
+                        order by coalesce(o.cutoff_at, o.planned_gi_utc) nulls last, o.priority desc, o.created_at,
+                                 l.erp_line_ref""")
                 .param("site", siteId).param("statuses", statuses).param("owner", ownerId).param("item", itemNo)
                 .param("order", orderId)
                 .query((rs, n) -> new ShortLine(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
@@ -307,7 +375,23 @@ public class OutboundService {
                 .list();
     }
 
-    private BigDecimal recover(ShortLine s, List<String> statuses, String key) {
+    /** A waiting ship-complete order is allocated whole again; returns the quantity allocated (0 if still short). */
+    private BigDecimal retryShipComplete(Order o, String trigger, StockArrival arrival, String attempt) {
+        allocateAndRelease(o, attempt);
+        if (!"RELEASED".equals(lockOrder(o.id()).status())) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal total = BigDecimal.ZERO;
+        for (Map<String, Object> l : jdbc.sql("select erp_line_ref, qty_allocated from outbound_line where order_id = :o")
+                .param("o", o.id()).query().listOfRows()) {
+            BigDecimal qty = (BigDecimal) l.get("qty_allocated");
+            logRecovery(o.id(), (String) l.get("erp_line_ref"), qty, trigger, arrival);
+            total = total.add(qty);
+        }
+        return total;
+    }
+
+    private BigDecimal recover(ShortLine s, List<String> statuses, String key, String trigger, StockArrival arrival) {
         Order order = lockOrder(s.orderId());
         if (!statuses.contains(order.status())) {
             return BigDecimal.ZERO;
@@ -315,6 +399,11 @@ public class OutboundService {
         InventoryClient.AllocateResult a = inventory.allocate(order.siteId(), key, order.erpDocNo(), s.ref(), s.owner(),
                 s.item(), s.shortQty(), s.baseUom(), s.lot(), List.of());
         if (a.allocatedQty().signum() == 0) {
+            if (a.shortReason() != null) {          // still short: keep the latest explanation
+                jdbc.sql("update outbound_line set short_reason = :r, short_detail = :d where order_id = :o and erp_line_ref = :ref")
+                        .param("r", a.shortReason()).param("d", a.shortDetail()).param("o", order.id()).param("ref", s.ref())
+                        .update();
+            }
             return BigDecimal.ZERO;
         }
         requestPicks(order, s.ref(), s.owner(), s.item(), a, null);
@@ -322,13 +411,32 @@ public class OutboundService {
                         update outbound_line set qty_allocated = qty_allocated + :got, qty_short = qty_short - :got,
                             qty_short_pick = least(qty_short_pick, qty_short - :got),
                             qty_short_closed = least(qty_short_closed, qty_short - :got),
-                            short_hold = short_hold and qty_short - :got > qty_short_closed
+                            short_hold = short_hold and qty_short - :got > qty_short_closed,
+                            short_reason = case when qty_short - :got > 0 then :reason end,
+                            short_detail = case when qty_short - :got > 0 then :detail end
                         where order_id = :o and erp_line_ref = :ref""")
-                .param("got", a.allocatedQty()).param("o", order.id()).param("ref", s.ref()).update();
+                .param("got", a.allocatedQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                .param("o", order.id()).param("ref", s.ref()).update();
+        logRecovery(order.id(), s.ref(), a.allocatedQty(), trigger, arrival);
         if (!"RELEASED".equals(order.status())) {
             setStatus(order.id(), "RELEASED");
         }
         return a.allocatedQty();
+    }
+
+    /** Which stock freed which order (ADR-0021): the recovery log shown on the order. */
+    private void logRecovery(UUID orderId, String ref, BigDecimal qty, String trigger, StockArrival arrival) {
+        jdbc.sql("""
+                        insert into outbound_recovery (tenant_id, order_id, erp_line_ref, qty, trigger, txn_type, location_id,
+                                                       lpn_id, operation_id, recovered_by, recovered_at)
+                        values (:t, :o, :ref, :qty, :trigger, :txn, :loc, :lpn, :op, :user, :now)""")
+                .param("t", TenantContext.tenantId()).param("o", orderId).param("ref", ref)
+                .param("qty", qty).param("trigger", trigger)
+                .param("txn", arrival == null ? null : arrival.txnType())
+                .param("loc", arrival == null ? null : arrival.locationId())
+                .param("lpn", arrival == null || arrival.lpnId() == null || arrival.lpnId().isEmpty() ? null : arrival.lpnId())
+                .param("op", arrival == null ? null : arrival.operationId())
+                .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
     }
 
     // =====================================================================================================
@@ -435,7 +543,11 @@ public class OutboundService {
         jdbc.sql("update outbound_line set qty_picked = qty_picked + :picked where order_id = :o and erp_line_ref = :line")
                 .param("picked", t.qtyPicked()).param("o", order.id()).param("line", t.orderLineRef()).update();
         if (t.qtyShort().signum() > 0) {
-            switch (t.shortAction() == null ? "REALLOCATE" : t.shortAction()) {
+            String action = t.shortAction() == null ? "REALLOCATE" : t.shortAction();
+            if (order.shipComplete() && "SHIP_SHORT".equals(action)) {
+                action = "BACKORDER";       // a ship-complete order never ships short from the floor (ADR-0021)
+            }
+            switch (action) {
                 case "BACKORDER" -> jdbc.sql("""
                                 update outbound_line set qty_allocated = qty_allocated - :short, qty_short = qty_short + :short,
                                     short_hold = true
@@ -483,6 +595,15 @@ public class OutboundService {
             a = inventory.allocate(order.siteId(), "OUT-RA-" + t.allocationId(), order.erpDocNo(), t.orderLineRef(),
                     l.owner(), l.item(), t.qtyShort(), l.baseUom(), l.lot(), shortLocations);
             requestPicks(order, t.orderLineRef(), l.owner(), l.item(), a, t.allocationId());
+        }
+        if (order.shipComplete()) {       // what cannot be re-allocated waits for stock instead of shipping short
+            jdbc.sql("""
+                            update outbound_line set qty_allocated = qty_allocated - :short + :realloc,
+                                qty_short = qty_short + :unrecovered, short_hold = short_hold or :unrecovered > 0
+                            where order_id = :o and erp_line_ref = :line""")
+                    .param("short", t.qtyShort()).param("realloc", a.allocatedQty()).param("unrecovered", a.shortQty())
+                    .param("o", order.id()).param("line", t.orderLineRef()).update();
+            return;
         }
         jdbc.sql("""
                         update outbound_line set qty_allocated = qty_allocated - :short + :realloc,
@@ -631,30 +752,73 @@ public class OutboundService {
                 .param("site", siteId).query(String.class).optional().orElse("WAVELESS");
     }
 
-    /** Site outbound settings: release mode, and whether orders must be fully packed before loading/shipping. */
+    /**
+     * Site outbound settings: release mode, whether orders must be fully packed before loading/shipping, the site's
+     * time zone (carrier cutoffs are local times) and whether orders ship complete unless their owner says otherwise.
+     */
     public Map<String, Object> siteConfig(String siteId) {
-        boolean pack = jdbc.sql("select coalesce((select pack_required from outbound_site_config where site_id = :site), false)")
-                .param("site", siteId).query(Boolean.class).single();
-        return Map.of("siteId", siteId, "releaseMode", releaseMode(siteId), "packRequired", pack);
+        Map<String, Object> row = jdbc.sql("""
+                        select pack_required, timezone, ship_complete from outbound_site_config where site_id = :site""")
+                .param("site", siteId).query().listOfRows().stream().findFirst()
+                .orElse(Map.of("pack_required", false, "timezone", "UTC", "ship_complete", false));
+        return Map.of("siteId", siteId, "releaseMode", releaseMode(siteId), "packRequired", row.get("pack_required"),
+                "timezone", row.get("timezone"), "shipComplete", row.get("ship_complete"));
     }
 
     /** Changes the given settings; {@code null} keeps the current value. */
     @Transactional
-    public Map<String, Object> setSiteConfig(String siteId, String mode, Boolean packRequired) {
+    public Map<String, Object> setSiteConfig(String siteId, String mode, Boolean packRequired, String timezone,
+                                             Boolean shipComplete) {
         String newMode = mode == null ? releaseMode(siteId) : mode;
         if (!List.of("WAVE", "WAVELESS").contains(newMode)) {
             throw ApiException.badRequest("OUT_RELEASE_MODE_INVALID", "releaseMode must be WAVE or WAVELESS");
         }
-        boolean pack = packRequired != null ? packRequired : (Boolean) siteConfig(siteId).get("packRequired");
+        Map<String, Object> cur = siteConfig(siteId);
+        boolean pack = packRequired != null ? packRequired : (Boolean) cur.get("packRequired");
+        boolean complete = shipComplete != null ? shipComplete : (Boolean) cur.get("shipComplete");
+        String tz = timezone == null || timezone.isBlank() ? (String) cur.get("timezone") : timezone.trim();
+        try {
+            java.time.ZoneId.of(tz);
+        } catch (java.time.DateTimeException e) {
+            throw ApiException.badRequest("OUT_TIMEZONE_INVALID", "Unknown time zone " + tz);
+        }
         jdbc.sql("""
-                        insert into outbound_site_config (tenant_id, site_id, release_mode, pack_required, updated_by, updated_at)
-                        values (:t, :site, :mode, :pack, :user, :now)
+                        insert into outbound_site_config (tenant_id, site_id, release_mode, pack_required, timezone,
+                                                          ship_complete, updated_by, updated_at)
+                        values (:t, :site, :mode, :pack, :tz, :sc, :user, :now)
                         on conflict (tenant_id, site_id) do update set release_mode = excluded.release_mode,
-                            pack_required = excluded.pack_required, updated_by = excluded.updated_by,
+                            pack_required = excluded.pack_required, timezone = excluded.timezone,
+                            ship_complete = excluded.ship_complete, updated_by = excluded.updated_by,
                             updated_at = excluded.updated_at""")
+                .param("tz", tz).param("sc", complete)
                 .param("t", TenantContext.tenantId()).param("site", siteId).param("mode", newMode).param("pack", pack)
                 .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
         return siteConfig(siteId);
+    }
+
+    /**
+     * A supervisor's release policy for one order (ADR-0021): its priority (0–100, higher first in waves, recovery
+     * and picking) and whether it ships complete. Ship complete can change only before picks are requested.
+     */
+    @Transactional
+    public Map<String, Object> setOrderPolicy(String siteId, String erpDocNo, Integer priority, Boolean shipComplete) {
+        Order o = lockOrder(siteId, erpDocNo).orElseThrow(() -> unknown(erpDocNo));
+        if (!List.of("POOLED", "BACKORDERED", "RELEASED").contains(o.status())) {
+            throw ApiException.unprocessable("OUT_ORDER_POLICY_LOCKED", "Order " + erpDocNo + " is " + o.status());
+        }
+        if (priority != null && (priority < 0 || priority > 100)) {
+            throw ApiException.badRequest("OUT_PRIORITY_INVALID", "priority must be 0–100");
+        }
+        if (shipComplete != null && shipComplete != o.shipComplete() && "RELEASED".equals(o.status())) {
+            throw ApiException.unprocessable("OUT_ORDER_POLICY_LOCKED",
+                    "Order " + erpDocNo + " is already released to picking; ship complete can no longer change");
+        }
+        jdbc.sql("""
+                        update outbound_order set priority = coalesce(:p, priority),
+                            ship_complete = coalesce(:sc, ship_complete), updated_at = :now where id = :id""")
+                .param("p", priority).param("sc", shipComplete).param("now", Timestamp.from(clock.instant()))
+                .param("id", o.id()).update();
+        return detail(siteId, erpDocNo);
     }
 
     // =====================================================================================================
@@ -675,7 +839,8 @@ public class OutboundService {
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql("""
                         select o.erp_doc_no, o.order_type, o.status, o.carrier_scac, o.planned_gi_utc, o.shipment_txn_id,
-                               o.erp_document, o.priority, o.ship_to ->> 'name' as ship_to_name,
+                               o.erp_document, o.priority, o.ship_to ->> 'name' as ship_to_name, o.updated_at,
+                               o.cutoff_at, o.ship_complete,
                                (select count(*) from outbound_line l where l.order_id = o.id and l.qty_short > 0) as lines_short
                         from outbound_order o where o.site_id = :site and (cast(:status as text) is null or o.status = :status)
                           and (cast(:q as text) is null or upper(o.erp_doc_no) like :q
@@ -696,7 +861,7 @@ public class OutboundService {
                         select o.id, o.erp_doc_no, o.order_type, o.revision, o.status, o.carrier_scac, o.staging_location,
                                o.pick_lpn, o.shipment_txn_id, o.tracking_no, o.erp_document, o.erp_error_class,
                                o.erp_error_text, w.wave_no, o.priority, o.planned_gi_utc, o.ship_to ->> 'name' as ship_to_name,
-                               o.load_id is not null as loaded
+                               o.load_id is not null as loaded, o.cutoff_at, o.ship_complete
                         from outbound_order o left join outbound_wave w on w.id = o.wave_id
                         where o.site_id = :site and o.erp_doc_no = :doc""")
                 .param("site", siteId).param("doc", erpDocNo).query().listOfRows().stream().findFirst()
@@ -704,7 +869,7 @@ public class OutboundService {
         Map<String, Object> result = new HashMap<>(header);
         result.put("lines", jdbc.sql("""
                         select erp_line_ref, item_no, qty_requested, uom, base_uom, qty_requested_base, qty_allocated,
-                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold
+                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold, short_reason, short_detail
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         result.put("allocations", jdbc.sql("""
@@ -712,13 +877,18 @@ public class OutboundService {
                                status, replaces, short_reason, short_action
                         from outbound_allocation where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
+        result.put("recoveries", jdbc.sql("""
+                        select erp_line_ref, qty, trigger, txn_type, location_id, lpn_id, operation_id, recovered_by, recovered_at
+                        from outbound_recovery where order_id = :o order by id""")
+                .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         return result;
     }
 
     Optional<Order> lockOrder(String siteId, String erpDocNo) {
         return jdbc.sql("""
-                        select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id from outbound_order
-                        where site_id = :site and erp_doc_no = :doc for update""")
+                        select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id, ship_complete,
+                               cutoff_at
+                        from outbound_order where site_id = :site and erp_doc_no = :doc for update""")
                 .param("site", siteId).param("doc", erpDocNo)
                 .query(OutboundService::mapOrder)
                 .optional();
@@ -726,14 +896,16 @@ public class OutboundService {
 
     Order lockOrder(UUID id) {
         return jdbc.sql("""
-                        select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id from outbound_order
-                        where id = :id for update""")
+                        select id, site_id, erp_doc_no, status, revision, pick_lpn, shipment_txn_id, ship_complete,
+                               cutoff_at
+                        from outbound_order where id = :id for update""")
                 .param("id", id).query(OutboundService::mapOrder).single();
     }
 
     private static Order mapOrder(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
         return new Order(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4),
-                rs.getLong(5), rs.getString(6), rs.getString(7));
+                rs.getLong(5), rs.getString(6), rs.getString(7), rs.getBoolean(8),
+                rs.getTimestamp(9) == null ? null : rs.getTimestamp(9).toInstant());
     }
 
     private void setStatus(UUID id, String status) {

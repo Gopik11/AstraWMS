@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { get, newIdempotencyKey, post, type ReceiptDetail as Detail } from '../api'
+import { get, newIdempotencyKey, post, type ReceiptDetail as Detail, type Row } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Card, ErrorBox, Field, Page, Success, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
@@ -13,6 +13,8 @@ export default function ReceiptDetail() {
   const { hasRole } = useAuth()
   const base = `/api/v1/sites/${site}/receipts/${doc}`
   const detail = useLoad(() => get<Detail>(base), [base])
+  const appointments = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/yard/appointments?docNo=${encodeURIComponent(doc)}`), [site, doc])
+  const appt = appointments.data?.find((a) => a.status !== 'CANCELLED' && a.status !== 'NO_SHOW')
   const canReceive = hasRole('RECEIVER', 'SUPERVISOR')
   const d = detail.data
   const open = d && ['NOT_STARTED', 'IN_PROGRESS'].includes(d.header.status)
@@ -29,6 +31,9 @@ export default function ReceiptDetail() {
               <span>Vendor {d.header.vendorId}</span>
               <span>Expected {fmtDate(d.header.expectedArrivalUtc)}</span>
               {d.header.erpDocument && <span>ERP document {d.header.erpDocument}</span>}
+              {appt && <span>Appointment <Link to="/yard">{String(appt.appt_no)}</Link> {fmtDate(appt.scheduled_start)}
+                {appt.door ? ` · door ${String(appt.door)}` : ''} · <Badge value={String(appt.status)} />
+                {appt.dwell_minutes != null ? ` · trailer ${String(appt.trailer_no ?? '')} in yard ${String(appt.dwell_minutes)} min` : ''}</span>}
             </div>
             {d.header.erpErrorText && <div className="alert error">ERP: {d.header.erpErrorText}</div>}
           </Card>
@@ -53,7 +58,11 @@ export default function ReceiptDetail() {
               ]} />
             </Card>
           )}
-          {canReceive && open && <ReceiveForms base={base} detail={d} onChange={detail.reload} />}
+          {canReceive && open && !hasRole('SUPERVISOR') && (
+            <div className="alert">Receive this delivery on RF: <Link to="/rf">Work</Link> takes you to its receiving task.
+              The desktop receives only as a supervisor's exception.</div>
+          )}
+          {hasRole('SUPERVISOR') && open && <ReceiveForms base={base} detail={d} onChange={detail.reload} />}
           {canReceive && open && <CloseForm base={base} detail={d} onChange={detail.reload} />}
           {hasRole('SUPERVISOR') && d.header.status === 'POSTING_FAILED' && <Repost base={base} onChange={detail.reload} />}
         </>
@@ -89,7 +98,7 @@ function ReceiveForms({ base, detail, onChange }: { base: string; detail: Detail
   }
   return (
     <div className="grid">
-      <Card title="Receive a line">
+      <Card title="Exception receipt: a line (supervisor)">
         <form onSubmit={submit} className="form">
           <Field label="Line">
             <select value={line} onChange={(e) => setLine(e.target.value)}>
@@ -115,7 +124,7 @@ function ReceiveForms({ base, detail, onChange }: { base: string; detail: Detail
         </form>
       </Card>
       {detail.handlingUnits.some((h) => !h.received) && (
-        <Card title="Receive a pallet by SSCC">
+        <Card title="Exception receipt: a pallet by SSCC (supervisor)">
           <form className="form" onSubmit={async (e) => (e.preventDefault(), (await receiveSscc.run()) && onChange())}>
             <Field label="SSCC"><input value={sscc} onChange={(e) => setSscc(e.target.value)} required /></Field>
             <Field label="Dock location"><input value={ssccLocation} onChange={(e) => setSsccLocation(e.target.value)} required /></Field>

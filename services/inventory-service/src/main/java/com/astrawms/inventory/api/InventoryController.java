@@ -170,20 +170,40 @@ public class InventoryController {
         return queries.balances(siteId, new BalanceFilter(ownerId, itemNo, lotNo, lpnId, locationId, status), after, limit);
     }
 
-    /** The site's allocation policy (ADR-0020); defaults until a solution admin sets it. */
+    /**
+     * The site's allocation policy (ADR-0020); defaults until a solution admin sets it. With {@code ownerId}: the policy
+     * that owner's lines follow (its own override, ADR-0021, else the site's).
+     */
     @GetMapping("/allocation-policy")
-    public com.astrawms.inventory.service.AllocationPolicies.Policy allocationPolicy(@PathVariable String siteId) {
-        return policies.of(siteId);
+    public com.astrawms.inventory.service.AllocationPolicies.Policy allocationPolicy(
+            @PathVariable String siteId, @RequestParam(required = false) String ownerId) {
+        return ownerId == null ? policies.of(siteId) : policies.of(siteId, ownerId.trim().toUpperCase());
     }
 
-    public record PolicyRequest(String lotRotation, String otherRotation, Boolean pickFaceFirst, String fullLpn) {
+    /** The owners with their own allocation policy at this site. */
+    @GetMapping("/allocation-policy/owners")
+    public java.util.List<com.astrawms.inventory.service.AllocationPolicies.Policy> ownerPolicies(@PathVariable String siteId) {
+        return policies.owners(siteId);
+    }
+
+    public record PolicyRequest(String lotRotation, String otherRotation, Boolean pickFaceFirst, String fullLpn,
+                                Boolean lotAffinity, String ownerId) {
     }
 
     @org.springframework.security.access.prepost.PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @org.springframework.web.bind.annotation.PutMapping("/allocation-policy")
     public com.astrawms.inventory.service.AllocationPolicies.Policy putAllocationPolicy(@PathVariable String siteId,
                                                                                          @RequestBody PolicyRequest r) {
-        return policies.put(siteId, r.lotRotation(), r.otherRotation(), r.pickFaceFirst(), r.fullLpn());
+        return policies.put(siteId, r.ownerId(), r.lotRotation(), r.otherRotation(), r.pickFaceFirst(), r.fullLpn(),
+                r.lotAffinity());
+    }
+
+    @org.springframework.security.access.prepost.PreAuthorize("hasRole('SOLUTION_ADMIN')")
+    @org.springframework.web.bind.annotation.DeleteMapping("/allocation-policy/owners/{ownerId}")
+    public org.springframework.http.ResponseEntity<Void> deleteOwnerPolicy(@PathVariable String siteId,
+                                                                           @PathVariable String ownerId) {
+        policies.deleteOwner(siteId, ownerId);
+        return org.springframework.http.ResponseEntity.noContent().build();
     }
 
     @GetMapping("/inbound-staging")
