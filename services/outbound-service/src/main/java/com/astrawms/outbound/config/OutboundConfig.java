@@ -43,6 +43,11 @@ public class OutboundConfig {
 
     // Declared for local/dev environments; production topics are provisioned by infrastructure.
     @Bean
+    NewTopic inventoryEventsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.InventoryContracts.TOPIC).partitions(12).replicas(1).build();
+    }
+
+    @Bean
     NewTopic outboundOrdersTopic() {
         return TopicBuilder.name(OutboundContracts.TOPIC_OUTBOUND_ORDERS).partitions(6).replicas(1).build();
     }

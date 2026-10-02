@@ -142,3 +142,7 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
   .grid { grid-template-columns: 1fr; }
 }
 .error-text { color: var(--danger, #b42318); }
+.tile-warn { border-color: var(--warn, #b54708); }
+.tile-warn .tile-n { color: var(--warn, #b54708); }
+.tile-d { font-size: .75rem; color: var(--muted, #667085); }
+.search input { min-width: 14rem; }

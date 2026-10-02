@@ -12,8 +12,8 @@ public final class MasterDataEvents {
     public static final String TOPIC = "wms.masterdata.events.v1";
     public static final String ITEM_UPSERTED = "ItemUpserted";
     public static final String LOCATION_UPSERTED = "LocationUpserted";
-    /** 1.1: ItemUpserted.standardCost (additive). */
-    public static final String SCHEMA_VERSION = "1.1";
+    /** 1.1: ItemUpserted.standardCost; 1.2: LocationUpserted.zoneType (both additive). */
+    public static final String SCHEMA_VERSION = "1.2";
 
     private MasterDataEvents() {
     }
@@ -46,11 +46,21 @@ public final class MasterDataEvents {
     /**
      * Business key {@code siteId:locationId}. Attributes are effective values (zone defaults already applied).
      * {@code checkDigit} is printed on the location label and scanned on RF confirmation; {@code pickSeq} orders
-     * locations along the travel path (lower = closer to the dock / start of the path).
+     * locations along the travel path (lower = closer to the dock / start of the path). {@code zoneType} (1.2) is
+     * the zone's role (PICK, RESERVE, DOCK, RECEIVING, RETURNS, SHIPPING, QC, ...): it decides where putaway may go
+     * and which stock is allocable (ADR-0019); null from 1.1 publishers.
      */
     public record LocationUpserted(String siteId, String locationId, String zoneId, String locationType,
                                    String erpBucket, String temperatureClass, boolean hazmatAllowed,
                                    boolean allowMixedItems, boolean allowMixedLots, String status,
-                                   Instant sourceChangedAt, String checkDigit, Integer pickSeq) {
+                                   Instant sourceChangedAt, String checkDigit, Integer pickSeq, String zoneType) {
+
+        public LocationUpserted(String siteId, String locationId, String zoneId, String locationType,
+                                String erpBucket, String temperatureClass, boolean hazmatAllowed,
+                                boolean allowMixedItems, boolean allowMixedLots, String status,
+                                Instant sourceChangedAt, String checkDigit, Integer pickSeq) {
+            this(siteId, locationId, zoneId, locationType, erpBucket, temperatureClass, hazmatAllowed, allowMixedItems,
+                    allowMixedLots, status, sourceChangedAt, checkDigit, pickSeq, null);
+        }
     }
 }

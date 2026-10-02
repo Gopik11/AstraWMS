@@ -167,6 +167,11 @@ public class InventoryController {
         return queries.balances(siteId, new BalanceFilter(ownerId, itemNo, lotNo, lpnId, locationId, status), after, limit);
     }
 
+    @GetMapping("/inbound-staging")
+    public java.util.List<java.util.Map<String, Object>> inboundStaging(@PathVariable String siteId) {
+        return queries.inboundStaging(siteId);
+    }
+
     @GetMapping("/items/{ownerId}/{itemNo}/summary")
     public ItemSummary itemSummary(@PathVariable String siteId, @PathVariable String ownerId,
                                    @PathVariable String itemNo) {

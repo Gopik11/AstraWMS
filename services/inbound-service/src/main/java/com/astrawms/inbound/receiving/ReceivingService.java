@@ -65,9 +65,11 @@ public class ReceivingService {
     private final OutboxWriter outbox;
     private final JsonMapper json;
     private final Clock clock;
+    private final ReceivingWork work;
 
     public ReceivingService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, JsonMapper json,
-                            Clock clock) {
+                            Clock clock, ReceivingWork work) {
+        this.work = work;
         this.jdbc = jdbc;
         this.inventory = inventory;
         this.outbox = outbox;
@@ -123,6 +125,32 @@ public class ReceivingService {
                 blankToNull(r.lpnId()), false);
         saveResponse(idempotencyKey, result);
         return result;
+    }
+
+    /**
+     * RF receiving by item (ADR-0019): the scanned item chooses the line, the first of that item with quantity still
+     * open, else the last one (so an over-receipt is checked against its tolerance). A retried scan replays the line it
+     * was first booked on.
+     */
+    @Transactional
+    public ReceiveResult receiveItem(String siteId, String erpDocNo, String itemNo, String idempotencyKey,
+                                     ReceiveLineRequest r) {
+        checkKey(idempotencyKey);
+        Optional<String> booked = jdbc.sql("select erp_line_ref from receipt_txn where idempotency_key = :k limit 1")
+                .param("k", idempotencyKey).query(String.class).optional();
+        if (booked.isPresent()) {
+            return receiveLine(siteId, erpDocNo, booked.get(), idempotencyKey, r);
+        }
+        Header h = lockOpenExpectation(siteId, erpDocNo);
+        String item = itemNo == null ? "" : itemNo.trim();
+        List<Line> ofItem = lines(h.id()).stream().filter(l -> l.itemNo().equals(item)).toList();
+        if (ofItem.isEmpty()) {
+            throw ApiException.unprocessable("INB_ITEM_NOT_ON_DELIVERY",
+                    "Item " + item + " is not on delivery " + erpDocNo + " (INB-EX-02: set it aside and report it)");
+        }
+        Line line = ofItem.stream().filter(l -> l.qtyReceived().compareTo(l.qtyExpected()) < 0).findFirst()
+                .orElse(ofItem.getLast());
+        return receiveLine(siteId, erpDocNo, line.erpLineRef(), idempotencyKey, r);
     }
 
     /** Whole-pallet receipt by SSCC from the ASN: one scan, LPN = SSCC (INB-011). */
@@ -214,6 +242,7 @@ public class ReceivingService {
                 .param("now", Timestamp.from(now)).param("user", TenantContext.require().userId())
                 .param("txn", txnId).param("id", h.id()).update();
         publishConfirmation(h, txnId, now);
+        work.ended(siteId, com.astrawms.common.contracts.ReceivingContracts.KIND_ASN, erpDocNo, "CLOSED");
         return summary(siteId, erpDocNo);
     }
 
@@ -318,9 +347,18 @@ public class ReceivingService {
 
     @Transactional(readOnly = true)
     public List<ExpectationSummary> list(String siteId, String status) {
+        return list(siteId, status, null);
+    }
+
+    /** {@code q} matches the delivery, the vendor or an item on the delivery (case-insensitive). */
+    @Transactional(readOnly = true)
+    public List<ExpectationSummary> list(String siteId, String status, String q) {
+        String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql(SUMMARY + " where e.site_id = :site and (cast(:status as text) is null or e.status = :status)"
+                        + " and (cast(:q as text) is null or upper(e.erp_doc_no) like :q or upper(coalesce(e.vendor_id, '')) like :q"
+                        + " or exists (select 1 from receipt_expectation_line x where x.expectation_id = e.id and upper(x.item_no) like :q))"
                         + " order by e.expected_arrival_utc, e.erp_doc_no limit 500")
-                .param("site", siteId).param("status", status).query(ReceivingService::summary).list();
+                .param("site", siteId).param("status", status).param("q", like).query(ReceivingService::summary).list();
     }
 
     @Transactional(readOnly = true)

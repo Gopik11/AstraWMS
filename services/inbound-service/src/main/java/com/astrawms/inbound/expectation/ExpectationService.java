@@ -32,8 +32,11 @@ public class ExpectationService {
     private final JdbcClient jdbc;
     private final OutboxWriter outbox;
     private final Clock clock;
+    private final com.astrawms.inbound.receiving.ReceivingWork work;
 
-    public ExpectationService(JdbcClient jdbc, OutboxWriter outbox, Clock clock) {
+    public ExpectationService(JdbcClient jdbc, OutboxWriter outbox, Clock clock,
+                              com.astrawms.inbound.receiving.ReceivingWork work) {
+        this.work = work;
         this.jdbc = jdbc;
         this.outbox = outbox;
         this.clock = clock;
@@ -100,6 +103,15 @@ public class ExpectationService {
         }
         log(id, e, decision);
         ack(envelope, e, decision);
+        if ("APPLIED".equals(decision.result())) {
+            String status = jdbc.sql("select status from receipt_expectation where id = :id").param("id", id)
+                    .query(String.class).single();
+            if ("CANCELLED".equals(status)) {
+                work.ended(site, com.astrawms.common.contracts.ReceivingContracts.KIND_ASN, e.erpDocNo(), "CANCELLED");
+            } else {
+                work.asnReceivable(site, id);     // ADR-0019: an RF receiving task for the delivery
+            }
+        }
     }
 
     /** IN_PROGRESS: increases and new lines apply; a line may not drop below what was already received. */

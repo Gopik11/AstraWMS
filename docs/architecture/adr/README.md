@@ -20,5 +20,6 @@
 | [0016](0016-packing-and-loading.md) | Packing records with GS1 SSCC cartons and carrier labels (simulated carrier); optional pack-before-ship per site; loads with cross-load check, closed with seal and BOL to ship |
 | [0017](0017-customer-returns.md) | Customer returns in the inbound service: RMAs from SAP returns deliveries and blind returns; units graded A–E with a suggested disposition; close posts 651 receipt then 453 restock under two transaction IDs |
 | [0018](0018-production-hardening.md) | Production hardening: HTTPS via host nginx and Let's Encrypt (astrawms.cloud), Kafka SASL/PLAIN with one account per service, per-tenant dead-letter listing and group-targeted replay, Prometheus metrics and alert rules, Operations page |
+| [0019](0019-flow-fixes-receiving-putaway-recovery.md) | RF receiving tasks for ASNs and RMAs; zone-aware putaway (never outbound staging, pick face then reserve, QC for blocked stock); allocation policy (face, full LPN, FEFO/FIFO); demand replenishment; backorder recovery and Reallocate shorts; returns putaway; role-based RF work |
 
 New ADRs use the next number. The files are immutable once accepted: to change a decision, write a new ADR that supersedes the old one.

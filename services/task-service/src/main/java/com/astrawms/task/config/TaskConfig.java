@@ -36,6 +36,17 @@ public class TaskConfig {
                 .requestInterceptor(serviceCalls).build(), json);
     }
 
+    @Bean
+    com.astrawms.task.inbound.InboundClient inboundClient(JsonMapper json, ServiceCallInterceptor serviceCalls,
+                                                          @Value("${astra.inbound.base-url}") String baseUrl,
+                                                          @Value("${astra.inbound.timeout-ms:5000}") long timeoutMs) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
+        factory.setReadTimeout(Duration.ofMillis(timeoutMs));
+        return new com.astrawms.task.inbound.HttpInboundClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
+                .requestInterceptor(serviceCalls).build(), json);
+    }
+
     // Every service declares the topics it consumes as well as those it produces: if a consumer subscribed first,
     // the broker would auto-create the topic with one partition, and the consumer would not see the partitions added
     // later until its next metadata refresh (minutes). Partition counts match the producers' declarations.

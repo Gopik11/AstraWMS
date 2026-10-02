@@ -82,11 +82,22 @@ echo "Order 0080000001 allocated and released to picking; IDoc 53"
 
 step "RF picking: 2 pick tasks (SKU-1 picked 3 of 4 = short pick, SKU-SER with serial scans)"
 wait_for "2 pick tasks" sh -c "curl -sf '$TSK/api/v1/sites/DC1/tasks?status=RELEASED' -H '$PICK_AUTH' | grep -o '\"taskType\":\"PICK\"' | wc -l | grep -q 2"
-for _ in 1 2; do
+picks=0
+while (( picks < 2 )); do
   expect 200 -X POST "$TSK/api/v1/sites/DC1/tasks/next" "${P[@]}"
   task="$(json "['id']" <<<"$BODY")"; item="$(json "['itemNo']" <<<"$BODY")"; from="$(json "['fromLocation']" <<<"$BODY")"
   qty="$(json "['qty']" <<<"$BODY")"
   cd="$(curl -sf "$MD/api/v1/sites/DC1/locations/$from" "${P[@]}" | json "['checkDigit']")"
+  if [[ "$(json "['taskType']" <<<"$BODY")" == "COUNT" ]]; then
+    # The short pick opened a cycle count of R-01 (PCK-003 b); work follows the travel path, so it comes next.
+    held="$(curl -sf "$INV/api/v1/sites/DC1/inventory/balances?locationId=$from" "${SUP[@]}" \
+      | python -c "import json,sys; print(sum(b['qty'] for b in json.load(sys.stdin)['items']))")"
+    expect 200 -X POST "$TSK/api/v1/sites/DC1/tasks/$task/count" "${P[@]}" \
+      -d "{\"checkDigit\":\"$cd\",\"lines\":[{\"ownerId\":\"ACME\",\"itemNo\":\"SKU-1\",\"qty\":$held}]}"
+    echo "Counted $from (count opened by the short pick): $held"
+    continue
+  fi
+  picks=$((picks + 1))
   if [[ "$item" == "SKU-1" ]]; then
     body="{\"checkDigit\":\"$cd\",\"qty\":3}"
   else

@@ -58,3 +58,6 @@ astra:
   inventory:
     base-url: ${INVENTORY_URL:http://localhost:8082}
     timeout-ms: 3000
+  inbound:
+    base-url: ${INBOUND_URL:http://localhost:8083}
+    timeout-ms: 5000

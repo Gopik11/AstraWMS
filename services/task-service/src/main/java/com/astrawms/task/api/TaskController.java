@@ -29,8 +29,9 @@ public class TaskController {
     }
 
     @GetMapping
-    public List<TaskView> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return tasks.list(siteId, status);
+    public List<TaskView> list(@PathVariable String siteId, @RequestParam(required = false) String status,
+                               @RequestParam(required = false) String q, @RequestParam(required = false) String type) {
+        return tasks.list(siteId, status, q, type);
     }
 
     @GetMapping("/{taskId}")
@@ -49,6 +50,28 @@ public class TaskController {
     @PostMapping("/{taskId}/confirm")
     public TaskView confirm(@PathVariable String siteId, @PathVariable UUID taskId, @Valid @RequestBody ConfirmRequest body) {
         return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit());
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
+    @PostMapping("/{taskId}/receive")
+    public TaskService.ReceiveScanResult receive(@PathVariable String siteId, @PathVariable UUID taskId,
+                                                 @Valid @RequestBody TaskDtos.ReceiveRequest b) {
+        return tasks.confirmReceive(siteId, taskId, new TaskService.ReceiveScan(b.scanId(), b.docNo(), b.itemNo(),
+                b.ownerId(), b.qty(), b.uom(), b.lotNo(), b.expiryDate(), b.serials(), b.lpnId(), b.locationId(),
+                b.checkDigit(), b.conditionGrade(), b.disposition(), b.returnReason(), b.overrideReason()));
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
+    @PostMapping("/{taskId}/receive/close")
+    public TaskService.ReceiveScanResult closeReceive(@PathVariable String siteId, @PathVariable UUID taskId,
+                                                      @RequestBody(required = false) TaskDtos.ReceiveCloseRequest b) {
+        return tasks.closeReceive(siteId, taskId, b == null ? null : b.shortReasons());
+    }
+
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/{taskId}/release")
+    public TaskView release(@PathVariable String siteId, @PathVariable UUID taskId) {
+        return tasks.release(siteId, taskId);
     }
 
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")

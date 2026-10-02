@@ -23,6 +23,14 @@ public class AllocationRepository {
 
     /** Location types whose stock is never allocable: inbound/outbound staging (PUT-006). */
     public static final List<String> NON_ALLOCABLE_TYPES = List.of("DOOR", "DOCK", "STAGING", "STAGING_IN", "STAGING_OUT");
+    /**
+     * Zone types whose stock is never allocable (ADR-0019): it is still on its way into storage (receiving, dock,
+     * returns), on its way out (shipping), or held for inspection (QC). Putaway makes such stock allocable.
+     */
+    public static final List<String> NON_ALLOCABLE_ZONES = List.of("DOCK", "RECEIVING", "RETURNS", "SHIPPING", "QC",
+            "QUARANTINE", "STAGING");
+    /** Zone types of forward pick locations; a location with an active min/max rule is a pick face whatever its zone. */
+    public static final List<String> PICK_ZONES = List.of("PICK", "FORWARD");
 
     private final JdbcClient jdbc;
 
@@ -47,8 +55,12 @@ public class AllocationRepository {
         }
     }
 
-    /** A balance with free (unallocated) quantity, in rotation order. */
-    public record Candidate(BalanceKey key, BigDecimal free, LocalDate expiry) {
+    /**
+     * A balance with free (unallocated) quantity, in rotation order. {@code face}: a pick face of the item (active
+     * min/max rule or pick zone); {@code wholeLpn}: the balance is the entire, untouched content of its LPN, so it can
+     * be allocated as a full pallet.
+     */
+    public record Candidate(BalanceKey key, BigDecimal free, LocalDate expiry, boolean face, boolean wholeLpn) {
     }
 
     /**
@@ -62,25 +74,33 @@ public class AllocationRepository {
         String order = fefo ? "b.expiry_date nulls last, b.receipt_date, b.id" : "b.receipt_date, b.id";
         return jdbc.sql("""
                         select b.site_id, b.owner_id, b.item_no, b.lot_no, b.lpn_id, b.location_id,
-                               b.qty - b.allocated_qty as free, b.expiry_date
+                               b.qty - b.allocated_qty as free, b.expiry_date,
+                               (coalesce(l.zone_type, '') in (:pickZones) or exists (
+                                   select 1 from replen_rule r where r.site_id = b.site_id and r.location_id = b.location_id
+                                     and r.owner_id = b.owner_id and r.item_no = b.item_no and r.active)) as face,
+                               (b.lpn_id <> '' and b.allocated_qty = 0 and not exists (
+                                   select 1 from inventory_balance o where o.site_id = b.site_id and o.lpn_id = b.lpn_id
+                                     and o.id <> b.id and o.qty > 0)) as whole_lpn
                         from inventory_balance b
                         join ref_location l on l.site_id = b.site_id and l.location_id = b.location_id
                         where b.site_id = :site and b.owner_id = :owner and b.item_no = :item
                           and b.stock_status = 'AVAILABLE' and b.qty > b.allocated_qty
                           and l.status = 'ACTIVE' and l.location_type not in (:staging)
+                          and coalesce(l.zone_type, '') not in (:zones)
                           and b.location_id not in (:excluded)
                           and (cast(:lot as text) is null or b.lot_no = :lot)
                           and (cast(:minExpiry as date) is null or b.expiry_date >= :minExpiry)
                         order by\s""" + order + " for update of b")
                 .param("site", siteId).param("owner", ownerId).param("item", itemNo).param("lot", lotNo)
                 .param("minExpiry", minExpiry == null ? null : Date.valueOf(minExpiry))
-                .param("staging", NON_ALLOCABLE_TYPES)
+                .param("staging", NON_ALLOCABLE_TYPES).param("zones", NON_ALLOCABLE_ZONES).param("pickZones", PICK_ZONES)
                 .param("excluded", excludedLocations == null || excludedLocations.isEmpty() ? List.of("") : excludedLocations)
                 .query((rs, n) -> {
                     Date expiry = rs.getDate(8);
                     return new Candidate(new BalanceKey(rs.getString(1), rs.getString(2), rs.getString(3),
                             rs.getString(4), rs.getString(5), rs.getString(6), StockStatus.AVAILABLE),
-                            Quantities.normalize(rs.getBigDecimal(7)), expiry == null ? null : expiry.toLocalDate());
+                            Quantities.normalize(rs.getBigDecimal(7)), expiry == null ? null : expiry.toLocalDate(),
+                            rs.getBoolean(9), rs.getBoolean(10));
                 })
                 .list();
     }

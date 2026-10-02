@@ -182,6 +182,68 @@ class OutboundIT {
         assertThat(outbox(OutboundContracts.PickRequested.TYPE)).isEmpty();
     }
 
+    // ------------------------------------------------------------------ ADR-0019 backorder recovery
+
+    @Test
+    void backorderedOrderIsRecoveredWhenStockOfItsItemsBecomesAvailable() throws Exception {
+        inventory.stock.put("SKU-1", BigDecimal.ZERO);
+        inventory.stock.put("SKU-SER", BigDecimal.ZERO);
+        order(1, "CREATE", "3", "1");
+        await(() -> "BACKORDERED".equals(orderStatus()));
+
+        // Stock of SKU-1 is put away: the short line of that item is allocated, the order goes back to RELEASED.
+        inventory.stock.put("SKU-1", new BigDecimal("24"));
+        stockArrived("SKU-1", "MOVE_IN");
+        await(() -> "RELEASED".equals(orderStatus()));
+        await(() -> outbox(OutboundContracts.PickRequested.TYPE).size() == 2);
+        assertThat(shortOf("000010")).isEqualByComparingTo("0");
+        assertThat(shortOf("000020")).isEqualByComparingTo("1");
+
+        inventory.stock.put("SKU-SER", new BigDecimal("5"));
+        stockArrived("SKU-SER", "ADJUST_POS");
+        await(() -> shortOf("000020").signum() == 0);
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+    }
+
+    @Test
+    void earliestGoodsIssueIsRecoveredFirst() throws Exception {
+        inventory.stock.put("SKU-1", BigDecimal.ZERO);
+        inventory.stock.put("SKU-SER", BigDecimal.ZERO);
+        String late = doc;
+        order(1, "CREATE", "3", "1");
+        await(() -> "BACKORDERED".equals(orderStatus()));
+        doc = "08" + (System.nanoTime() % 100_000_000L);
+        String early = doc;
+        orderAt(Instant.now().minusSeconds(3600), "3");                 // planned earlier
+        await(() -> "BACKORDERED".equals(orderStatus()));
+
+        inventory.stock.put("SKU-1", new BigDecimal("3"));               // enough for one order only
+        stockArrived("SKU-1", "RETURN_IN");
+        await(() -> "RELEASED".equals(statusOf(early)));
+        assertThat(statusOf(late)).isEqualTo("BACKORDERED");
+    }
+
+    @Test
+    void supervisorReallocatesShortsOnDemand() throws Exception {
+        inventory.stock.put("SKU-1", BigDecimal.ZERO);
+        inventory.stock.put("SKU-SER", BigDecimal.ZERO);
+        order(1, "CREATE", "3", "1");
+        await(() -> "BACKORDERED".equals(orderStatus()));
+        inventory.stock.put("SKU-1", new BigDecimal("100"));
+        inventory.stock.put("SKU-SER", new BigDecimal("100"));
+        mvc.perform(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/reallocate")
+                        .with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/reallocate")
+                        .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.recoveredQty", is(4)));
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders?q=customer one").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$[0].erp_doc_no", is(doc)));
+    }
+
     @Test
     void picksThenShipSendsConfirmationAndErpResultConfirms_IFOB003_SHP005() throws Exception {
         order(1, "CREATE", "4", "1");                                  // line 10 requests 4, ships 3 (short pick)
@@ -461,6 +523,33 @@ class OutboundIT {
                         new OutboundOrder.Line("000020", "ACME", "SKU-SER", new BigDecimal(qty20), "EA", null)),
                 Instant.now());
         send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
+    }
+
+    private void orderAt(Instant plannedGi, String qty10) throws Exception {
+        OutboundOrder o = new OutboundOrder(doc, "CUSTOMER", "CREATE", 1, "IDOC-1",
+                new OutboundOrder.ShipTo("C-2", "Customer Two", "Austin", "US"), "UPSN", plannedGi,
+                List.of(new OutboundOrder.Line("000010", "ACME", "SKU-1", new BigDecimal(qty10), "EA", null)), Instant.now());
+        send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
+    }
+
+    private void stockArrived(String item, String txnType) throws Exception {
+        send(com.astrawms.common.contracts.InventoryContracts.TOPIC,
+                com.astrawms.common.contracts.InventoryContracts.InventoryChanged.TYPE, "ASTRAWMS",
+                new com.astrawms.common.contracts.InventoryContracts.InventoryChanged(UUID.randomUUID(), "W1", "MOVE", "ACME",
+                        item, List.of(new com.astrawms.common.contracts.InventoryContracts.InventoryChanged.Line(txnType, "",
+                        "LPN-NEW", "A-01-11", "AVAILABLE", new BigDecimal("24"), new BigDecimal("24"))), Instant.now()));
+    }
+
+    private BigDecimal shortOf(String line) {
+        return asTenant(() -> jdbc.sql("""
+                        select l.qty_short from outbound_line l join outbound_order o on o.id = l.order_id
+                        where o.erp_doc_no = :d and l.erp_line_ref = :ref""")
+                .param("d", doc).param("ref", line).query(BigDecimal.class).single());
+    }
+
+    private String statusOf(String erpDocNo) {
+        return asTenant(() -> jdbc.sql("select status from outbound_order where erp_doc_no = :d").param("d", erpDocNo)
+                .query(String.class).optional().orElse(null));
     }
 
     private void completed(UUID allocation, String line, BigDecimal picked, BigDecimal shortQty) throws Exception {

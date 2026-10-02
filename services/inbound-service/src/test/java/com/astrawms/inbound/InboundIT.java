@@ -307,6 +307,38 @@ class InboundIT {
         }
     }
 
+    // ------------------------------------------------------------------ ADR-0019 RF receiving work
+
+    @Test
+    void deliveryBecomesAnRfReceiveTaskThatEndsWhenTheReceiptIsClosed() throws Exception {
+        JsonNode request = outbox("ReceiveRequested").getLast().get("payload");
+        assertThat(request.get("kind").asString()).isEqualTo("ASN");
+        assertThat(request.get("docNo").asString()).isEqualTo(DOC);
+        assertThat(request.get("partner").asString()).isEqualTo("V-100");
+        assertThat(request.get("lines")).hasSize(2);
+        assertThat(request.get("lines").get(0).get("itemNo").asString()).isEqualTo("SKU-1");
+
+        // RF receives by item: the scan picks line 000010, a retry replays it.
+        String scan = """
+                {"itemNo":"SKU-1","qty":24,"uom":"EA","lotNo":"B1","lpnId":"LPN-RF","locationId":"DOCK-01"}""";
+        call(post("/api/v1/sites/DC1/receipts/" + DOC + "/receive-item").header("Idempotency-Key", "RF-s1"), scan)
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.lines[0].qtyReceived", is(24)));
+        call(post("/api/v1/sites/DC1/receipts/" + DOC + "/receive-item").header("Idempotency-Key", "RF-s1"), scan)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replayed", is(true)));
+        call(post("/api/v1/sites/DC1/receipts/" + DOC + "/receive-item").header("Idempotency-Key", "RF-s2"),
+                scan.replace("SKU-1", "SKU-9"))
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("INB_ITEM_NOT_ON_DELIVERY")));
+        assertThat(inventory.callsWithKeyPrefix("INB-RF-s1")).hasSize(1);
+
+        close("""
+                {"shortReasons":{"000020":"SHORT_VENDOR"}}""").andExpect(status().isOk());
+        JsonNode ended = outbox("ReceiveEnded").getLast().get("payload");
+        assertThat(ended.get("docNo").asString()).isEqualTo(DOC);
+        assertThat(ended.get("reason").asString()).isEqualTo("CLOSED");
+        call(get("/api/v1/sites/DC1/receipts?q=sku-1"), "").andExpect(jsonPath("$[0].erpDocNo", is(DOC)));
+        call(get("/api/v1/sites/DC1/receipts?q=nothing-like-this"), "").andExpect(jsonPath("$.length()", is(0)));
+    }
+
     @Test
     void pickersCannotReceiveAndReceiversCannotRepost_G5() throws Exception {
         mvc.perform(post("/api/v1/sites/DC1/receipts/X/lines/000010/receive")

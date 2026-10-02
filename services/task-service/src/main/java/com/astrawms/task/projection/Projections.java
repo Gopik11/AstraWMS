@@ -26,7 +26,12 @@ public class Projections {
 
     public record Location(String siteId, String locationId, String zoneId, String locationType,
                            String temperatureClass, boolean hazmatAllowed, boolean allowMixedItems,
-                           boolean allowMixedLots, String status, String checkDigit, Integer pickSeq) {
+                           boolean allowMixedLots, String status, String checkDigit, Integer pickSeq,
+                           String zoneType) {
+    }
+
+    /** A fixed pick face of an item (min/max rule of the inventory service). */
+    public record PickFace(String locationId, String ownerId, String itemNo, BigDecimal maxQty) {
     }
 
     /** One balance inside an LPN or location. */
@@ -53,20 +58,43 @@ public class Projections {
         jdbc.sql("""
                         insert into ref_location (tenant_id, site_id, location_id, zone_id, location_type,
                             temperature_class, hazmat_allowed, allow_mixed_items, allow_mixed_lots, status,
-                            check_digit, pick_seq, source_changed_at)
-                        values (:t, :site, :loc, :zone, :type, :temp, :haz, :mixItems, :mixLots, :status, :cd, :seq, :at)
+                            check_digit, pick_seq, source_changed_at, zone_type)
+                        values (:t, :site, :loc, :zone, :type, :temp, :haz, :mixItems, :mixLots, :status, :cd, :seq, :at,
+                                :zoneType)
                         on conflict (tenant_id, site_id, location_id) do update set
                             zone_id = excluded.zone_id, location_type = excluded.location_type,
                             temperature_class = excluded.temperature_class, hazmat_allowed = excluded.hazmat_allowed,
                             allow_mixed_items = excluded.allow_mixed_items, allow_mixed_lots = excluded.allow_mixed_lots,
                             status = excluded.status, check_digit = excluded.check_digit, pick_seq = excluded.pick_seq,
-                            source_changed_at = excluded.source_changed_at
+                            source_changed_at = excluded.source_changed_at,
+                            zone_type = coalesce(excluded.zone_type, ref_location.zone_type)
                         where ref_location.source_changed_at <= excluded.source_changed_at""")
+                .param("zoneType", e.zoneType())
                 .param("t", TenantContext.tenantId()).param("site", e.siteId()).param("loc", e.locationId())
                 .param("zone", e.zoneId()).param("type", e.locationType()).param("temp", e.temperatureClass())
                 .param("haz", e.hazmatAllowed()).param("mixItems", e.allowMixedItems())
                 .param("mixLots", e.allowMixedLots()).param("status", e.status()).param("cd", e.checkDigit())
                 .param("seq", e.pickSeq()).param("at", Timestamp.from(e.sourceChangedAt())).update();
+    }
+
+    public void upsertPickFace(String siteId, com.astrawms.common.contracts.InventoryContracts.PickFaceChanged e) {
+        jdbc.sql("""
+                        insert into ref_pick_face (tenant_id, site_id, location_id, owner_id, item_no, max_qty, active, changed_at)
+                        values (:t, :site, :loc, :owner, :item, :max, :active, :at)
+                        on conflict (tenant_id, site_id, location_id, owner_id, item_no) do update set
+                            max_qty = excluded.max_qty, active = excluded.active, changed_at = excluded.changed_at
+                        where ref_pick_face.changed_at <= excluded.changed_at""")
+                .param("t", TenantContext.tenantId()).param("site", siteId).param("loc", e.locationId())
+                .param("owner", e.ownerId()).param("item", e.itemNo()).param("max", e.maxQty())
+                .param("active", e.active()).param("at", Timestamp.from(e.changedAt())).update();
+    }
+
+    /** Active pick faces of the site, any item. */
+    public List<PickFace> pickFaces(String siteId) {
+        return jdbc.sql("select location_id, owner_id, item_no, max_qty from ref_pick_face where site_id = :site and active")
+                .param("site", siteId)
+                .query((rs, n) -> new PickFace(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBigDecimal(4)))
+                .list();
     }
 
     /** Applies the quantity after each change; idempotent, so redelivered events are harmless. */
@@ -107,12 +135,12 @@ public class Projections {
                 .param("site", siteId).param("loc", locationId).query(Projections::location).optional();
     }
 
-    /** Active candidate storage locations of a site (inbound staging types excluded). */
-    public List<Location> storageLocations(String siteId, List<String> stagingTypes) {
+    /** Active locations of a site in travel-path order; the putaway engine decides which may store what. */
+    public List<Location> activeLocations(String siteId) {
         return jdbc.sql(LOCATION + " " + """
-                         where site_id = :site and status = 'ACTIVE' and location_type not in (:staging)
+                         where site_id = :site and status = 'ACTIVE'
                         order by pick_seq nulls last, location_id""")
-                .param("site", siteId).param("staging", stagingTypes).query(Projections::location).list();
+                .param("site", siteId).query(Projections::location).list();
     }
 
     public List<Stock> lpnContents(String siteId, String lpnId, String locationId) {
@@ -132,7 +160,7 @@ public class Projections {
 
     private static final String LOCATION = """
             select site_id, location_id, zone_id, location_type, temperature_class, hazmat_allowed, allow_mixed_items,
-                   allow_mixed_lots, status, check_digit, pick_seq
+                   allow_mixed_lots, status, check_digit, pick_seq, zone_type
             from ref_location""";
 
     private static final String STOCK = """
@@ -141,7 +169,7 @@ public class Projections {
     private static Location location(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
         return new Location(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
                 rs.getBoolean(6), rs.getBoolean(7), rs.getBoolean(8), rs.getString(9), rs.getString(10),
-                (Integer) rs.getObject(11));
+                (Integer) rs.getObject(11), rs.getString(12));
     }
 
     private static Stock stock(java.sql.ResultSet rs, int n) throws java.sql.SQLException {

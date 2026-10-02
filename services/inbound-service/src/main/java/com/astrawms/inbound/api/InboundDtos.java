@@ -30,6 +30,26 @@ public final class InboundDtos {
             List<String> serials) {
     }
 
+    /** RF receipt by item scan (ADR-0019): the item chooses the line. */
+    public record ReceiveItemRequest(
+            @NotBlank String itemNo,
+            @NotNull @Positive BigDecimal qty,
+            @NotBlank String uom,
+            String lotNo,
+            String vendorLotNo,
+            LocalDate expiryDate,
+            @Size(max = 40) String lpnId,
+            @NotBlank String locationId,
+            String overrideReason,
+            String approvedBy,
+            List<String> serials) {
+
+        public ReceiveLineRequest line() {
+            return new ReceiveLineRequest(qty, uom, lotNo, vendorLotNo, expiryDate, lpnId, locationId, overrideReason,
+                    approvedBy, serials);
+        }
+    }
+
     /** SSCC single-scan receipt of an expected handling unit (INB-011). */
     public record ReceiveSsccRequest(@NotBlank String locationId) {
     }

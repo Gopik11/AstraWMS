@@ -28,8 +28,9 @@ public class OutboundController {
     }
 
     @GetMapping
-    public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return scope.filter(siteId, outbound.list(siteId, status));
+    public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status,
+                                          @RequestParam(required = false) String q) {
+        return scope.filter(siteId, outbound.list(siteId, status, q));
     }
 
     @GetMapping("/{erpDocNo}")
@@ -44,6 +45,14 @@ public class OutboundController {
                                     @RequestBody(required = false) ShipRequest body) {
         scope.require(siteId, erpDocNo);
         return outbound.ship(siteId, erpDocNo, body);
+    }
+
+    /** "Reallocate shorts" (ADR-0019): allocates the order's short lines from stock available now. */
+    @PreAuthorize("hasRole('SUPERVISOR')")
+    @PostMapping("/{erpDocNo}/reallocate")
+    public Map<String, Object> reallocate(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
+        return outbound.reallocateShorts(siteId, erpDocNo);
     }
 
     @PreAuthorize("hasRole('SUPERVISOR')")

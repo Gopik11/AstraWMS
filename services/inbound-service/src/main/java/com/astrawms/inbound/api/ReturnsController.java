@@ -31,8 +31,9 @@ public class ReturnsController {
     }
 
     @GetMapping
-    public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return returns.list(siteId, status);
+    public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status,
+                                          @RequestParam(required = false) String q) {
+        return returns.list(siteId, status, q);
     }
 
     @GetMapping("/{rmaNo}")

@@ -29,6 +29,7 @@ export default function OrderDetail() {
               <span>Status <Badge value={d.status} /></span>
               <span>Type {String(d.order_type)}</span>
               <span>Carrier {String(d.carrier_scac ?? '—')}</span>
+              {d.ship_to_name != null && <span>Customer {String(d.ship_to_name)}</span>}
               {d.wave_no != null && <span>Wave {String(d.wave_no)}</span>}
               <span>Pick LPN {String(d.pick_lpn)} at {String(d.staging_location)}</span>
               {d.tracking_no != null && <span>Tracking {String(d.tracking_no)}</span>}
@@ -45,6 +46,8 @@ export default function OrderDetail() {
               { header: 'Picked', cell: (l) => fmtQty(l.qty_picked), align: 'right' },
               { header: 'Short', cell: (l) => fmtQty(l.qty_short), align: 'right' },
               { header: 'Short (picks)', cell: (l) => fmtQty(l.qty_short_pick), align: 'right' },
+              { header: 'From', cell: (l) => d.allocations.filter((a) => a.erp_line_ref === l.erp_line_ref && a.status !== 'CANCELLED')
+                  .map((a) => `${String(a.location_id)}${a.lpn_id ? ` / ${String(a.lpn_id)}` : ''}`).join(', ') },
             ]} />
           </Card>
           <Card title="Allocations and picks">
@@ -59,11 +62,27 @@ export default function OrderDetail() {
               { header: '', cell: (a) => (a.replaces ? 're-allocation' : '') },
             ]} />
           </Card>
+          {hasRole('SUPERVISOR') && ['BACKORDERED', 'RELEASED', 'PICKED'].includes(d.status) && !d.loaded
+            && d.lines.some((l) => Number(l.qty_short) > 0) && <Reallocate base={base} onDone={detail.reload} />}
           {hasRole('SUPERVISOR') && d.status === 'PICKED' && <Ship base={base} onDone={detail.reload} />}
           {hasRole('SUPERVISOR') && d.status === 'SHIP_ERROR' && <Repost base={base} onDone={detail.reload} />}
         </>
       )}
     </Page>
+  )
+}
+
+/** Supervisor: allocate the order's short lines from stock available now (ADR-0019); recovered lines get pick tasks. */
+function Reallocate({ base, onDone }: { base: string; onDone: () => void }) {
+  const run = useAction(() => post<Row>(`${base}/reallocate`))
+  return (
+    <Card title="Short lines">
+      <p className="muted">Stock arriving in storage recovers backorders automatically. Reallocate now after a manual fix
+        (e.g. a stock correction), or to recover a picked order.</p>
+      <ErrorBox error={run.error} />
+      {run.result && <div className="alert ok">Recovered {fmtQty(run.result.recoveredQty)}</div>}
+      <button className="primary" disabled={run.busy} onClick={async () => { if (await run.run()) onDone() }}>Reallocate shorts</button>
+    </Card>
   )
 }
 

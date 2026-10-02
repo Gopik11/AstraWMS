@@ -149,6 +149,19 @@ public class LocationService {
         return new GenerateResult(created, updated, unchanged, samples);
     }
 
+    /**
+     * Publishes every location of a site again, so consumers whose projections predate a contract change (e.g. the
+     * 1.2 zone type) or were rebuilt catch up. Consumers are idempotent and stale-safe.
+     */
+    @Transactional
+    public int republish(String siteId) {
+        requireSite(siteId);
+        List<LocationView> all = jdbc.sql(EFFECTIVE + " where l.site_id = :site order by l.location_id")
+                .param("site", siteId).query(LocationService::view).list();
+        all.forEach(this::publish);
+        return all.size();
+    }
+
     @Transactional(readOnly = true)
     public LocationView getLocation(String siteId, String locationId) {
         return jdbc.sql(EFFECTIVE + " where l.site_id = :site and l.location_id = :loc")
@@ -187,7 +200,7 @@ public class LocationService {
                    coalesce(l.temperature_class, z.temperature_class) as temperature_class,
                    coalesce(l.hazmat_allowed, z.hazmat_allowed) as hazmat_allowed,
                    l.allow_mixed_items, l.allow_mixed_lots, l.max_weight_kg, l.max_volume_m3, l.pick_seq,
-                   l.status, l.updated_at
+                   l.status, l.updated_at, z.zone_type
             from location l join zone z on z.site_id = l.site_id and z.zone_id = l.zone_id""";
 
     private Outcome upsert(String siteId, String locationId, LocationRequest r) {
@@ -238,7 +251,7 @@ public class LocationService {
                 MasterDataEvents.SCHEMA_VERSION, null, v.siteId(), null, v.siteId() + ":" + v.locationId(),
                 new LocationUpserted(v.siteId(), v.locationId(), v.zoneId(), v.locationType(), v.erpBucket(),
                         v.temperatureClass(), v.hazmatAllowed(), v.allowMixedItems(), v.allowMixedLots(),
-                        v.status().name(), clock.instant(), v.checkDigit(), v.pickSeq())));
+                        v.status().name(), clock.instant(), v.checkDigit(), v.pickSeq(), v.zoneType())));
     }
 
     private void requireSite(String siteId) {
@@ -262,7 +275,7 @@ public class LocationService {
                 rs.getBoolean("allow_mixed_items"), rs.getBoolean("allow_mixed_lots"),
                 rs.getBigDecimal("max_weight_kg"), rs.getBigDecimal("max_volume_m3"),
                 (Integer) rs.getObject("pick_seq"), LocationStatus.valueOf(rs.getString("status")),
-                rs.getTimestamp("updated_at").toInstant());
+                rs.getTimestamp("updated_at").toInstant(), rs.getString("zone_type"));
     }
 
     private static String pad(int value, int width) {

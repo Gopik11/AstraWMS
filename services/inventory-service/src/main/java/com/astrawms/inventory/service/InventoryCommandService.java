@@ -220,8 +220,17 @@ public class InventoryCommandService {
     // =====================================================================================================
 
     /**
-     * Reserves stock for an order line by rotation (FEFO default, FIFO), never from staging locations (PUT-006).
-     * A shortfall is returned as {@code shortQty}; the caller applies its short-allocation rule (OUT-EX-01).
+     * Reserves stock for an order line, never from staging, receiving, returns, shipping or QC locations (PUT-006,
+     * ADR-0019). Policy, each step in rotation order (FEFO for lot-controlled items, otherwise FIFO, unless the
+     * request names one):
+     * <ol>
+     *   <li>the item's pick faces;</li>
+     *   <li>reserve: loose stock, and full LPNs that the remaining quantity covers;</li>
+     *   <li>reserve LPNs broken into, but only for items without a pick face. Items with a face get the face
+     *       replenished instead, and the shortfall is allocated when that stock arrives (backorder recovery).</li>
+     * </ol>
+     * Allocating from a face can take it below its minimum: it is replenished at once (demand replenishment), with a
+     * task priority above the pick. A shortfall is returned as {@code shortQty} (OUT-EX-01).
      */
     @Transactional
     public AllocationResult allocate(String siteId, String idempotencyKey, AllocateRequest r) {
@@ -230,20 +239,44 @@ public class InventoryCommandService {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             BigDecimal wanted = toBase(item, r.qty(), r.uom());
             String lot = blank(r.lotNo()) ? null : r.lotNo().trim();
-            boolean fefo = r.rotation() != Rotation.FIFO;
+            boolean fefo = r.rotation() == null ? item.lotControlled() : r.rotation() == Rotation.FEFO;
+            boolean hasFace = replenishments.hasPickFace(siteId, r.ownerId(), r.itemNo());
+            List<AllocationRepository.Candidate> candidates = allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
+                    r.minExpiryDate(), fefo, r.excludeLocationIds());
+            Map<AllocationRepository.Candidate, BigDecimal> free = new LinkedHashMap<>();
+            candidates.forEach(c -> free.put(c, c.free()));
             BigDecimal remaining = wanted;
             List<AllocationView> views = new ArrayList<>();
-            for (AllocationRepository.Candidate c : allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
-                    r.minExpiryDate(), fefo, r.excludeLocationIds())) {
-                if (remaining.signum() == 0) {
-                    break;
+            for (int step = 1; step <= 3 && remaining.signum() > 0; step++) {
+                for (AllocationRepository.Candidate c : candidates) {
+                    BigDecimal left = free.get(c);
+                    if (remaining.signum() == 0) {
+                        break;
+                    }
+                    if (left.signum() == 0) {
+                        continue;
+                    }
+                    boolean loose = c.key().lpnId().isEmpty();
+                    BigDecimal take = switch (step) {
+                        case 1 -> c.face() ? left.min(remaining) : BigDecimal.ZERO;
+                        case 2 -> c.face() ? BigDecimal.ZERO
+                                : loose ? left.min(remaining)
+                                : c.wholeLpn() && left.compareTo(remaining) <= 0 ? left : BigDecimal.ZERO;
+                        default -> c.face() || hasFace ? BigDecimal.ZERO : left.min(remaining);
+                    };
+                    if (take.signum() == 0) {
+                        continue;
+                    }
+                    allocations.reserve(c.key(), take);
+                    UUID id = UUID.randomUUID();
+                    allocations.insert(id, c.key(), r.orderRef(), r.orderLineRef(), take, ctx.now);
+                    views.add(new AllocationView(id, c.key().locationId(), c.key().lpnId(), c.key().lotNo(), take, c.expiry()));
+                    free.put(c, left.subtract(take));
+                    remaining = remaining.subtract(take);
                 }
-                BigDecimal take = c.free().min(remaining);
-                allocations.reserve(c.key(), take);
-                UUID id = UUID.randomUUID();
-                allocations.insert(id, c.key(), r.orderRef(), r.orderLineRef(), take, ctx.now);
-                views.add(new AllocationView(id, c.key().locationId(), c.key().lpnId(), c.key().lotNo(), take, c.expiry()));
-                remaining = remaining.subtract(take);
+            }
+            if (hasFace) {
+                replenishments.onDemand(siteId, r.ownerId(), r.itemNo());
             }
             return new AllocationResult(r.orderRef(), r.orderLineRef(), r.itemNo(), item.baseUom(), wanted,
                     wanted.subtract(remaining), remaining, views, false);

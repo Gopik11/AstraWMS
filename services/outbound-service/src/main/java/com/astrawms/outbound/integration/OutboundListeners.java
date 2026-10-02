@@ -46,6 +46,26 @@ public class OutboundListeners {
         }
     }
 
+    /**
+     * Backorder recovery (ADR-0019): available stock of an item increased somewhere other than outbound staging.
+     * Inventory decides what is allocable (staging, receiving and QC stock is not), so a receipt at the dock recovers
+     * nothing until it is put away.
+     */
+    @KafkaListener(topics = com.astrawms.common.contracts.InventoryContracts.TOPIC, groupId = "outbound-service.inventory")
+    public void onInventory(ConsumerRecord<String, String> record) {
+        EventEnvelope e = codec.read(record.value());
+        if (!com.astrawms.common.contracts.InventoryContracts.InventoryChanged.TYPE.equals(e.messageType())) {
+            return;
+        }
+        var change = codec.payload(e, com.astrawms.common.contracts.InventoryContracts.InventoryChanged.class);
+        boolean increased = change.lines().stream().anyMatch(l -> l.qtyDelta().signum() > 0
+                && "AVAILABLE".equals(l.status()) && !l.txnType().startsWith("PICK"));
+        if (increased) {
+            process(e, "EVENT", () -> outbound.onStockAvailable(e.siteId(), change.ownerId(), change.itemNo(),
+                    change.operationId()));
+        }
+    }
+
     @KafkaListener(topics = IntegrationContracts.TOPIC_ERP_POSTING_RESULTS, groupId = "outbound-service.posting-results")
     public void onPostingResult(ConsumerRecord<String, String> record) {
         EventEnvelope e = codec.read(record.value());

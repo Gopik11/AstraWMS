@@ -90,7 +90,8 @@ public final class MasterDataDtos {
     public record LocationView(String siteId, String locationId, String zoneId, String locationType,
                                String checkDigit, String erpBucket, String temperatureClass, boolean hazmatAllowed,
                                boolean allowMixedItems, boolean allowMixedLots, BigDecimal maxWeightKg,
-                               BigDecimal maxVolumeM3, Integer pickSeq, LocationStatus status, Instant updatedAt) {
+                               BigDecimal maxVolumeM3, Integer pickSeq, LocationStatus status, Instant updatedAt,
+                               String zoneType) {
     }
 
     /**

@@ -3,7 +3,9 @@ package com.astrawms.task.putaway;
 import com.astrawms.task.projection.Projections;
 import com.astrawms.task.projection.Projections.Item;
 import com.astrawms.task.projection.Projections.Location;
+import com.astrawms.task.projection.Projections.PickFace;
 import com.astrawms.task.projection.Projections.Stock;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -16,22 +18,35 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
 /**
- * Directed putaway (scope §2.3). Strategies are evaluated in order; the first that yields a location wins:
- * <ol>
- *   <li>{@code CONSOLIDATE}: a location already holding the same owner/item (and lot when lots may not mix)
- *       with free LPN capacity;</li>
- *   <li>{@code EMPTY_NEAREST}: an empty location, lowest pick sequence first.</li>
- * </ol>
- * Hard constraints apply before every strategy and also to operator overrides (PUT-001, CCH-001, CCH-003):
- * active location, not inbound staging, temperature class equality (ambient goods only in unclassified
- * locations), hazmat permission, mixed-item / mixed-lot rules, and LPN capacity including reservations held by
- * open tasks, so two pallets are never directed to the same empty slot.
+ * Directed putaway (scope §2.3, ADR-0019). Locations are classified by location type and zone type:
+ * <ul>
+ *   <li><b>inbound staging</b> (dock, door, receiving, returns): stock arriving there gets a putaway task; never a
+ *       target;</li>
+ *   <li><b>never storage</b>: inbound staging, outbound staging ({@code STAGING_OUT}) and shipping zones;</li>
+ *   <li><b>QC</b> zones: the only targets for stock that is not AVAILABLE (quarantine, blocked, damaged), and never for
+ *       AVAILABLE stock;</li>
+ *   <li><b>pick faces</b>: a location with the item's min/max rule; other items never go there; pick zones without a
+ *       rule for the item are skipped too;</li>
+ *   <li><b>reserve</b>: everything else.</li>
+ * </ul>
+ * AVAILABLE stock goes to the item's pick face if the LPN fits under the face's maximum ({@code PICK_FACE}), otherwise
+ * to reserve: a location already holding the item ({@code CONSOLIDATE}), else the nearest empty one
+ * ({@code EMPTY_NEAREST}). Other stock goes to QC the same way ({@code QC_CONSOLIDATE} / {@code QC_EMPTY}); a site
+ * without QC zones stores it like available stock, where its status still keeps it from being allocated.
+ * Hard constraints apply to every candidate and to operator overrides (PUT-001, CCH-001, CCH-003): active,
+ * temperature class, hazmat, mixed items and lots, and LPN capacity including reservations of open tasks.
  */
 @Component
 public class PutawayEngine {
 
-    /** Location types that are inbound staging: never putaway targets, and stock arriving there triggers putaway. */
+    /** Inbound staging location types: never targets; stock arriving there triggers putaway. */
     public static final List<String> STAGING_TYPES = List.of("DOOR", "DOCK", "STAGING", "STAGING_IN");
+    /** Inbound staging zone types (whatever the location type). */
+    public static final List<String> INBOUND_ZONES = List.of("DOCK", "RECEIVING", "RETURNS");
+    private static final List<String> OUTBOUND_TYPES = List.of("STAGING_OUT");
+    private static final List<String> OUTBOUND_ZONES = List.of("SHIPPING", "STAGING");
+    private static final List<String> QC_ZONES = List.of("QC", "QUARANTINE");
+    private static final List<String> PICK_ZONES = List.of("PICK", "FORWARD");
     /** LPN capacity per location type; types not listed hold one LPN. */
     private static final Map<String, Integer> LPN_CAPACITY = Map.of(
             "FLOOR", Integer.MAX_VALUE, "BULK", Integer.MAX_VALUE, "BLOCK_STACK", 20, "SHELF", 4);
@@ -49,6 +64,19 @@ public class PutawayEngine {
     public record Rejection(String code, String reason) {
     }
 
+    public static boolean inboundStaging(Location l) {
+        return STAGING_TYPES.contains(l.locationType()) || INBOUND_ZONES.contains(Objects.requireNonNullElse(l.zoneType(), ""));
+    }
+
+    private static boolean neverStorage(Location l) {
+        return inboundStaging(l) || OUTBOUND_TYPES.contains(l.locationType())
+                || OUTBOUND_ZONES.contains(Objects.requireNonNullElse(l.zoneType(), ""));
+    }
+
+    private static boolean qc(Location l) {
+        return QC_ZONES.contains(Objects.requireNonNullElse(l.zoneType(), ""));
+    }
+
     /**
      * @param reservations open-task reservations per location (excluding the task being planned)
      */
@@ -60,29 +88,60 @@ public class PutawayEngine {
         Map<String, List<Stock>> stockByLocation = projections.stockAtSite(siteId).stream()
                 .collect(Collectors.groupingBy(Stock::locationId));
         Set<String> itemKeys = contents.stream().map(s -> s.ownerId() + "|" + s.itemNo()).collect(Collectors.toSet());
+        boolean available = contents.stream().allMatch(s -> "AVAILABLE".equals(s.status()));
+        List<PickFace> faces = projections.pickFaces(siteId);
+        Set<String> faceLocations = faces.stream().map(PickFace::locationId).collect(Collectors.toSet());
+        // The LPN's own pick face(s): only for a single-item LPN of available stock.
+        Map<String, BigDecimal> ownFaces = new java.util.HashMap<>();
+        if (available && itemKeys.size() == 1) {
+            faces.stream().filter(f -> itemKeys.contains(f.ownerId() + "|" + f.itemNo()))
+                    .forEach(f -> ownFaces.put(f.locationId(), f.maxQty()));
+        }
+        BigDecimal lpnQty = contents.stream().map(Stock::qty).reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        List<Location> locations = projections.activeLocations(siteId);
+        // Non-available stock goes to QC; a site without QC zones stores it normally (its status blocks allocation).
+        boolean toQc = !available && locations.stream().anyMatch(PutawayEngine::qc);
+        List<Location> face = new ArrayList<>();
         List<Location> consolidate = new ArrayList<>();
         List<Location> empty = new ArrayList<>();
-        for (Location loc : projections.storageLocations(siteId, STAGING_TYPES)) {
-            if (excluded.contains(loc.locationId())) {
+        for (Location loc : locations) {
+            if (excluded.contains(loc.locationId()) || neverStorage(loc) || qc(loc) != toQc) {
                 continue;
             }
             List<Stock> there = stockByLocation.getOrDefault(loc.locationId(), List.of());
-            if (check(loc, contents, there, reservations.getOrDefault(loc.locationId(), 0)).isPresent()) {
+            int reserved = reservations.getOrDefault(loc.locationId(), 0);
+            if (check(loc, contents, there, reserved).isPresent()) {
                 continue;
+            }
+            if (ownFaces.containsKey(loc.locationId())) {
+                BigDecimal atFace = there.stream().filter(s -> itemKeys.contains(s.ownerId() + "|" + s.itemNo()))
+                        .map(Stock::qty).reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (atFace.add(lpnQty).compareTo(ownFaces.get(loc.locationId())) <= 0) {
+                    face.add(loc);
+                }
+                continue;
+            }
+            if (faceLocations.contains(loc.locationId()) || PICK_ZONES.contains(Objects.requireNonNullElse(loc.zoneType(), ""))) {
+                continue;   // another item's pick face, or a pick slot without a rule: not reserve storage
             }
             boolean sameItem = there.stream().anyMatch(s -> itemKeys.contains(s.ownerId() + "|" + s.itemNo()));
             if (sameItem) {
                 consolidate.add(loc);
-            } else if (there.isEmpty() && reservations.getOrDefault(loc.locationId(), 0) == 0) {
+            } else if (there.isEmpty() && reserved == 0) {
                 empty.add(loc);
             }
         }
-        // Candidate lists are already in pick-sequence order (storageLocations sorts by pick_seq, location_id).
+        // Candidate lists are in travel-path order (pick_seq, location_id).
+        String prefix = toQc ? "QC_" : "";
+        if (!face.isEmpty()) {
+            return Optional.of(new Plan(face.getFirst().locationId(), "PICK_FACE"));
+        }
         if (!consolidate.isEmpty()) {
-            return Optional.of(new Plan(consolidate.getFirst().locationId(), "CONSOLIDATE"));
+            return Optional.of(new Plan(consolidate.getFirst().locationId(), prefix + "CONSOLIDATE"));
         }
         if (!empty.isEmpty()) {
-            return Optional.of(new Plan(empty.getFirst().locationId(), "EMPTY_NEAREST"));
+            return Optional.of(new Plan(empty.getFirst().locationId(), toQc ? "QC_EMPTY" : "EMPTY_NEAREST"));
         }
         return Optional.empty();
     }
@@ -93,8 +152,11 @@ public class PutawayEngine {
         if (loc.isEmpty()) {
             return Optional.of(new Rejection("TSK_LOCATION_UNKNOWN", "Location " + locationId + " is not known"));
         }
-        if (STAGING_TYPES.contains(loc.get().locationType())) {
-            return Optional.of(new Rejection("TSK_LOCATION_NOT_ALLOWED", locationId + " is an inbound staging location"));
+        if (inboundStaging(loc.get())) {
+            return reject("TSK_LOCATION_NOT_ALLOWED", locationId + " is an inbound staging location");
+        }
+        if (neverStorage(loc.get())) {
+            return reject("TSK_LOCATION_NOT_ALLOWED", locationId + " is an outbound staging / shipping location");
         }
         return check(loc.get(), contents, projections.stockAt(siteId, locationId), reservationsThere);
     }
