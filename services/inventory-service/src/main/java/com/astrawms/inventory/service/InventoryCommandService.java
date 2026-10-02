@@ -242,13 +242,16 @@ public class InventoryCommandService {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             BigDecimal wanted = toBase(item, r.qty(), r.uom());
             String lot = blank(r.lotNo()) ? null : r.lotNo().trim();
-            AllocationPolicies.Policy policy = policies.of(siteId);
+            AllocationPolicies.Policy policy = policies.of(siteId, r.ownerId());
             boolean fefo = r.rotation() == null ? policy.fefo(item.lotControlled()) : r.rotation() == Rotation.FEFO;
             boolean faceFirst = policy.pickFaceFirst();
             AllocationPolicies.FullLpn fullLpn = policy.fullLpn();
             boolean hasFace = replenishments.hasPickFace(siteId, r.ownerId(), r.itemNo());
             List<AllocationRepository.Candidate> candidates = allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
                     r.minExpiryDate(), fefo, r.excludeLocationIds());
+            if (policy.lotAffinity() && item.lotControlled() && lot == null) {
+                candidates = singleLot(candidates, wanted);
+            }
             Map<AllocationRepository.Candidate, BigDecimal> free = new LinkedHashMap<>();
             candidates.forEach(c -> free.put(c, c.free()));
             BigDecimal remaining = wanted;
@@ -293,6 +296,19 @@ public class InventoryCommandService {
             return new AllocationResult(r.orderRef(), r.orderLineRef(), r.itemNo(), item.baseUom(), wanted,
                     wanted.subtract(remaining), remaining, views, false, why[0], why[1]);
         });
+    }
+
+    /**
+     * Lot affinity (ADR-0021): only the candidates of the first lot, in rotation order, whose free stock covers the
+     * whole line; all candidates (lots mixed) when no single lot can.
+     */
+    private static List<AllocationRepository.Candidate> singleLot(List<AllocationRepository.Candidate> candidates,
+                                                                  BigDecimal wanted) {
+        Map<String, BigDecimal> byLot = new LinkedHashMap<>();
+        candidates.forEach(c -> byLot.merge(c.key().lotNo(), c.free(), BigDecimal::add));
+        return byLot.entrySet().stream().filter(e -> e.getValue().compareTo(wanted) >= 0).findFirst()
+                .map(e -> candidates.stream().filter(c -> c.key().lotNo().equals(e.getKey())).toList())
+                .orElse(candidates);
     }
 
     /**

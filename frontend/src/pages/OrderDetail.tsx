@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { get, post, type Row } from '../api'
+import { get, post, put, type Row } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Card, ErrorBox, Field, Page, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
@@ -8,6 +8,23 @@ interface OrderDetailView extends Row {
   status: string
   lines: Row[]
   allocations: Row[]
+}
+
+/** Release policy of one order (ADR-0021): priority, and ship complete while nothing is released to picking. */
+function OrderPolicy({ base, order, onDone }: { base: string; order: OrderDetailView; onDone: () => void }) {
+  const [priority, setPriority] = useState(String(order.priority ?? 50))
+  const [complete, setComplete] = useState(order.ship_complete === true)
+  const save = useAction(() => put(`${base}/policy`, { priority: Number(priority), shipComplete: complete }))
+  return (
+    <div className="row">
+      <Field label="Priority" hint="0–100, higher first"><input type="number" min={0} max={100} value={priority}
+                                                              onChange={(e) => setPriority(e.target.value)} size={4} /></Field>
+      <label className="check"><input type="checkbox" checked={complete} disabled={order.status === 'RELEASED'}
+                                      onChange={(e) => setComplete(e.target.checked)} /> Ship complete (no partial shipment)</label>
+      <button disabled={save.busy} onClick={async () => { if (await save.run()) onDone() }}>Save</button>
+      <ErrorBox error={save.error} />
+    </div>
+  )
 }
 
 /** One outbound delivery: lines, allocations and picks; ship and repost (IF-OB-003). */
@@ -31,11 +48,17 @@ export default function OrderDetail() {
               <span>Carrier {String(d.carrier_scac ?? '—')}</span>
               {d.ship_to_name != null && <span>Customer {String(d.ship_to_name)}</span>}
               {d.wave_no != null && <span>Wave {String(d.wave_no)}</span>}
+              {d.cutoff_at != null && <span>Cutoff {fmtDate(d.cutoff_at)}</span>}
+              <span>Priority {String(d.priority ?? 50)}</span>
+              {d.ship_complete === true && <span><Badge value="SHIP COMPLETE" /></span>}
               <span>Pick LPN {String(d.pick_lpn)} at {String(d.staging_location)}</span>
               {d.tracking_no != null && <span>Tracking {String(d.tracking_no)}</span>}
               {d.erp_document != null && <span>ERP document {String(d.erp_document)}</span>}
             </div>
             {d.erp_error_text != null && <div className="alert error">ERP: {String(d.erp_error_text)}</div>}
+            {hasRole('SUPERVISOR') && ['POOLED', 'BACKORDERED', 'RELEASED'].includes(d.status) && (
+              <OrderPolicy base={base} order={d} onDone={detail.reload} />
+            )}
           </Card>
           <Card title="Lines">
             <Table rows={d.lines} columns={[

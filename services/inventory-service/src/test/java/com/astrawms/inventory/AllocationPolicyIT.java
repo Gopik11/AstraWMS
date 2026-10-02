@@ -134,6 +134,33 @@ class AllocationPolicyIT extends IntegrationTest {
     }
 
     @Test
+    void ownerPolicyWithLotAffinityFillsALineFromOneLot_ADR0021() throws Exception {
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"LOT-A","expiryDate":"2027-01-01","qty":3,"uom":"EA","locationId":"A-01-01"}""")
+                .andExpect(status().isCreated());
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"LOT-B","expiryDate":"2028-01-01","qty":10,"uom":"EA","locationId":"A-01-02"}""")
+                .andExpect(status().isCreated());
+        String line = """
+                {"orderRef":"%s","orderLineRef":"000010","ownerId":"ACME","itemNo":"SKU-LOT","qty":5,"uom":"EA"}""";
+        policy("{\"ownerId\":\"acme\",\"lotAffinity\":true}", Roles.SOLUTION_ADMIN)
+                .andExpect(jsonPath("$.ownerId", is("ACME"))).andExpect(jsonPath("$.lotAffinity", is(true)));
+        getJson("/allocation-policy").andExpect(jsonPath("$.lotAffinity", is(false)));          // the site's is unchanged
+        getJson("/allocation-policy/owners").andExpect(jsonPath("$[*].ownerId", contains("ACME")));
+        // LOT-A (earliest expiry) cannot cover 5: the line comes whole from LOT-B.
+        post("/allocations", line.formatted("SO-AF1"))
+                .andExpect(jsonPath("$.allocations", hasSize(1)))
+                .andExpect(jsonPath("$.allocations[0].lotNo", is("LOT-B")));
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .delete("/api/v1/sites/" + SITE + "/inventory/allocation-policy/owners/ACME")
+                        .with(TestTokens.as(tenant, "ada", Roles.SOLUTION_ADMIN)))
+                .andExpect(status().isNoContent());
+        // Site policy (plain FEFO): LOT-A first, the rest from LOT-B.
+        post("/allocations", line.formatted("SO-AF2"))
+                .andExpect(jsonPath("$.allocations[*].lotNo", contains("LOT-A", "LOT-B")));
+    }
+
+    @Test
     void shortfallsSayWhy_ADR0021() throws Exception {
         allocate("SO-W1", "2").andExpect(jsonPath("$.shortReason", is("NO_STOCK")));
         receive("SKU-EA", "4", "EA", "A-01-01", "LPN-Q", null).andExpect(status().isCreated());
