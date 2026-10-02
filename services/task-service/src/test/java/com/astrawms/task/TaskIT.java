@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.contracts.InventoryContracts;
@@ -662,6 +663,40 @@ class TaskIT {
         return tasks(post("/api/v1/sites/DC1/tasks/" + id + "/pick"), """
                 {"checkDigit":"%s","qty":%s%s%s}""".formatted(checkDigit, qty,
                 item == null ? "" : ",\"item\":\"" + item + "\"", extra));
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 labor
+
+    @Test
+    void tasksGoOnlyToOperatorsWithTheSkillAndEquipmentAndTheBoardMeasuresAgainstStandard() throws Exception {
+        received("LPN-L", "SKU-1");
+        String id = awaitTask("LPN-L", "RELEASED");                     // DOCK-1 -> A-02, both in zone Z
+        tasks(put("/api/v1/sites/DC1/tasks/zone-equipment/z"), "{\"equipment\":\"reach_truck\"}")
+                .andExpect(jsonPath("$[0].equipment", is("REACH_TRUCK")));
+        tasks(put("/api/v1/sites/DC1/tasks/standards/PUTAWAY"), "{\"baseSeconds\":90,\"requiredSkill\":\"forklift\"}")
+                .andExpect(jsonPath("$[?(@.taskType == 'PUTAWAY')].requiredSkill", org.hamcrest.Matchers.contains("FORKLIFT")));
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(status().isNoContent());   // no profile
+        tasks(put("/api/v1/sites/DC1/tasks/operators/rita"), "{\"equipment\":[\"reach_truck\"],\"skills\":[]}")
+                .andExpect(jsonPath("$.equipment", is("REACH_TRUCK")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(status().isNoContent());   // lacks the skill
+        tasks(put("/api/v1/sites/DC1/tasks/operators/rita"), "{\"equipment\":[\"REACH_TRUCK\"],\"skills\":[\"FORKLIFT\"]}")
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita)).andExpect(jsonPath("$.id", is(id)));
+
+        tasks(get("/api/v1/sites/DC1/tasks/labor"))
+                .andExpect(jsonPath("$.activeOperators", is(1)))
+                .andExpect(jsonPath("$.operators[0].userId", is("rita")))
+                .andExpect(jsonPath("$.operators[0].current.taskType", is("PUTAWAY")))
+                .andExpect(jsonPath("$.operators[0].current.expectedMinutes", is(1.5)));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/confirm").with(rita).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"lpnId\":\"LPN-L\",\"locationId\":\"A-02\",\"checkDigit\":\"22\"}"))
+                .andExpect(jsonPath("$.status", is("COMPLETED")));
+        tasks(get("/api/v1/sites/DC1/tasks/labor"))
+                .andExpect(jsonPath("$.operators[0].completed", is(1)))
+                .andExpect(jsonPath("$.operators[0].standardMinutes", is(1.5)))
+                .andExpect(jsonPath("$.operators[0].performancePct").isNumber());
+        mvc.perform(get("/api/v1/sites/DC1/tasks/labor").with(rita)).andExpect(status().isForbidden());
     }
 
     // ------------------------------------------------------------------ ADR-0021 slotting and MOVE tasks

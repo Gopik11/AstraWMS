@@ -51,6 +51,7 @@ public class TaskService {
     private final Clock clock;
     private final com.astrawms.task.inbound.InboundClient inbound;
     private final tools.jackson.databind.json.JsonMapper json;
+    private final Labor labor;
 
     /**
      * Which task types each RF role works (ADR-0019); SUPERVISOR works all. A user with several roles gets the union.
@@ -63,7 +64,8 @@ public class TaskService {
 
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
                        OutboxWriter outbox, Clock clock, com.astrawms.task.inbound.InboundClient inbound,
-                       tools.jackson.databind.json.JsonMapper json) {
+                       tools.jackson.databind.json.JsonMapper json, Labor labor) {
+        this.labor = labor;
         this.inbound = inbound;
         this.json = json;
         this.jdbc = jdbc;
@@ -791,6 +793,8 @@ public class TaskService {
             return Optional.empty();
         }
         AccessScope scope = AccessScope.current();
+        // ADR-0021: the skill a task type requires and the equipment its zones require (labor policy).
+        String[] profile = labor.profileOfCurrentUser();
         Optional<UUID> next = jdbc.sql("""
                         select t.id from task t
                         left join ref_location f on f.site_id = t.site_id and f.location_id = t.from_location
@@ -799,8 +803,16 @@ public class TaskService {
                           and not (:user = any(t.excluded_users))
                           and (:zonesAll or t.task_type = 'RECEIVE' or exists (select 1 from ref_location l where l.site_id = t.site_id
                                  and l.location_id in (t.from_location, t.target_location) and l.zone_id in (:zones)))
+                          and not exists (select 1 from task_standard s where s.site_id = t.site_id
+                                 and s.task_type = t.task_type and s.required_skill is not null
+                                 and not (s.required_skill = any(string_to_array(:skills, ','))))
+                          and not exists (select 1 from ref_location l join zone_equipment z
+                                 on z.site_id = l.site_id and z.zone_id = l.zone_id
+                                 where l.site_id = t.site_id and l.location_id in (t.from_location, t.target_location)
+                                   and not (z.equipment = any(string_to_array(:equipment, ','))))
                         order by t.priority desc, f.pick_seq nulls last, t.from_location, t.created_at
                         limit 1 for update of t skip locked""")
+                .param("equipment", profile[0]).param("skills", profile[1])
                 .param("site", siteId).param("user", user).param("types", types)
                 .param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("zonesAll", scope.zonesAll()).param("zones", scope.zoneList())

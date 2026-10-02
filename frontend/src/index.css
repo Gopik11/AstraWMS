@@ -150,3 +150,5 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
 .rf .short-pick { border: 1px solid var(--warn, #b54708); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .tile-late { border-color: var(--danger, #b42318); }
 .tile-late .tile-n { color: var(--danger, #b42318); }
+.text-late { color: var(--danger, #b42318); font-weight: 600; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
