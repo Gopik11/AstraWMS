@@ -1,5 +1,6 @@
 package com.astrawms.inventory.service;
 
+import com.astrawms.common.contracts.InventoryContracts.PickFaceChanged;
 import com.astrawms.common.contracts.InventoryContracts.ReplenRequested;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.OutboxWriter;
@@ -21,9 +22,11 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Min/max replenishment (§7): when the stock of an item at a forward location (one with a rule) falls to its minimum,
- * stock up to the maximum is reserved in reserve locations in rotation order (FEFO, RPL-001) and an RF task moves it.
- * Evaluated after every inventory operation that takes stock out of a location, and on demand.
+ * Min/max replenishment (§7): when the free stock of an item at a forward location (one with a rule) falls to its
+ * minimum, stock up to the maximum is reserved in reserve locations in rotation order (FEFO, RPL-001) and an RF task
+ * moves it. Free stock is on hand minus what open allocations hold plus replenishments under way, so an allocation that
+ * would empty the face triggers it before the pick (demand replenishment, ADR-0019). Evaluated after every inventory
+ * operation that takes stock out of a location, after allocations, and on request.
  */
 @Component
 public class Replenishments {
@@ -38,9 +41,12 @@ public class Replenishments {
     private final OutboxWriter outbox;
     private final Clock clock;
     private final int priority;
+    private final com.astrawms.inventory.events.InventoryEvents.Topics topics;
 
     public Replenishments(JdbcClient jdbc, AllocationRepository allocations, ReferenceRepository refs, OutboxWriter outbox,
-                          Clock clock, @Value("${astra.inventory.replenishment.priority:70}") int priority) {
+                          Clock clock, @Value("${astra.inventory.replenishment.priority:70}") int priority,
+                          com.astrawms.inventory.events.InventoryEvents.Topics topics) {
+        this.topics = topics;
         this.jdbc = jdbc;
         this.allocations = allocations;
         this.refs = refs;
@@ -72,6 +78,10 @@ public class Replenishments {
                 .param("owner", ownerId).param("item", itemNo).param("min", min).param("max", max)
                 .param("active", active).param("user", TenantContext.require().userId())
                 .param("now", Timestamp.from(clock.instant())).update();
+        // The task service directs putaway to the item's pick faces (ADR-0019).
+        outbox.append(new OutboxWriter.Message(topics.inventoryEvents(), PickFaceChanged.TYPE, PickFaceChanged.VERSION,
+                null, siteId, ownerId, siteId + ":" + locationId,
+                new PickFaceChanged(locationId, ownerId, itemNo, min, max, active, clock.instant())));
         if (active) {
             evaluate(siteId, locationId, ownerId, itemNo, "MIN_MAX");
         }
@@ -111,6 +121,21 @@ public class Replenishments {
         }
     }
 
+    /** Whether the item has an active pick face at the site. */
+    public boolean hasPickFace(String siteId, String ownerId, String itemNo) {
+        return jdbc.sql("""
+                        select exists (select 1 from replen_rule where site_id = :site and owner_id = :owner
+                          and item_no = :item and active)""")
+                .param("site", siteId).param("owner", ownerId).param("item", itemNo).query(Boolean.class).single();
+    }
+
+    /** After an allocation of the item: replenish every face of it whose free stock fell to its minimum. */
+    void onDemand(String siteId, String ownerId, String itemNo) {
+        jdbc.sql("select location_id from replen_rule where site_id = :site and owner_id = :owner and item_no = :item and active")
+                .param("site", siteId).param("owner", ownerId).param("item", itemNo).query(String.class).list()
+                .forEach(loc -> evaluate(siteId, loc, ownerId, itemNo, "MIN_MAX"));
+    }
+
     /** Evaluates every active rule of the site (top-off run); returns the replenishments created. */
     @Transactional
     public int evaluateAll(String siteId) {
@@ -136,8 +161,9 @@ public class Replenishments {
             return 0;
         }
         BigDecimal onHand = sum("""
-                select coalesce(sum(qty), 0) from inventory_balance where site_id = :site and location_id = :loc
-                  and owner_id = :owner and item_no = :item and stock_status = 'AVAILABLE'""", siteId, locationId, ownerId, itemNo);
+                select coalesce(sum(qty - allocated_qty), 0) from inventory_balance where site_id = :site
+                  and location_id = :loc and owner_id = :owner and item_no = :item and stock_status = 'AVAILABLE'""",
+                siteId, locationId, ownerId, itemNo);
         BigDecimal incoming = sum("""
                 select coalesce(sum(qty), 0) from replenishment where site_id = :site and location_id = :loc
                   and owner_id = :owner and item_no = :item and status = 'OPEN'""", siteId, locationId, ownerId, itemNo);
@@ -156,6 +182,9 @@ public class Replenishments {
         for (AllocationRepository.Candidate c : allocations.candidates(siteId, ownerId, itemNo, null, null, true, excluded)) {
             if (wanted.signum() <= 0) {
                 break;
+            }
+            if (c.face()) {
+                continue;   // other pick faces are replenished, not sources
             }
             BigDecimal take = c.free().min(wanted);
             allocations.reserve(c.key(), take);

@@ -42,6 +42,27 @@ public class InventoryQueryService {
                 "Serial " + serialNo + " of item " + itemNo + " is not known"));
     }
 
+    /**
+     * Stock still at inbound staging (dock, receiving, returns): it is not allocable until it is put away, so a
+     * growing number here means putaway is falling behind (overview, ADR-0019).
+     */
+    public List<Map<String, Object>> inboundStaging(String siteId) {
+        StringBuilder sql = new StringBuilder("""
+                select b.location_id, b.owner_id, b.item_no, b.lot_no, b.lpn_id, b.stock_status, b.qty, b.receipt_date
+                from inventory_balance b join ref_location l on l.site_id = b.site_id and l.location_id = b.location_id
+                where b.site_id = :site and b.qty > 0
+                  and (l.location_type in ('DOOR', 'DOCK', 'STAGING', 'STAGING_IN')
+                       or coalesce(l.zone_type, '') in ('DOCK', 'RECEIVING', 'RETURNS'))""");
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("site", siteId);
+        if (!com.astrawms.common.security.AccessScope.current().ownersAll()) {
+            sql.append(" and b.owner_id in (:owners)");
+            params.put("owners", com.astrawms.common.security.AccessScope.current().ownerList());
+        }
+        sql.append(" order by b.receipt_date limit 500");
+        return jdbc.sql(sql.toString()).params(params).query().listOfRows();
+    }
+
     public record BalanceFilter(String ownerId, String itemNo, String lotNo, String lpnId, String locationId,
                                 StockStatus status) {
     }

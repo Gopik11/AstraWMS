@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end replenishment smoke test (§7 min/max) through the gateway with Keycloak tokens:
-#   rule on forward location F-01 (min 3, max 12) -> an order picks F-01 down to 2 -> replenishment from reserve
-#   R-01 (FEFO) -> RF REPLEN task confirmed with F-01's check digit -> F-01 back at 12, reserve reduced.
+# End-to-end replenishment smoke test (§7 min/max, ADR-0019 demand replenishment) through the gateway:
+#   rule on forward location F-01 (min 3, max 12) -> an order of 4 is allocated from F-01, leaving 2 free -> the
+#   replenishment from reserve R-01 is created at once and comes first on RF -> then the pick -> F-01 at 12.
 set -euo pipefail
 
 GW="${GATEWAY_URL:-http://localhost:8080}"
@@ -58,24 +58,25 @@ expect 201 -X POST "$GW/api/v1/sites/DC1/inventory/receipts" "${ADM[@]}" -H "Ide
   -d '{"ownerId":"ACME","itemNo":"SKU-1","qty":40,"uom":"EA","locationId":"R-01","lpnId":"LPN-RES"}'
 expect 200 -X PUT "$GW/api/v1/sites/DC1/inventory/replenishment-rules/F-01/ACME/SKU-1" "${ADM[@]}" -d '{"minQty":3,"maxQty":12}'
 
-step "Order of 4 picked from F-01 -> F-01 at 2 (below min 3) -> replenishment of 10 from R-01"
+step "Order of 4 allocated from the pick face F-01 -> F-01 free at 2 (below min 3) -> replenishment of 10 from R-01"
+# Demand replenishment (ADR-0019): the allocation itself triggers it, so the REPLEN task comes before the pick.
 expect 202 -X POST "$GW/api/v1/sap/idocs/delvry07" "${ADM[@]}" -d '{"DOCNUM":"0000000000004001","MESTYP":"SHP_OBDLV_SAVE_REPLICA",
  "E1EDL20":{"VBELN":"0080000401","LFART":"LF","WERKS":"1000"},"E1ADRM1":[{"PARTNER_Q":"WE","PARTNER_ID":"C-1"}],
  "E1EDL24":[{"POSNR":"000010","MATNR":"SKU-1","LFIMG":"4","VRKME":"ST"}]}'
-next_task P PICK
-task="$(json "['id']" <<<"$BODY")"; from="$(json "['fromLocation']" <<<"$BODY")"
-[[ "$from" == "F-01" ]] || fail "expected the pick from F-01 (oldest stock), got $from"
-expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit F-01)\",\"qty\":4}"
 wait_for "replenishment" sh -c "curl -sf '$GW/api/v1/sites/DC1/inventory/replenishments?status=OPEN' -H '${ADM[1]}' | grep -q F-01"
 expect 200 "$GW/api/v1/sites/DC1/inventory/replenishments?status=OPEN" "${ADM[@]}"
 echo "Replenishment: $(json "[0]['qty']" <<<"$BODY") from $(json "[0]['source_location']" <<<"$BODY") to $(json "[0]['location_id']" <<<"$BODY")"
 
-step "RF: REPLEN task -> drop at F-01 (check digit) -> F-01 at 12"
+step "RF: REPLEN task first (higher priority) -> drop at F-01; then the pick of 4 from F-01 -> F-01 at 12"
 next_task P REPLEN
 task="$(json "['id']" <<<"$BODY")"
 expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/replenish" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit F-01)\"}"
+next_task P PICK
+task="$(json "['id']" <<<"$BODY")"; from="$(json "['fromLocation']" <<<"$BODY")"
+[[ "$from" == "F-01" ]] || fail "expected the pick from the pick face F-01, got $from"
+expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit F-01)\",\"qty\":4}"
 [[ "$(qty_at F-01)" == "12" ]] || fail "F-01 should hold 12, holds $(qty_at F-01)"
 [[ "$(qty_at R-01)" == "30" ]] || fail "R-01 should hold 30, holds $(qty_at R-01)"
-echo "F-01 replenished to 12; R-01 down to 30"
+echo "F-01 replenished before the pick and holds 12; R-01 down to 30"
 
 printf '\nREPLENISHMENT SMOKE TEST PASSED (tenant %s)\n' "$TENANT"

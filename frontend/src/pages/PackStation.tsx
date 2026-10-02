@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { get, post, type Row } from '../api'
+import { get, post, query, type Row } from '../api'
 import { Badge, Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useSite } from '../ui'
 
 interface PackView {
@@ -96,9 +96,43 @@ export default function PackStation() {
             <ErrorBox error={open.error ?? pack.error ?? close.error} />
           </Card>
           {label.result && <ShippingLabel carton={label.result} />}
+          {v.status === 'PICKED' && v.cartons.length > 0 && v.cartons.every((c) => c.status !== 'OPEN') && (
+            <LoadOrder base={base} order={v.erpDocNo} carrier={v.carrierScac} onDone={refresh} />
+          )}
         </div>
       )}
     </Page>
+  )
+}
+
+/**
+ * Packed order onto a trailer (§5.3): the packer adds it to an OPEN load of the same carrier. Loads are opened and
+ * closed by a supervisor (Loads page); a picker only loads.
+ */
+function LoadOrder({ base, order, carrier, onDone }: { base: string; order: string; carrier?: string; onDone: () => void }) {
+  const loads = useAction(() => get<Row[]>(`${base}/loads${query({ status: 'OPEN' })}`))
+  const [loadNo, setLoadNo] = useState('')
+  const add = useAction(() => post<Row>(`${base}/loads/${loadNo}/orders`, { erpDocNo: order }))
+  const open = (loads.result ?? []).filter((l) => !carrier || !l.carrier_scac || l.carrier_scac === carrier)
+  return (
+    <Card title="Load">
+      {!loads.result && <button onClick={() => void loads.run()} disabled={loads.busy}>Show open loads{carrier ? ` for ${carrier}` : ''}</button>}
+      {loads.result && open.length === 0 && <p className="muted">No open load for {carrier ?? 'this carrier'}; ask a supervisor to open one.</p>}
+      {open.length > 0 && (
+        <div className="row">
+          <Field label="Open load">
+            <select value={loadNo} onChange={(e) => setLoadNo(e.target.value)}>
+              <option value="">Choose…</option>
+              {open.map((l) => <option key={String(l.load_no)} value={String(l.load_no)}>
+                {String(l.load_no)} · {String(l.carrier_scac ?? '')} · door {String(l.door ?? '—')}</option>)}
+            </select>
+          </Field>
+          <button className="primary" disabled={!loadNo || add.busy} onClick={async () => { if (await add.run()) onDone() }}>Add to load</button>
+        </div>
+      )}
+      <ErrorBox error={loads.error ?? add.error} />
+      <Success>{add.result && `Order ${order} is on load ${loadNo}`}</Success>
+    </Card>
   )
 }
 

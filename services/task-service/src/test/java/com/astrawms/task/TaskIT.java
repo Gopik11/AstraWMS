@@ -117,12 +117,50 @@ class TaskIT {
         }
     }
 
+    /** Records what RF receiving sends to the inbound service. */
+    static class StubInbound implements com.astrawms.task.inbound.InboundClient {
+        record Call(String what, String doc, String key, java.util.Map<String, ?> body) {
+        }
+
+        final List<Call> calls = new CopyOnWriteArrayList<>();
+
+        @Override
+        public tools.jackson.databind.JsonNode receiveAsnItem(String siteId, String docNo, String key, java.util.Map<String, Object> scan) {
+            calls.add(new Call("ASN", docNo, key, scan));
+            return tools.jackson.databind.json.JsonMapper.builder().build().createObjectNode().put("erpDocNo", docNo);
+        }
+
+        @Override
+        public tools.jackson.databind.JsonNode receiveReturnUnit(String siteId, String rmaNo, String key, java.util.Map<String, Object> unit) {
+            calls.add(new Call("RMA", rmaNo, key, unit));
+            return tools.jackson.databind.json.JsonMapper.builder().build().createObjectNode().put("disposition", "RESTOCK");
+        }
+
+        @Override
+        public tools.jackson.databind.JsonNode closeAsn(String siteId, String docNo, java.util.Map<String, String> shortReasons) {
+            calls.add(new Call("CLOSE_ASN", docNo, null, shortReasons == null ? java.util.Map.of() : shortReasons));
+            return tools.jackson.databind.json.JsonMapper.builder().build().createObjectNode().put("status", "CLOSED");
+        }
+
+        @Override
+        public tools.jackson.databind.JsonNode closeReturn(String siteId, String rmaNo) {
+            calls.add(new Call("CLOSE_RMA", rmaNo, null, java.util.Map.of()));
+            return tools.jackson.databind.json.JsonMapper.builder().build().createObjectNode().put("status", "CLOSED");
+        }
+    }
+
     @TestConfiguration
     static class Stubs {
         @Bean
         @Primary
         StubInventory stubInventory() {
             return new StubInventory();
+        }
+
+        @Bean
+        @Primary
+        StubInbound stubInbound() {
+            return new StubInbound();
         }
     }
 
@@ -135,6 +173,8 @@ class TaskIT {
     WebApplicationContext context;
     @Autowired
     StubInventory inventory;
+    @Autowired
+    StubInbound inbound;
     @Autowired
     KafkaTemplate<String, String> kafka;
     @Autowired
@@ -248,7 +288,146 @@ class TaskIT {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
         confirm(id, "LPN-1", "A-01", "33").andExpect(jsonPath("$.strategy", is("OVERRIDE")))
-                .andExpect(jsonPath("$.confirmedLocation", is("A-01")));
+                .andExpect(jsonPath("$.confirmedLocation", is("A-01")))
+                // ADR-0019: the task shows where the LPN went; the engine's suggestion is kept beside it.
+                .andExpect(jsonPath("$.targetLocation", is("A-01")))
+                .andExpect(jsonPath("$.suggestedLocation", is("A-02")));
+        assertThat(inventory.moves.getLast().to()).isEqualTo("A-01");
+        tasks(get("/api/v1/sites/DC1/tasks?q=LPN-1&type=PUTAWAY")).andExpect(jsonPath("$[0].targetLocation", is("A-01")));
+    }
+
+    // ------------------------------------------------------------------ ADR-0019 putaway rules
+
+    @Test
+    void putawayNeverTargetsOutboundStagingOrShipping() throws Exception {
+        location("STAGE-OUT", "STAGING_OUT", null, false, "66", -2, "SHIPPING");
+        location("SHIP-01", "RACK", null, false, "67", -1, "SHIPPING");
+        await(() -> locations() == 6);
+        received("LPN-S", "SKU-1");
+        String id = awaitTask("LPN-S", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + id)).andExpect(jsonPath("$.targetLocation", is("A-02")));
+        String next = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        confirm(next, "LPN-S", "STAGE-OUT", "66").andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
+        confirm(next, "LPN-S", "DOCK-1", "11").andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
+    }
+
+    @Test
+    void availableStockGoesToItsPickFaceFirstThenReserve() throws Exception {
+        location("P-00", "RACK", null, false, "70", -3, "PICK");      // a pick slot without a face for SKU-1: skipped
+        location("P-01", "RACK", null, false, "71", 5, "PICK");
+        await(() -> locations() == 6);
+        send(InventoryContracts.TOPIC, InventoryContracts.PickFaceChanged.TYPE, "DC1:P-01",
+                new InventoryContracts.PickFaceChanged("P-01", "ACME", "SKU-1", new BigDecimal("2"), new BigDecimal("20"),
+                        true, Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_pick_face").query(Integer.class).single()) == 1);
+        received("LPN-P1", "SKU-1");
+        String first = awaitTask("LPN-P1", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + first))
+                .andExpect(jsonPath("$.targetLocation", is("P-01"))).andExpect(jsonPath("$.strategy", is("PICK_FACE")));
+        received("LPN-P2", "SKU-1");                                    // the face is reserved by the first pallet
+        String second = awaitTask("LPN-P2", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + second))
+                .andExpect(jsonPath("$.targetLocation", is("A-02"))).andExpect(jsonPath("$.strategy", is("EMPTY_NEAREST")));
+    }
+
+    @Test
+    void stockThatIsNotAvailableGoesToQc() throws Exception {
+        location("QC-01", "FLOOR", null, false, "80", 9, "QC");
+        await(() -> locations() == 5);
+        send(InventoryContracts.TOPIC, InventoryChanged.TYPE, "DC1:SKU-1", new InventoryChanged(UUID.randomUUID(), "W1",
+                "TEST", "ACME", "SKU-1", List.of(new InventoryChanged.Line("RECEIPT", "", "LPN-Q", "DOCK-1", "QI",
+                new BigDecimal("1"), new BigDecimal("1"))), Instant.now()));
+        String id = awaitTask("LPN-Q", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + id))
+                .andExpect(jsonPath("$.targetLocation", is("QC-01"))).andExpect(jsonPath("$.strategy", is("QC_EMPTY")));
+        received("LPN-OK", "SKU-1");                                    // available stock never goes to QC
+        String ok = awaitTask("LPN-OK", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + ok)).andExpect(jsonPath("$.targetLocation", is("A-02")));
+    }
+
+    @Test
+    void stockArrivingAtAReturnsLocationGetsAPutawayTask() throws Exception {
+        location("RET-01", "FLOOR", null, false, "90", 0, "RETURNS");
+        await(() -> locations() == 5);
+        stockEvent(UUID.randomUUID(), "SKU-1", "RECEIPT", "R9000001-1", "RET-01", "1", "1");
+        String id = awaitTask("R9000001-1", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + id))
+                .andExpect(jsonPath("$.fromLocation", is("RET-01"))).andExpect(jsonPath("$.targetLocation", is("A-02")));
+    }
+
+    // ------------------------------------------------------------------ ADR-0019 RF receiving and role routing
+
+    @Test
+    void receiveTaskGuidesTheReceiverAndPostsToInbound() throws Exception {
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:1800001", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("ASN", "1800001",
+                        "ACME", "V-100", Instant.now(), List.of(new com.astrawms.common.contracts.ReceivingContracts
+                        .ReceiveRequested.Line("000010", "SKU-1", new BigDecimal("24"), "EA", null)), 40));
+        await(() -> receiveTasks("1800001", "RELEASED") == 1);
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isNoContent());                     // pickers do not receive
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita))
+                .andExpect(jsonPath("$.taskType", is("RECEIVE")))
+                .andExpect(jsonPath("$.docNo", is("1800001")))
+                .andExpect(jsonPath("$.expectedLines[0].itemNo", is("SKU-1")))
+                .andReturn().getResponse().getContentAsString(), "$.id");
+        String scan = """
+                {"scanId":"%s","docNo":"%s","itemNo":"SKU-1","qty":24,"uom":"EA","lpnId":"LPN1800001",
+                 "locationId":"%s","checkDigit":"%s"}""";
+        receive(rita, id, scan.formatted("s1", "1800002", "DOCK-1", "11"))
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("TSK_WRONG_DOCUMENT")));
+        receive(rita, id, scan.formatted("s1", "1800001", "A-02", "22"))
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
+        receive(rita, id, scan.formatted("s1", "1800001", "DOCK-1", "99"))
+                .andExpect(status().isUnprocessableContent()).andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));
+        assertThat(inbound.calls).isEmpty();
+        receive(rita, id, scan.formatted("s1", "1800001", "DOCK-1", "11"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.task.scans", is(1)))
+                .andExpect(jsonPath("$.task.status", is("ASSIGNED")));
+        StubInbound.Call call = inbound.calls.getFirst();
+        assertThat(call.what()).isEqualTo("ASN");
+        assertThat(call.key()).isEqualTo("RF-s1");
+        assertThat(call.body().get("itemNo")).isEqualTo("SKU-1");
+        assertThat(call.body().get("lpnId")).isEqualTo("LPN1800001");
+        assertThat(call.body().get("locationId")).isEqualTo("DOCK-1");
+
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/receive/close").with(rita)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.task.status", is("COMPLETED")));
+        assertThat(inbound.calls.getLast().what()).isEqualTo("CLOSE_ASN");
+
+        // A document closed or cancelled on the desktop ends its open RF task.
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:9000001", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("RMA", "9000001",
+                        "ACME", "Customer One", null, List.of(), 40));
+        await(() -> receiveTasks("9000001", "RELEASED") == 1);
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveEnded.TYPE,
+                "DC1:9000001", new com.astrawms.common.contracts.ReceivingContracts.ReceiveEnded("RMA", "9000001", "CLOSED"));
+        await(() -> receiveTasks("9000001", "CANCELLED") == 1);
+    }
+
+    @Test
+    void operatorsOnlyGetTheTaskTypesOfTheirRoles() throws Exception {
+        received("LPN-R", "SKU-1");
+        awaitTask("LPN-R", "RELEASED");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(jsonPath("$.taskType", is("PUTAWAY")));
+    }
+
+    private ResultActions receive(org.springframework.test.web.servlet.request.RequestPostProcessor who, String id,
+                                  String body) throws Exception {
+        return mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/receive").with(who)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private int receiveTasks(String doc, String status) {
+        return asTenant(() -> jdbc.sql("select count(*) from task where task_type = 'RECEIVE' and doc_no = :d and status = :s")
+                .param("d", doc).param("s", status).query(Integer.class).single());
     }
 
     @Test
@@ -477,9 +656,14 @@ class TaskIT {
 
     private void location(String id, String type, String temperature, boolean hazmat, String checkDigit, int seq)
             throws Exception {
+        location(id, type, temperature, hazmat, checkDigit, seq, null);
+    }
+
+    private void location(String id, String type, String temperature, boolean hazmat, String checkDigit, int seq,
+                          String zoneType) throws Exception {
         send(MasterDataEvents.TOPIC, MasterDataEvents.LOCATION_UPSERTED, "DC1:" + id,
-                new LocationUpserted("DC1", id, "Z", type, "0001", temperature, hazmat, true, true, "ACTIVE",
-                        Instant.now(), checkDigit, seq));
+                new LocationUpserted("DC1", id, zoneType == null ? "Z" : zoneType, type, "0001", temperature, hazmat, true,
+                        true, "ACTIVE", Instant.now(), checkDigit, seq, zoneType));
     }
 
     private void send(String topic, String type, String key, Object payload) throws Exception {

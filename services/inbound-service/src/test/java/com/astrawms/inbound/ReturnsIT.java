@@ -112,9 +112,14 @@ class ReturnsIT {
                 .andExpect(jsonPath("$.stock_status", is("BLOCKED")));
         assertThat(inventory.callsWithKeyPrefix("RET-u-")).hasSize(2);
         assertThat(inventory.callsWithKeyPrefix("RET-u-1").getFirst().command().status()).isEqualTo("AVAILABLE");
+        // ADR-0019: every unit is on an LPN, so it gets a putaway task like a vendor receipt.
+        assertThat(inventory.callsWithKeyPrefix("RET-u-1").getFirst().command().lpnId()).isEqualTo("R" + rma + "-1");
+        assertThat(inventory.callsWithKeyPrefix("RET-u-2").getFirst().command().lpnId()).isEqualTo("R" + rma + "-2");
+        assertThat(outbox("ReceiveRequested").getLast().get("payload").get("docNo").asString()).isEqualTo(rma);
 
         mvc.perform(post("/api/v1/sites/DC1/returns/" + rma + "/close").with(receiver()))
                 .andExpect(jsonPath("$.status", is("CLOSED")));
+        assertThat(outbox("ReceiveEnded").getLast().get("payload").get("kind").asString()).isEqualTo("RMA");
         JsonNode c = outbox(ReturnsContracts.ReturnConfirmation.TYPE).getLast().get("payload");
         assertThat(c.get("rmaNo").asString()).isEqualTo(rma);
         assertThat(c.get("receiptTxnId").asString()).isNotEqualTo(c.get("dispositionTxnId").asString());

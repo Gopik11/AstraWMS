@@ -137,6 +137,31 @@ export function Success({ children }: { children: ReactNode }) {
   return children ? <div className="alert ok" role="status">{children}</div> : null
 }
 
+/** Search input for list pages: searches on Enter or when cleared (the page keeps the term in the URL). */
+export function SearchBox({ value, onSearch, placeholder }: { value: string; onSearch: (v: string) => void; placeholder?: string }) {
+  const [text, setText] = useState(value)
+  useEffect(() => setText(value), [value])
+  return (
+    <form className="search" role="search" onSubmit={(e) => { e.preventDefault(); onSearch(text.trim()) }}>
+      <input type="search" value={text} placeholder={placeholder ?? 'Search'} aria-label="Search"
+             onChange={(e) => { setText(e.target.value); if (!e.target.value) onSearch('') }} />
+    </form>
+  )
+}
+
+/** Reads and updates one URL search parameter, keeping the others. */
+export function useParamSetter(params: URLSearchParams, setParams: (p: URLSearchParams) => void) {
+  return (key: string, value: string) => {
+    const next = new URLSearchParams(params)
+    if (value) {
+      next.set(key, value)
+    } else {
+      next.delete(key)
+    }
+    setParams(next)
+  }
+}
+
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
     <label className="field">

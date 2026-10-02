@@ -212,6 +212,94 @@ public class OutboundService {
     }
 
     // =====================================================================================================
+    // Backorder recovery (ADR-0019)
+    // =====================================================================================================
+
+    private static final List<String> AUTO_RECOVERY = List.of("BACKORDERED", "RELEASED");
+    private static final List<String> MANUAL_RECOVERY = List.of("BACKORDERED", "RELEASED", "PICKED");
+
+    record ShortLine(UUID orderId, String erpDocNo, String ref, String owner, String item, BigDecimal shortQty,
+                     String baseUom, String lot) {
+    }
+
+    /**
+     * Stock of an item became available (receipt into storage, putaway, return restock, positive adjustment,
+     * replenishment): its short lines on BACKORDERED and RELEASED orders are allocated again, the earliest planned
+     * goods issue first, then the highest order priority. A recovered order is RELEASED with pick tasks. Picked orders
+     * are left alone (they may be packed); a supervisor recovers them with {@link #reallocateShorts}.
+     */
+    @Transactional
+    public void onStockAvailable(String siteId, String ownerId, String itemNo, UUID operationId) {
+        for (ShortLine s : shortLines(siteId, ownerId, itemNo, null, AUTO_RECOVERY)) {
+            BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + operationId + "-" + s.erpDocNo() + "-" + s.ref());
+            if (got.compareTo(s.shortQty()) < 0) {
+                break;   // the new stock is used up
+            }
+        }
+    }
+
+    /** Supervisor "Reallocate shorts": tries to allocate every short line of the order now. */
+    @Transactional
+    public Map<String, Object> reallocateShorts(String siteId, String erpDocNo) {
+        Order o = lockOrder(siteId, erpDocNo).orElseThrow(() -> unknown(erpDocNo));
+        if (!MANUAL_RECOVERY.contains(o.status())) {
+            throw ApiException.unprocessable("OUT_NOT_REALLOCATABLE",
+                    "Order " + erpDocNo + " is " + o.status() + "; only BACKORDERED, RELEASED or PICKED orders are reallocated");
+        }
+        boolean loaded = jdbc.sql("select load_id is not null from outbound_order where id = :id").param("id", o.id())
+                .query(Boolean.class).single();
+        if (loaded) {
+            throw ApiException.unprocessable("OUT_ORDER_LOADED", "Order " + erpDocNo + " is on a load; unload it first");
+        }
+        String attempt = UUID.randomUUID().toString().substring(0, 8);
+        BigDecimal recovered = BigDecimal.ZERO;
+        for (ShortLine s : shortLines(siteId, null, null, o.id(), MANUAL_RECOVERY)) {
+            recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref()));
+        }
+        Map<String, Object> result = new HashMap<>(detail(siteId, erpDocNo));
+        result.put("recoveredQty", strip(recovered));
+        return result;
+    }
+
+    private List<ShortLine> shortLines(String siteId, String ownerId, String itemNo, UUID orderId, List<String> statuses) {
+        return jdbc.sql("""
+                        select o.id, o.erp_doc_no, l.erp_line_ref, l.owner_id, l.item_no, l.qty_short, l.base_uom, l.lot_no
+                        from outbound_line l join outbound_order o on o.id = l.order_id
+                        where o.site_id = :site and o.status in (:statuses) and l.qty_short > 0 and l.base_uom is not null
+                          and (cast(:owner as text) is null or l.owner_id = :owner)
+                          and (cast(:item as text) is null or l.item_no = :item)
+                          and (cast(:order as uuid) is null or o.id = :order)
+                        order by o.planned_gi_utc nulls last, o.priority desc, o.created_at, l.erp_line_ref""")
+                .param("site", siteId).param("statuses", statuses).param("owner", ownerId).param("item", itemNo)
+                .param("order", orderId)
+                .query((rs, n) -> new ShortLine(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
+                        rs.getString(4), rs.getString(5), rs.getBigDecimal(6), rs.getString(7), rs.getString(8)))
+                .list();
+    }
+
+    private BigDecimal recover(ShortLine s, List<String> statuses, String key) {
+        Order order = lockOrder(s.orderId());
+        if (!statuses.contains(order.status())) {
+            return BigDecimal.ZERO;
+        }
+        InventoryClient.AllocateResult a = inventory.allocate(order.siteId(), key, order.erpDocNo(), s.ref(), s.owner(),
+                s.item(), s.shortQty(), s.baseUom(), s.lot(), List.of());
+        if (a.allocatedQty().signum() == 0) {
+            return BigDecimal.ZERO;
+        }
+        requestPicks(order, s.ref(), s.owner(), s.item(), a, null);
+        jdbc.sql("""
+                        update outbound_line set qty_allocated = qty_allocated + :got, qty_short = qty_short - :got,
+                            qty_short_pick = least(qty_short_pick, qty_short - :got)
+                        where order_id = :o and erp_line_ref = :ref""")
+                .param("got", a.allocatedQty()).param("o", order.id()).param("ref", s.ref()).update();
+        if (!"RELEASED".equals(order.status())) {
+            setStatus(order.id(), "RELEASED");
+        }
+        return a.allocatedQty();
+    }
+
+    // =====================================================================================================
     // Cancellation (OUT-EX-02)
     // =====================================================================================================
 
@@ -524,11 +612,27 @@ public class OutboundService {
 
     @Transactional(readOnly = true)
     public List<Map<String, Object>> list(String siteId, String status) {
+        return list(siteId, status, null);
+    }
+
+    /**
+     * Orders of a site; {@code q} matches the delivery, the ship-to customer (ID or name) or an item of the order,
+     * case-insensitively. {@code lines_short} counts the lines with quantity still unallocated.
+     */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> list(String siteId, String status, String q) {
+        String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql("""
-                        select erp_doc_no, order_type, status, carrier_scac, planned_gi_utc, shipment_txn_id, erp_document
-                        from outbound_order where site_id = :site and (cast(:status as text) is null or status = :status)
-                        order by planned_gi_utc nulls last, erp_doc_no limit 500""")
-                .param("site", siteId).param("status", status).query().listOfRows();
+                        select o.erp_doc_no, o.order_type, o.status, o.carrier_scac, o.planned_gi_utc, o.shipment_txn_id,
+                               o.erp_document, o.priority, o.ship_to ->> 'name' as ship_to_name,
+                               (select count(*) from outbound_line l where l.order_id = o.id and l.qty_short > 0) as lines_short
+                        from outbound_order o where o.site_id = :site and (cast(:status as text) is null or o.status = :status)
+                          and (cast(:q as text) is null or upper(o.erp_doc_no) like :q
+                               or upper(coalesce(o.ship_to ->> 'name', '')) like :q
+                               or upper(coalesce(o.ship_to ->> 'partnerId', '')) like :q
+                               or exists (select 1 from outbound_line l where l.order_id = o.id and upper(l.item_no) like :q))
+                        order by o.planned_gi_utc nulls last, o.erp_doc_no limit 500""")
+                .param("site", siteId).param("status", status).param("q", like).query().listOfRows();
     }
 
     @Transactional(readOnly = true)
@@ -536,7 +640,8 @@ public class OutboundService {
         Map<String, Object> header = jdbc.sql("""
                         select o.id, o.erp_doc_no, o.order_type, o.revision, o.status, o.carrier_scac, o.staging_location,
                                o.pick_lpn, o.shipment_txn_id, o.tracking_no, o.erp_document, o.erp_error_class,
-                               o.erp_error_text, w.wave_no
+                               o.erp_error_text, w.wave_no, o.priority, o.planned_gi_utc, o.ship_to ->> 'name' as ship_to_name,
+                               o.load_id is not null as loaded
                         from outbound_order o left join outbound_wave w on w.id = o.wave_id
                         where o.site_id = :site and o.erp_doc_no = :doc""")
                 .param("site", siteId).param("doc", erpDocNo).query().listOfRows().stream().findFirst()

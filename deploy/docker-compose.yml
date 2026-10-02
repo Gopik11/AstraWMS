@@ -168,6 +168,7 @@ services:
       SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="task-service" password="kafka-dev";
       DB_NAME: tasks
       INVENTORY_URL: http://inventory-service:8080
+      INBOUND_URL: http://inbound-service:8080
       OIDC_CLIENT_ID: astra-task
       OIDC_CLIENT_SECRET: task-dev-secret
     depends_on:

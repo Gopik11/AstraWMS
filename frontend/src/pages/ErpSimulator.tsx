@@ -18,15 +18,19 @@ const SAP_UOM: Record<string, string> = { EA: 'ST', CS: 'KAR', PAL: 'PAL' }
 
 export default function ErpSimulator() {
   const { hasRole } = useAuth()
+  // The IDoc port accepts only the ERP integration role (as the SAP middleware account would have).
+  const canSend = hasRole('ERP_INTEGRATION')
   return (
     <Page title="ERP simulator (SAP)">
       <div className="alert">Test environments only: these send SAP IDocs as SAP would. Deliveries need the SAP plant mapped
         to a site (Master data → SAP plant → site).</div>
+      {!canSend && <div className="alert">Sending IDocs needs the ERP_INTEGRATION role. You can check IDoc status and
+        {hasRole('SOLUTION_ADMIN') ? ' see what the simulated SAP posted.' : ' nothing else here.'}</div>}
       <div className="grid">
-        <Delivery inbound />
-        <Delivery inbound={false} />
-        <ReturnDelivery />
-        <Cancel />
+        {canSend && <Delivery inbound />}
+        {canSend && <Delivery inbound={false} />}
+        {canSend && <ReturnDelivery />}
+        {canSend && <Cancel />}
         <IdocStatus />
       </div>
       {hasRole('SOLUTION_ADMIN') && <Documents />}

@@ -3,6 +3,7 @@ package com.astrawms.inbound.api;
 import com.astrawms.inbound.api.InboundDtos.CloseRequest;
 import com.astrawms.inbound.api.InboundDtos.ExpectationDetail;
 import com.astrawms.inbound.api.InboundDtos.ExpectationSummary;
+import com.astrawms.inbound.api.InboundDtos.ReceiveItemRequest;
 import com.astrawms.inbound.api.InboundDtos.ReceiveLineRequest;
 import com.astrawms.inbound.api.InboundDtos.ReceiveResult;
 import com.astrawms.inbound.api.InboundDtos.ReceiveSsccRequest;
@@ -36,8 +37,9 @@ public class ReceiptController {
     }
 
     @GetMapping
-    public List<ExpectationSummary> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return scope.filter(siteId, receiving.list(siteId, status), ExpectationSummary::erpDocNo);
+    public List<ExpectationSummary> list(@PathVariable String siteId, @RequestParam(required = false) String status,
+                                         @RequestParam(required = false) String q) {
+        return scope.filter(siteId, receiving.list(siteId, status, q), ExpectationSummary::erpDocNo);
     }
 
     @GetMapping("/{erpDocNo}")
@@ -54,6 +56,16 @@ public class ReceiptController {
                                                      @Valid @RequestBody ReceiveLineRequest body) {
         scope.require(siteId, erpDocNo);
         return respond(receiving.receiveLine(siteId, erpDocNo, lineRef, key, body));
+    }
+
+    /** RF receiving by item scan (ADR-0019): the line is chosen from the item. */
+    @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
+    @PostMapping("/{erpDocNo}/receive-item")
+    public ResponseEntity<ReceiveResult> receiveItem(@PathVariable String siteId, @PathVariable String erpDocNo,
+                                                     @RequestHeader("Idempotency-Key") String key,
+                                                     @Valid @RequestBody ReceiveItemRequest body) {
+        scope.require(siteId, erpDocNo);
+        return respond(receiving.receiveItem(siteId, erpDocNo, body.itemNo(), key, body.line()));
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")

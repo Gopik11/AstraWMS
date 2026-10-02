@@ -36,6 +36,17 @@ public final class InventoryContracts {
     }
 
     /**
+     * A forward pick face (a min/max replenishment rule) was created, changed or deactivated, on {@link #TOPIC}. The
+     * task service keeps the item's fixed pick faces for directed putaway (ADR-0019). Business key
+     * {@code siteId:locationId}.
+     */
+    public record PickFaceChanged(String locationId, String ownerId, String itemNo, BigDecimal minQty,
+                                  BigDecimal maxQty, boolean active, Instant changedAt) {
+        public static final String TYPE = "PickFaceChanged";
+        public static final String VERSION = "1.0";
+    }
+
+    /**
      * {@code InventoryChanged} v1: one message per item touched by an inventory operation, business key
      * {@code siteId:itemNo}. Each line carries the balance key and the quantity after the change, so consumers can
      * maintain an exact projection of stock per location / LPN (event-carried state transfer).

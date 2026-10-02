@@ -112,7 +112,7 @@ export interface Txn {
 
 export interface Task {
   id: string
-  taskType: 'PUTAWAY' | 'PICK' | 'RETURN' | 'COUNT' | 'REPLEN'
+  taskType: 'PUTAWAY' | 'PICK' | 'RETURN' | 'COUNT' | 'REPLEN' | 'RECEIVE'
   status: string
   priority: number
   ownerId: string
@@ -134,6 +134,16 @@ export interface Task {
   countSequence?: number | null
   contents?: { itemNo: string; lotNo: string; qty: number }[]
   createdAt: string
+  completedAt?: string | null
+  confirmedLocation?: string | null
+  /** PUTAWAY: what the engine suggested; targetLocation is where it was actually put once completed. */
+  suggestedLocation?: string | null
+  /** RECEIVE: ASN or RMA, the document, the vendor/customer and what is expected. */
+  receiveKind?: 'ASN' | 'RMA' | null
+  docNo?: string | null
+  partner?: string | null
+  expectedLines?: { lineRef: string; itemNo: string; qty: number; uom: string; lotNo?: string | null }[] | null
+  scans?: number
 }
 
 export interface ReceiptSummary {

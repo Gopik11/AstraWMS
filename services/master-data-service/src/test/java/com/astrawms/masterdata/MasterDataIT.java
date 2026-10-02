@@ -129,7 +129,12 @@ class MasterDataIT {
 
         mvc.perform(get("/api/v1/sites/DC1/locations/A-01-101").with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES)))
                 .andExpect(jsonPath("$.checkDigit", matchesPattern("[1-9][0-9]")))
-                .andExpect(jsonPath("$.erpBucket", is("0001")));
+                .andExpect(jsonPath("$.erpBucket", is("0001")))
+                .andExpect(jsonPath("$.zoneType", is("RESERVE")));
+
+        // Republish (ADR-0019): every location again, so projections built before 1.2 learn the zone type.
+        call(post("/api/v1/sites/DC1/locations/republish"), "").andExpect(jsonPath("$.locationsRepublished", is(24)));
+        assertThat(outbox("LocationUpserted")).hasSize(48);
     }
 
     @Test
@@ -150,6 +155,7 @@ class MasterDataIT {
         JsonNode last = outbox("LocationUpserted").stream()
                 .filter(e -> e.get("businessKey").asString().equals("DC1:L-INHERIT")).toList().getLast();
         assertThat(last.get("payload").get("temperatureClass").asString()).isEqualTo("FROZEN");
+        assertThat(last.get("payload").get("zoneType").asString()).isEqualTo("RESERVE");   // 1.2, ADR-0019
 
         // Unchanged zone update republishes nothing.
         call(put("/api/v1/sites/DC1/zones/STOR"), """
@@ -177,7 +183,7 @@ class MasterDataIT {
                 .andExpect(jsonPath("$.standardCost", is(12.5)));
         JsonNode event = outbox("ItemUpserted").getLast();
         assertThat(event.get("payload").get("standardCost").decimalValue()).isEqualByComparingTo("12.5");
-        assertThat(event.get("schemaVersion").asString()).isEqualTo("1.1");
+        assertThat(event.get("schemaVersion").asString()).isEqualTo("1.2");
     }
 
     @Test

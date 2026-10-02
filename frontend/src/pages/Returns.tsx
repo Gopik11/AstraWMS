@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { get, newIdempotencyKey, post, query, type Row } from '../api'
 import { useAuth } from '../auth'
-import { Badge, Card, ErrorBox, Field, Page, Success, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
+import { Badge, Card, ErrorBox, Field, Page, SearchBox, Success, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 interface ReturnLine {
   erp_line_ref: string
@@ -54,16 +54,20 @@ export default function Returns() {
   const { hasRole } = useAuth()
   const canReceive = hasRole('RECEIVER', 'SUPERVISOR')
   const [status, setStatus] = useState('')
+  const [q, setQ] = useState('')
   const [selected, setSelected] = useState<string>()
-  const list = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns${query({ status })}`), [site, status])
+  const list = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns${query({ status, q })}`), [site, status, q])
   const [customer, setCustomer] = useState('')
   const blind = useAction(() => post<Row>(`/api/v1/sites/${site}/returns`, { customerName: customer || null }))
 
   return (
     <Page title="Customer returns" actions={
-      <select value={status} onChange={(e) => setStatus(e.target.value)}>
-        {STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}
-      </select>
+      <>
+        <SearchBox value={q} onSearch={setQ} placeholder="RMA, customer, item" />
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          {STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}
+        </select>
+      </>
     }>
       {canReceive && (
         <Card title="Return without RMA">

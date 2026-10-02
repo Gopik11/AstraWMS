@@ -88,6 +88,12 @@ public class MasterDataController {
         return locations.upsertLocation(siteId, locationId, body);
     }
 
+    @PreAuthorize("hasRole('SOLUTION_ADMIN')")
+    @PostMapping("/sites/{siteId}/locations/republish")
+    public Map<String, Integer> republish(@PathVariable String siteId) {
+        return Map.of("locationsRepublished", locations.republish(siteId));
+    }
+
     @GetMapping("/sites/{siteId}/locations/{locationId}")
     public LocationView getLocation(@PathVariable String siteId, @PathVariable String locationId) {
         return locations.getLocation(siteId, locationId);

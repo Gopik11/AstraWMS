@@ -63,6 +63,11 @@ public class InboundConfig {
     }
 
     @Bean
+    NewTopic taskRequestsTopic() {
+        return TopicBuilder.name(com.astrawms.common.contracts.OutboundContracts.TOPIC_TASK_REQUESTS).partitions(6).replicas(1).build();
+    }
+
+    @Bean
     NewTopic returnExpectationsTopic() {
         return TopicBuilder.name(com.astrawms.common.contracts.ReturnsContracts.TOPIC_RETURN_EXPECTATIONS).partitions(6).replicas(1).build();
     }

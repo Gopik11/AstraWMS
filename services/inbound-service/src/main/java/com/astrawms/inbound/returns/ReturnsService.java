@@ -66,8 +66,11 @@ public class ReturnsService {
     private final InventoryClient inventory;
     private final OutboxWriter outbox;
     private final Clock clock;
+    private final com.astrawms.inbound.receiving.ReceivingWork work;
 
-    public ReturnsService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, Clock clock) {
+    public ReturnsService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, Clock clock,
+                          com.astrawms.inbound.receiving.ReceivingWork work) {
+        this.work = work;
         this.jdbc = jdbc;
         this.inventory = inventory;
         this.outbox = outbox;
@@ -116,6 +119,7 @@ public class ReturnsService {
                     .param("now", now).update();
             insertLines(id, e.lines());
             ack(envelope, e, null, null);
+            work.rmaReceivable(site, id);          // ADR-0019: an RF receiving task for the RMA
             return;
         }
         Header h = current.get();
@@ -130,11 +134,13 @@ public class ReturnsService {
         if ("CANCEL".equals(e.action())) {
             jdbc.sql("update return_order set status = 'CANCELLED', revision = :rev, updated_at = :now where id = :id")
                     .param("rev", e.revision()).param("now", Timestamp.from(clock.instant())).param("id", h.id()).update();
+            work.ended(site, com.astrawms.common.contracts.ReceivingContracts.KIND_RMA, e.rmaNo(), "CANCELLED");
         } else {
             jdbc.sql("delete from return_line where return_id = :id").param("id", h.id()).update();
             insertLines(h.id(), e.lines());
             jdbc.sql("update return_order set revision = :rev, updated_at = :now where id = :id")
                     .param("rev", e.revision()).param("now", Timestamp.from(clock.instant())).param("id", h.id()).update();
+            work.rmaReceivable(site, h.id());
         }
         ack(envelope, e, null, null);
     }
@@ -167,12 +173,14 @@ public class ReturnsService {
         long n = jdbc.sql("select nextval('blind_return_seq')").query(Long.class).single();
         String rma = "BLIND-%06d".formatted(n);
         Timestamp now = Timestamp.from(clock.instant());
+        UUID id = UUID.randomUUID();
         jdbc.sql("""
                         insert into return_order (id, tenant_id, site_id, rma_no, return_type, revision, source_system,
                             customer_name, status, created_at, updated_at)
                         values (:id, :t, :site, :rma, 'BLIND', 0, 'ASTRAWMS', :name, 'IN_PROGRESS', :now, :now)""")
-                .param("id", UUID.randomUUID()).param("t", TenantContext.tenantId()).param("site", siteId).param("rma", rma)
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("rma", rma)
                 .param("name", customerName).param("now", now).update();
+        work.rmaReceivable(siteId, id);
         return detail(siteId, rma);
     }
 
@@ -235,9 +243,17 @@ public class ReturnsService {
             disposition = "QUARANTINE";
         }
         String status = STOCK_STATUS.get(disposition);
+        // Every unit is put on an LPN, so it gets the same putaway task as a vendor receipt (ADR-0019): restocked
+        // units go to storage, the others to QC. Units without a scanned LPN get one per unit.
+        String lpn = blankToNull(r.lpnId());
+        if (lpn == null) {
+            int n = jdbc.sql("select count(*) from return_unit where return_id = :r").param("r", h.id())
+                    .query(Integer.class).single();
+            lpn = "R" + rmaNo + "-" + (n + 1);
+        }
         InventoryClient.ReceiveResult op = inventory.receive(siteId, "RET-" + idempotencyKey,
                 new InventoryClient.ReceiveCommand(owner, r.itemNo().trim(), blankToNull(r.lotNo()), null, r.qty(), r.uom(),
-                        blankToNull(r.lpnId()), r.locationId().trim(), status, "RMA " + rmaNo, serials));
+                        lpn, r.locationId().trim(), status, "RMA " + rmaNo, serials));
         UUID unitId = UUID.randomUUID();
         Timestamp now = Timestamp.from(clock.instant());
         jdbc.sql("""
@@ -251,7 +267,7 @@ public class ReturnsService {
                 .param("qty", r.qty()).param("uom", r.uom()).param("lot", blankToNull(r.lotNo())).param("serials", pgArray(serials))
                 .param("grade", grade).param("reason", blankToNull(r.returnReasonActual())).param("disp", disposition)
                 .param("status", status).param("wrong", wrongItem).param("sflag", serialFlag).param("over", overRma)
-                .param("loc", r.locationId().trim()).param("lpn", blankToNull(r.lpnId())).param("op", op.operationId())
+                .param("loc", r.locationId().trim()).param("lpn", lpn).param("op", op.operationId())
                 .param("user", TenantContext.require().userId()).param("now", now).update();
         jdbc.sql("update return_order set status = 'IN_PROGRESS', updated_at = :now where id = :id and status = 'EXPECTED'")
                 .param("now", now).param("id", h.id()).update();
@@ -274,6 +290,7 @@ public class ReturnsService {
                             updated_at = :now where id = :id""")
                 .param("r", receiptTxn).param("d", dispositionTxn).param("now", Timestamp.from(now)).param("id", h.id()).update();
         publish(h, receiptTxn, dispositionTxn, now);
+        work.ended(siteId, com.astrawms.common.contracts.ReceivingContracts.KIND_RMA, rmaNo, "CLOSED");
         return detail(siteId, rmaNo);
     }
 
@@ -344,7 +361,14 @@ public class ReturnsService {
 
     @Transactional(readOnly = true)
     public List<Map<String, Object>> list(String siteId, String status) {
+        return list(siteId, status, null);
+    }
+
+    /** {@code q} matches the RMA number, customer or an item on the RMA (case-insensitive). */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> list(String siteId, String status, String q) {
         AccessScope scope = AccessScope.current();
+        String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql("""
                         select r.rma_no, r.return_type, r.status, r.customer_name, r.expected_arrival_utc, r.erp_document,
                                r.erp_error_text, r.created_at,
@@ -353,8 +377,11 @@ public class ReturnsService {
                         from return_order r
                         where r.site_id = :site and (cast(:status as text) is null or r.status = :status)
                           and (:all or not exists (select 1 from return_line l where l.return_id = r.id and l.owner_id not in (:owners)))
+                          and (cast(:q as text) is null or upper(r.rma_no) like :q or upper(coalesce(r.customer_name, '')) like :q
+                               or exists (select 1 from return_line l where l.return_id = r.id and upper(l.item_no) like :q))
                         order by r.created_at desc limit 500""")
                 .param("site", siteId).param("status", status).param("all", scope.ownersAll()).param("owners", scope.ownerList())
+                .param("q", like)
                 .query().listOfRows();
     }
 
