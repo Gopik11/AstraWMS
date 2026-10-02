@@ -78,7 +78,8 @@ public class TaskController {
     @PostMapping("/{taskId}/pick")
     public TaskView pick(@PathVariable String siteId, @PathVariable UUID taskId,
                          @Valid @RequestBody TaskDtos.PickConfirmRequest body) {
-        return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.qty(), body.serials());
+        return tasks.confirmPick(siteId, taskId, body.checkDigit(), body.item(), body.qty(), body.serials(),
+                body.shortReason(), body.shortAction());
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
@@ -107,6 +108,13 @@ public class TaskController {
     public TaskView exception(@PathVariable String siteId, @PathVariable UUID taskId,
                               @Valid @RequestBody ExceptionRequest body) {
         return tasks.reportException(siteId, taskId, body.reason(), body.detail());
+    }
+
+    /** Dock sweep (ADR-0020): putaways for everything still at inbound staging. */
+    @PreAuthorize("hasRole('SUPERVISOR')")
+    @PostMapping("/sweep-dock")
+    public TaskService.SweepResult sweepDock(@PathVariable String siteId) {
+        return tasks.sweepDock(siteId);
     }
 
     @PreAuthorize("hasRole('SUPERVISOR')")

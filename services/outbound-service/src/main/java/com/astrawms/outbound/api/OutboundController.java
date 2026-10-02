@@ -55,6 +55,14 @@ public class OutboundController {
         return outbound.reallocateShorts(siteId, erpDocNo);
     }
 
+    /** "Close shorts" (ADR-0020): the remaining short quantity ships short; BACKORDER shorts stop waiting. */
+    @PreAuthorize("hasRole('SUPERVISOR')")
+    @PostMapping("/{erpDocNo}/close-shorts")
+    public Map<String, Object> closeShorts(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        scope.require(siteId, erpDocNo);
+        return outbound.closeShorts(siteId, erpDocNo);
+    }
+
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/{erpDocNo}/repost")
     public Map<String, Object> repost(@PathVariable String siteId, @PathVariable String erpDocNo) {

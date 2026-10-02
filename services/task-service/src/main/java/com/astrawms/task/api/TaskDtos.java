@@ -64,8 +64,14 @@ public final class TaskDtos {
     public record ReturnConfirmRequest(@NotBlank String checkDigit) {
     }
 
-    public record PickConfirmRequest(@NotBlank String checkDigit, @jakarta.validation.constraints.NotNull
-                                     @jakarta.validation.constraints.PositiveOrZero BigDecimal qty, List<String> serials) {
+    /**
+     * RF pick: source check digit, the scanned item (item number or GTIN, ADR-0020), the quantity and serials. Less than
+     * requested needs {@code shortReason} (NOT_FOUND, DAMAGED, QTY_LESS, WRONG_ITEM, OTHER) and may choose
+     * {@code shortAction}: REALLOCATE (default), BACKORDER or SHIP_SHORT.
+     */
+    public record PickConfirmRequest(@NotBlank String checkDigit, String item, @jakarta.validation.constraints.NotNull
+                                     @jakarta.validation.constraints.PositiveOrZero BigDecimal qty, List<String> serials,
+                                     String shortReason, String shortAction) {
     }
 
     public record Content(String ownerId, String itemNo, String lotNo, BigDecimal qty) {

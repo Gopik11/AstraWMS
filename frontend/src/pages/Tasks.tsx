@@ -35,7 +35,7 @@ export default function Tasks() {
   return (
     <Page title="Tasks" actions={
       <>
-        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, order, item, LPN, location" />
+        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, order, item, LPN, location, customer" />
         <select value={type} onChange={(e) => setParam('type', e.target.value)}>
           {TYPES.map((s) => <option key={s} value={s}>{s || 'All types'}</option>)}
         </select>

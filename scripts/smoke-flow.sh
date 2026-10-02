@@ -120,8 +120,13 @@ expect 200 "$GW/api/v1/sites/DC1/outbound/orders/8000002" "${SUP[@]}"
   || fail "8000002 allocation: $BODY"
 for _ in 1 2; do                                  # the picks of 8000001 and 8000002, in whatever order they come
   next_task P PICK
+  # ADR-0020: a location-only pick is refused; the item (or its GTIN) must be scanned.
+  expect 422 -X POST "$GW/api/v1/sites/DC1/tasks/$TASK/pick" "${P[@]}" \
+    -d "{\"checkDigit\":\"$(check_digit "$(json "['fromLocation']" <<<"$BODY")")\",\"qty\":1}"
+  grep -q TSK_ITEM_SCAN_REQUIRED <<<"$BODY" || fail "location-only pick should be refused: $BODY"
+  expect 200 "$GW/api/v1/sites/DC1/tasks/$TASK" "${P[@]}"                                  # the task again
   expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$TASK/pick" "${P[@]}" \
-    -d "{\"checkDigit\":\"$(check_digit "$(json "['fromLocation']" <<<"$BODY")")\",\"qty\":$(json "['qty']" <<<"$BODY")}"
+    -d "{\"checkDigit\":\"$(check_digit "$(json "['fromLocation']" <<<"$BODY")")\",\"item\":\"SKU-1\",\"qty\":$(json "['qty']" <<<"$BODY")}"
 done
 wait_for "8000002 picked" order_is 8000002 PICKED
 
@@ -156,5 +161,20 @@ wait_for "9000001 confirmed" return_is 9000001 CONFIRMED
 next_task RCV PUTAWAY
 [[ "$(json "['lpnId']" <<<"$BODY")" == "$unit_lpn" ]] || fail "putaway is not for the returned unit $unit_lpn: $BODY"
 echo "Returned unit $unit_lpn RESTOCK -> putaway to $(json "['targetLocation']" <<<"$BODY")"
+
+step "Dock sweep: a loose unit left on DOCK-01 gets an LPN and a putaway (ADR-0020)"
+expect 201 -X POST "$GW/api/v1/sites/DC1/inventory/receipts" "${RCV[@]}" -H "Idempotency-Key: loose-1" \
+  -d '{"ownerId":"ACME","itemNo":"SKU-1","qty":1,"uom":"EA","locationId":"DOCK-01"}'
+# The task service learns about the receipt asynchronously; sweep until it has.
+for _ in $(seq 1 30); do
+  expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/sweep-dock" "${SUP[@]}"
+  [[ "$(json "['lpnsCreated']" <<<"$BODY")" == 1 ]] && break
+  sleep 1
+done
+[[ "$(json "['lpnsCreated']" <<<"$BODY")" == 1 ]] || fail "sweep should palletise the loose unit: $BODY"
+swept() { curl -sf "$GW/api/v1/sites/DC1/tasks?type=PUTAWAY&q=DK" "${SUP[@]}" | grep -q '"fromLocation":"DOCK-01"'; }
+wait_for "putaway for the swept unit" swept
+expect 200 "$GW/api/v1/sites/DC1/tasks?type=PUTAWAY&q=DK" "${SUP[@]}"
+echo "Loose unit put on $(json "[0]['lpnId']" <<<"$BODY") -> putaway to $(json "[0]['targetLocation']" <<<"$BODY")"
 
 printf '\nFLOW SMOKE TEST PASSED (tenant %s)\n' "$TENANT"

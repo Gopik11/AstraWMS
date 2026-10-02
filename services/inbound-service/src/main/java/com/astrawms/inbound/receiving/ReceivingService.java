@@ -350,13 +350,15 @@ public class ReceivingService {
         return list(siteId, status, null);
     }
 
-    /** {@code q} matches the delivery, the vendor or an item on the delivery (case-insensitive). */
+    /** {@code q} matches the delivery, the vendor, an item, a received LPN or an expected SSCC (case-insensitive). */
     @Transactional(readOnly = true)
     public List<ExpectationSummary> list(String siteId, String status, String q) {
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql(SUMMARY + " where e.site_id = :site and (cast(:status as text) is null or e.status = :status)"
                         + " and (cast(:q as text) is null or upper(e.erp_doc_no) like :q or upper(coalesce(e.vendor_id, '')) like :q"
-                        + " or exists (select 1 from receipt_expectation_line x where x.expectation_id = e.id and upper(x.item_no) like :q))"
+                        + " or exists (select 1 from receipt_expectation_line x where x.expectation_id = e.id and upper(x.item_no) like :q)"
+                        + " or exists (select 1 from receipt_txn t where t.expectation_id = e.id and upper(coalesce(t.lpn_id, '')) like :q)"
+                        + " or exists (select 1 from expected_hu h where h.expectation_id = e.id and h.sscc like :q))"
                         + " order by e.expected_arrival_utc, e.erp_doc_no limit 500")
                 .param("site", siteId).param("status", status).param("q", like).query(ReceivingService::summary).list();
     }

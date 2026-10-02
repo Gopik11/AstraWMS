@@ -230,7 +230,7 @@ public class OutboundService {
      */
     @Transactional
     public void onStockAvailable(String siteId, String ownerId, String itemNo, UUID operationId) {
-        for (ShortLine s : shortLines(siteId, ownerId, itemNo, null, AUTO_RECOVERY)) {
+        for (ShortLine s : shortLines(siteId, ownerId, itemNo, null, AUTO_RECOVERY, false)) {
             BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + operationId + "-" + s.erpDocNo() + "-" + s.ref());
             if (got.compareTo(s.shortQty()) < 0) {
                 break;   // the new stock is used up
@@ -253,7 +253,7 @@ public class OutboundService {
         }
         String attempt = UUID.randomUUID().toString().substring(0, 8);
         BigDecimal recovered = BigDecimal.ZERO;
-        for (ShortLine s : shortLines(siteId, null, null, o.id(), MANUAL_RECOVERY)) {
+        for (ShortLine s : shortLines(siteId, null, null, o.id(), MANUAL_RECOVERY, true)) {
             recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref()));
         }
         Map<String, Object> result = new HashMap<>(detail(siteId, erpDocNo));
@@ -261,11 +261,41 @@ public class OutboundService {
         return result;
     }
 
-    private List<ShortLine> shortLines(String siteId, String ownerId, String itemNo, UUID orderId, List<String> statuses) {
+    /**
+     * Short lines in recovery order. Automatic recovery takes only the open short ({@code qty_short - qty_short_closed});
+     * a supervisor's reallocation ({@code includeClosed}) also reopens shorts that were going to ship short.
+     */
+    /**
+     * Supervisor "close shorts": what is still short ships short. Shorts waiting for stock (BACKORDER) stop waiting; an
+     * order with nothing left to pick and something picked becomes PICKED.
+     */
+    @Transactional
+    public Map<String, Object> closeShorts(String siteId, String erpDocNo) {
+        Order o = lockOrder(siteId, erpDocNo).orElseThrow(() -> unknown(erpDocNo));
+        if (!MANUAL_RECOVERY.contains(o.status())) {
+            throw ApiException.unprocessable("OUT_NOT_REALLOCATABLE", "Order " + erpDocNo + " is " + o.status());
+        }
+        jdbc.sql("update outbound_line set qty_short_closed = qty_short, short_hold = false where order_id = :o")
+                .param("o", o.id()).update();
+        boolean open = jdbc.sql("select exists (select 1 from outbound_allocation where order_id = :o and status = 'OPEN')")
+                .param("o", o.id()).query(Boolean.class).single();
+        boolean picked = jdbc.sql("select coalesce(sum(qty_picked), 0) > 0 from outbound_line where order_id = :o")
+                .param("o", o.id()).query(Boolean.class).single();
+        if (!open && picked && !"PICKED".equals(o.status())) {
+            setStatus(o.id(), "PICKED");
+        }
+        return detail(siteId, erpDocNo);
+    }
+
+    private List<ShortLine> shortLines(String siteId, String ownerId, String itemNo, UUID orderId, List<String> statuses,
+                                       boolean includeClosed) {
+        String qty = includeClosed ? "l.qty_short" : "l.qty_short - l.qty_short_closed";
         return jdbc.sql("""
-                        select o.id, o.erp_doc_no, l.erp_line_ref, l.owner_id, l.item_no, l.qty_short, l.base_uom, l.lot_no
+                        select o.id, o.erp_doc_no, l.erp_line_ref, l.owner_id, l.item_no,\s""" + qty + """
+                        , l.base_uom, l.lot_no
                         from outbound_line l join outbound_order o on o.id = l.order_id
-                        where o.site_id = :site and o.status in (:statuses) and l.qty_short > 0 and l.base_uom is not null
+                        where o.site_id = :site and o.status in (:statuses) and\s""" + qty + """
+                         > 0 and l.base_uom is not null
                           and (cast(:owner as text) is null or l.owner_id = :owner)
                           and (cast(:item as text) is null or l.item_no = :item)
                           and (cast(:order as uuid) is null or o.id = :order)
@@ -290,7 +320,9 @@ public class OutboundService {
         requestPicks(order, s.ref(), s.owner(), s.item(), a, null);
         jdbc.sql("""
                         update outbound_line set qty_allocated = qty_allocated + :got, qty_short = qty_short - :got,
-                            qty_short_pick = least(qty_short_pick, qty_short - :got)
+                            qty_short_pick = least(qty_short_pick, qty_short - :got),
+                            qty_short_closed = least(qty_short_closed, qty_short - :got),
+                            short_hold = short_hold and qty_short - :got > qty_short_closed
                         where order_id = :o and erp_line_ref = :ref""")
                 .param("got", a.allocatedQty()).param("o", order.id()).param("ref", s.ref()).update();
         if (!"RELEASED".equals(order.status())) {
@@ -390,9 +422,11 @@ public class OutboundService {
 
     private void onPicked(TaskCompleted t) {
         Optional<UUID> orderId = jdbc.sql("""
-                        update outbound_allocation set qty_picked = :picked, qty_short = :short, status = 'DONE'
+                        update outbound_allocation set qty_picked = :picked, qty_short = :short, status = 'DONE',
+                            short_reason = :reason, short_action = :action
                         where allocation_id = :a and status = 'OPEN' returning order_id""")
                 .param("picked", t.qtyPicked()).param("short", t.qtyShort()).param("a", t.allocationId())
+                .param("reason", t.shortReason()).param("action", t.shortAction())
                 .query(UUID.class).optional();
         if (orderId.isEmpty()) {
             return;   // duplicate, or the order was cancelled (inventory decided whether stock must be returned)
@@ -401,9 +435,25 @@ public class OutboundService {
         jdbc.sql("update outbound_line set qty_picked = qty_picked + :picked where order_id = :o and erp_line_ref = :line")
                 .param("picked", t.qtyPicked()).param("o", order.id()).param("line", t.orderLineRef()).update();
         if (t.qtyShort().signum() > 0) {
-            reallocateShort(order, t);
+            switch (t.shortAction() == null ? "REALLOCATE" : t.shortAction()) {
+                case "BACKORDER" -> jdbc.sql("""
+                                update outbound_line set qty_allocated = qty_allocated - :short, qty_short = qty_short + :short,
+                                    short_hold = true
+                                where order_id = :o and erp_line_ref = :line""")
+                        .param("short", t.qtyShort()).param("o", order.id()).param("line", t.orderLineRef()).update();
+                case "SHIP_SHORT" -> jdbc.sql("""
+                                update outbound_line set qty_allocated = qty_allocated - :short, qty_short = qty_short + :short,
+                                    qty_short_pick = qty_short_pick + :short, qty_short_closed = qty_short_closed + :short
+                                where order_id = :o and erp_line_ref = :line""")
+                        .param("short", t.qtyShort()).param("o", order.id()).param("line", t.orderLineRef()).update();
+                default -> reallocateShort(order, t);
+            }
         }
-        boolean open = jdbc.sql("select exists (select 1 from outbound_allocation where order_id = :o and status = 'OPEN')")
+        // PICKED once nothing is left to pick and no short waits for stock (a BACKORDER short keeps it RELEASED).
+        boolean open = jdbc.sql("""
+                        select exists (select 1 from outbound_allocation where order_id = :o and status = 'OPEN')
+                            or exists (select 1 from outbound_line where order_id = :o and short_hold
+                                       and qty_short > qty_short_closed)""")
                 .param("o", order.id()).query(Boolean.class).single();
         if (!open) {
             jdbc.sql("update outbound_order set status = 'PICKED', updated_at = :now where id = :id and status = 'RELEASED'")
@@ -436,7 +486,8 @@ public class OutboundService {
         }
         jdbc.sql("""
                         update outbound_line set qty_allocated = qty_allocated - :short + :realloc,
-                            qty_short = qty_short + :unrecovered, qty_short_pick = qty_short_pick + :unrecovered
+                            qty_short = qty_short + :unrecovered, qty_short_pick = qty_short_pick + :unrecovered,
+                            qty_short_closed = qty_short_closed + :unrecovered
                         where order_id = :o and erp_line_ref = :line""")
                 .param("short", t.qtyShort()).param("realloc", a.allocatedQty()).param("unrecovered", a.shortQty())
                 .param("o", order.id()).param("line", t.orderLineRef()).update();
@@ -630,7 +681,11 @@ public class OutboundService {
                           and (cast(:q as text) is null or upper(o.erp_doc_no) like :q
                                or upper(coalesce(o.ship_to ->> 'name', '')) like :q
                                or upper(coalesce(o.ship_to ->> 'partnerId', '')) like :q
-                               or exists (select 1 from outbound_line l where l.order_id = o.id and upper(l.item_no) like :q))
+                               or upper(coalesce(o.pick_lpn, '')) like :q
+                               or exists (select 1 from outbound_line l where l.order_id = o.id and upper(l.item_no) like :q)
+                               or exists (select 1 from outbound_allocation a where a.order_id = o.id
+                                          and upper(coalesce(a.lpn_id, '')) like :q)
+                               or exists (select 1 from carton c where c.order_id = o.id and c.sscc like :q))
                         order by o.planned_gi_utc nulls last, o.erp_doc_no limit 500""")
                 .param("site", siteId).param("status", status).param("q", like).query().listOfRows();
     }
@@ -649,12 +704,12 @@ public class OutboundService {
         Map<String, Object> result = new HashMap<>(header);
         result.put("lines", jdbc.sql("""
                         select erp_line_ref, item_no, qty_requested, uom, base_uom, qty_requested_base, qty_allocated,
-                               qty_picked, qty_short, qty_short_pick
+                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         result.put("allocations", jdbc.sql("""
                         select allocation_id, erp_line_ref, location_id, lpn_id, lot_no, qty, qty_picked, qty_short,
-                               status, replaces
+                               status, replaces, short_reason, short_action
                         from outbound_allocation where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         return result;

@@ -99,9 +99,9 @@ while (( picks < 2 )); do
   fi
   picks=$((picks + 1))
   if [[ "$item" == "SKU-1" ]]; then
-    body="{\"checkDigit\":\"$cd\",\"qty\":3}"
+    body="{\"checkDigit\":\"$cd\",\"item\":\"$item\",\"qty\":3,\"shortReason\":\"NOT_FOUND\",\"shortAction\":\"REALLOCATE\"}"
   else
-    body="{\"checkDigit\":\"$cd\",\"qty\":$qty,\"serials\":[\"SN-A\",\"SN-B\"]}"
+    body="{\"checkDigit\":\"$cd\",\"item\":\"$item\",\"qty\":$qty,\"serials\":[\"SN-A\",\"SN-B\"]}"
   fi
   expect 200 -X POST "$TSK/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "$body"
   echo "Picked $item from $from: $(json "['qtyPicked']" <<<"$BODY") (exception: $(json "['exceptionReason']" <<<"$BODY"))"

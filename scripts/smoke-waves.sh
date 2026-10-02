@@ -116,7 +116,10 @@ for _ in $(seq 1 10); do
   fi
   qty="$(json "['qty']" <<<"$BODY")"
   [[ "$order" == "0080000101" && "$from" == "R-01" ]] && qty=3
-  expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit "$from")\",\"qty\":$qty}"
+  extra=""
+  [[ "$qty" != "$(json "['qty']" <<<"$BODY")" ]] && extra=",\"shortReason\":\"NOT_FOUND\",\"shortAction\":\"REALLOCATE\""
+  expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" \
+    -d "{\"checkDigit\":\"$(check_digit "$from")\",\"item\":\"$(json "['itemNo']" <<<"$BODY")\",\"qty\":$qty$extra}"
   echo "Picked $qty for $order from $from ($(json "['exceptionReason']" <<<"$BODY"))"
   if has_status 0080000101 PICKED && has_status 0080000102 PICKED; then break; fi
 done

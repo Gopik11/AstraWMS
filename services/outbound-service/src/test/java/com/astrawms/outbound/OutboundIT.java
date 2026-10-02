@@ -375,6 +375,77 @@ class OutboundIT {
                 .andExpect(jsonPath("$.lines[0].qty_allocated", is(4)));
     }
 
+    // ------------------------------------------------------------------ ADR-0020 short-pick actions
+
+    /** Picks everything; the first allocation of line 000010 comes up one short with the given action. */
+    private void pickWithOneShort(String action) throws Exception {
+        List<JsonNode> picks = outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList();
+        JsonNode first = picks.stream().filter(p -> p.get("orderLineRef").asString().equals("000010")).findFirst().orElseThrow();
+        for (JsonNode pick : picks) {
+            UUID id = UUID.fromString(pick.get("allocationId").asString());
+            BigDecimal qty = pick.get("qty").decimalValue();
+            boolean isShort = pick == first;
+            BigDecimal picked = isShort ? qty.subtract(BigDecimal.ONE) : qty;
+            send(OutboundContracts.TOPIC_TASK_EVENTS, TaskCompleted.TYPE, "ASTRAWMS",
+                    new TaskCompleted(UUID.randomUUID(), "PICK", id, doc, pick.get("orderLineRef").asString(), picked,
+                            qty.subtract(picked), "picker1", Instant.now(), isShort ? "NOT_FOUND" : null,
+                            isShort ? action : null));
+        }
+        await(() -> picked().compareTo(new BigDecimal("3")) == 0);
+    }
+
+    @Test
+    void backorderShortKeepsTheOrderOpenUntilStockArrives() throws Exception {
+        order(1, "CREATE", "3", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
+        int before = outbox(OutboundContracts.PickRequested.TYPE).size();
+        pickWithOneShort("BACKORDER");
+        Thread.sleep(500);
+        assertThat(orderStatus()).isEqualTo("RELEASED");                           // waiting for stock, not PICKED
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(before);  // nothing reallocated now
+        assertThat(shortOf("000010")).isEqualByComparingTo("1");
+
+        stockArrived("SKU-1", "MOVE_IN");                                          // backorder recovery
+        await(() -> outbox(OutboundContracts.PickRequested.TYPE).size() == before + 1);
+        JsonNode again = outbox(OutboundContracts.PickRequested.TYPE).getLast().get("payload");
+        completed(UUID.fromString(again.get("allocationId").asString()), "000010", BigDecimal.ONE, BigDecimal.ZERO);
+        await(() -> "PICKED".equals(orderStatus()));
+    }
+
+    @Test
+    void shipShortClosesTheShortAndRecoveryLeavesItAlone() throws Exception {
+        order(1, "CREATE", "3", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
+        int before = outbox(OutboundContracts.PickRequested.TYPE).size();
+        pickWithOneShort("SHIP_SHORT");
+        await(() -> "PICKED".equals(orderStatus()));
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.lines[0].qty_short_closed", is(1)))
+                .andExpect(jsonPath("$.lines[0].qty_short_pick", is(1)))
+                .andExpect(jsonPath("$.allocations[0].short_action", is("SHIP_SHORT")));
+        stockArrived("SKU-1", "MOVE_IN");
+        Thread.sleep(1500);
+        assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(before);
+        assertThat(orderStatus()).isEqualTo("PICKED");
+    }
+
+    @Test
+    void supervisorClosesBackorderedShortsSoTheOrderShipsShort() throws Exception {
+        order(1, "CREATE", "3", "1");
+        await(() -> "RELEASED".equals(orderStatus()));
+        pickWithOneShort("BACKORDER");
+        Thread.sleep(500);
+        mvc.perform(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/close-shorts")
+                        .with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/close-shorts")
+                        .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.status", is("PICKED")))
+                .andExpect(jsonPath("$.lines[0].short_hold", is(false)));
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders?q=PK-" + doc).with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$[0].erp_doc_no", is(doc)));                  // search by LPN
+    }
+
     @Test
     void waveModePoolsOrdersUntilAPlannedWaveIsReleased_ADV030() throws Exception {
         call(put("/api/v1/sites/DC1/outbound/config"), """

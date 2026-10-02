@@ -118,7 +118,7 @@ public class ItemService {
                         r.temperatureClass(), r.hazardous(),
                         r.sites().stream().map(s -> new ItemUpserted.Site(s.siteId(), s.lotControlled(),
                                 s.serialControl().name(), s.status() == null ? null : s.status().name())).toList(),
-                        uoms.stream().map(u -> new ItemUpserted.Uom(u.uom(), u.numerator(), u.denominator())).toList(),
+                        uoms.stream().map(u -> new ItemUpserted.Uom(u.uom(), u.numerator(), u.denominator(), u.gtin())).toList(),
                         sourceChangedAt, r.standardCost())));
         return get(ownerId, itemNo);
     }

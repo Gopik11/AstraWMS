@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
-import { get, type ReceiptSummary, type Row, type Task } from '../api'
+import { get, post, type ReceiptSummary, type Row, type Task } from '../api'
 import { useAuth } from '../auth'
-import { Card, ErrorBox, Page, fmtQty, useLoad, useSite } from '../ui'
+import { Card, ErrorBox, Page, Success, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string, number> {
   const out: Record<string, number> = {}
@@ -40,7 +40,7 @@ function Attention({ n, label, to, detail }: { n: number | undefined; label: str
 /** Site overview (§G.6 control tower, first cut): what needs attention, then documents and work by status. */
 export default function Home() {
   const site = useSite()
-  const { session } = useAuth()
+  const { session, hasRole } = useAuth()
   const receipts = useLoad(() => get<ReceiptSummary[]>(`/api/v1/sites/${site}/receipts`), [site])
   const orders = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/orders`), [site])
   const tasks = useLoad(() => get<Task[]>(`/api/v1/sites/${site}/tasks`), [site])
@@ -57,6 +57,8 @@ export default function Home() {
   const dockAvailable = dock.data?.filter((b) => b.stock_status === 'AVAILABLE')
   const dockQty = dockAvailable?.reduce((n, b) => n + Number(b.qty), 0)
   const dockLpns = dockAvailable ? new Set(dockAvailable.map((b) => `${String(b.location_id)}/${String(b.lpn_id)}`)).size : undefined
+  // Dock sweep (ADR-0020): putaways for everything still at the dock; loose stock is put on an LPN first.
+  const sweep = useAction(() => post<{ putawaysCreated: number; lpnsCreated: number; failed: string[] }>(`/api/v1/sites/${site}/tasks/sweep-dock`))
 
   return (
     <Page title={`Overview · ${site}`}>
@@ -75,6 +77,15 @@ export default function Home() {
           <Attention n={dockLpns} label="Pallets waiting on dock" to="/tasks?type=PUTAWAY"
                      detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} units available at dock / receiving, not yet allocable`} />
         </div>
+        {hasRole('SUPERVISOR') && (dockLpns ?? 0) > 0 && (
+          <div className="row">
+            <button disabled={sweep.busy} onClick={async () => { if (await sweep.run()) setTimeout(() => dock.reload(), 3000) }}>
+              Create putaways for dock stock
+            </button>
+          </div>
+        )}
+        <ErrorBox error={sweep.error} />
+        <Success>{sweep.result && `${sweep.result.putawaysCreated} putaway task(s) created, ${sweep.result.lpnsCreated} loose quantity(ies) put on an LPN (their putaway follows)${sweep.result.failed.length ? `; not done: ${sweep.result.failed.join(', ')}` : ''}`}</Success>
       </Card>
       <div className="grid">
         <Card title="Receipts"><ErrorBox error={receipts.error} /><Tiles counts={countBy(receipts.data, (r) => r.status)} link="/receipts" /></Card>

@@ -12,8 +12,8 @@ public final class MasterDataEvents {
     public static final String TOPIC = "wms.masterdata.events.v1";
     public static final String ITEM_UPSERTED = "ItemUpserted";
     public static final String LOCATION_UPSERTED = "LocationUpserted";
-    /** 1.1: ItemUpserted.standardCost; 1.2: LocationUpserted.zoneType (both additive). */
-    public static final String SCHEMA_VERSION = "1.2";
+    /** 1.1: ItemUpserted.standardCost; 1.2: LocationUpserted.zoneType; 1.3: ItemUpserted.Uom.gtin (all additive). */
+    public static final String SCHEMA_VERSION = "1.3";
 
     private MasterDataEvents() {
     }
@@ -38,8 +38,15 @@ public final class MasterDataEvents {
         public record Site(String siteId, boolean lotControlled, String serialControl, String status) {
         }
 
-        /** Alternative unit: base quantity = quantity × numerator ÷ denominator. */
-        public record Uom(String uom, int numerator, int denominator) {
+        /**
+         * Alternative unit: base quantity = quantity × numerator ÷ denominator. {@code gtin} (1.3) is the barcode of
+         * that unit, scanned on RF to verify the item (ADR-0020).
+         */
+        public record Uom(String uom, int numerator, int denominator, String gtin) {
+
+            public Uom(String uom, int numerator, int denominator) {
+                this(uom, numerator, denominator, null);
+            }
         }
     }
 

@@ -17,7 +17,7 @@ export default function Orders() {
   return (
     <Page title="Outbound orders" actions={
       <>
-        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, customer, item" />
+        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, customer, item, LPN, SSCC" />
         <select value={status} onChange={(e) => setParam('status', e.target.value)}>
           {STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}
         </select>

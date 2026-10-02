@@ -33,6 +33,7 @@ export default function MasterData() {
         <ItemForm site={site} />
         <PlantMapping site={site} />
         <ReleaseMode site={site} />
+        <AllocationPolicy site={site} />
       </div>
       <Locations site={site} />
       <Items />
@@ -190,6 +191,51 @@ function ReleaseMode({ site }: { site: string }) {
         Orders must be fully packed in closed cartons before loading / shipping
       </label>
       <ErrorBox error={savePack.error} />
+    </Card>
+  )
+}
+
+interface Policy { lotRotation: string; otherRotation: string; pickFaceFirst: boolean; fullLpn: string; updatedBy?: string | null }
+
+/** The site's allocation policy (ADR-0020): explicit rotation and full-LPN rules for every item. */
+function AllocationPolicy({ site }: { site: string }) {
+  const url = `/api/v1/sites/${site}/inventory/allocation-policy`
+  const current = useLoad(() => get<Policy>(url), [url])
+  const [f, setF] = useState<Policy>()
+  const p = f ?? current.data
+  const save = useAction(() => put<Policy>(url, p))
+  if (!p) {
+    return <Card title="Allocation policy"><ErrorBox error={current.error} /></Card>
+  }
+  const set = (k: keyof Policy, v: string | boolean) => setF({ ...p, [k]: v })
+  return (
+    <Card title="Allocation policy">
+      <p className="muted">How orders take stock at {site}. {p.updatedBy ? `Set by ${p.updatedBy}.` : 'Defaults (not set yet).'}</p>
+      <div className="row">
+        <Field label="Lot-controlled items">
+          <select value={p.lotRotation} onChange={(e) => set('lotRotation', e.target.value)}>
+            <option value="FEFO">FEFO: first expiry first out</option><option value="FIFO">FIFO: first received first out</option>
+          </select>
+        </Field>
+        <Field label="Other items">
+          <select value={p.otherRotation} onChange={(e) => set('otherRotation', e.target.value)}>
+            <option value="FIFO">FIFO: first received first out</option><option value="FEFO">FEFO: first expiry first out</option>
+          </select>
+        </Field>
+      </div>
+      <div className="row">
+        <Field label="Reserve pallets (LPNs)">
+          <select value={p.fullLpn} onChange={(e) => set('fullLpn', e.target.value)}>
+            <option value="COVERED_ONLY">Whole pallet only when the order covers it; split only for items without a pick face</option>
+            <option value="SPLIT_ALLOWED">Split pallets freely in rotation order</option>
+            <option value="NEVER_SPLIT">Never split: whole pallets only, the rest from the pick face</option>
+          </select>
+        </Field>
+        <label className="check"><input type="checkbox" checked={p.pickFaceFirst} onChange={(e) => set('pickFaceFirst', e.target.checked)} /> Pick faces first</label>
+      </div>
+      <button className="primary" disabled={save.busy || !f} onClick={async () => { if (await save.run()) { setF(undefined); current.reload() } }}>Save policy</button>
+      <ErrorBox error={save.error} />
+      <Success>{save.done && 'Policy saved; it applies to the next allocation'}</Success>
     </Card>
   )
 }

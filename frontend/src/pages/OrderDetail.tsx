@@ -46,6 +46,8 @@ export default function OrderDetail() {
               { header: 'Picked', cell: (l) => fmtQty(l.qty_picked), align: 'right' },
               { header: 'Short', cell: (l) => fmtQty(l.qty_short), align: 'right' },
               { header: 'Short (picks)', cell: (l) => fmtQty(l.qty_short_pick), align: 'right' },
+              { header: 'Short state', cell: (l) => Number(l.qty_short) <= 0 ? ''
+                  : l.short_hold ? 'waiting for stock' : Number(l.qty_short_closed) >= Number(l.qty_short) ? 'ships short' : 'recoverable' },
               { header: 'From', cell: (l) => d.allocations.filter((a) => a.erp_line_ref === l.erp_line_ref && a.status !== 'CANCELLED')
                   .map((a) => `${String(a.location_id)}${a.lpn_id ? ` / ${String(a.lpn_id)}` : ''}`).join(', ') },
             ]} />
@@ -59,6 +61,7 @@ export default function OrderDetail() {
               { header: 'Qty', cell: (a) => fmtQty(a.qty), align: 'right' },
               { header: 'Picked', cell: (a) => fmtQty(a.qty_picked), align: 'right' },
               { header: 'Status', cell: (a) => <Badge value={String(a.status)} /> },
+              { header: 'Short', cell: (a) => (a.short_reason ? `${String(a.short_reason)} → ${String(a.short_action ?? 'REALLOCATE')}` : '') },
               { header: '', cell: (a) => (a.replaces ? 're-allocation' : '') },
             ]} />
           </Card>
@@ -75,13 +78,18 @@ export default function OrderDetail() {
 /** Supervisor: allocate the order's short lines from stock available now (ADR-0019); recovered lines get pick tasks. */
 function Reallocate({ base, onDone }: { base: string; onDone: () => void }) {
   const run = useAction(() => post<Row>(`${base}/reallocate`))
+  const close = useAction(() => post<Row>(`${base}/close-shorts`))
   return (
     <Card title="Short lines">
       <p className="muted">Stock arriving in storage recovers backorders automatically. Reallocate now after a manual fix
         (e.g. a stock correction), or to recover a picked order.</p>
-      <ErrorBox error={run.error} />
+      <ErrorBox error={run.error ?? close.error} />
       {run.result && <div className="alert ok">Recovered {fmtQty(run.result.recoveredQty)}</div>}
-      <button className="primary" disabled={run.busy} onClick={async () => { if (await run.run()) onDone() }}>Reallocate shorts</button>
+      <div className="row">
+        <button className="primary" disabled={run.busy} onClick={async () => { if (await run.run()) onDone() }}>Reallocate shorts</button>
+        <button disabled={close.busy} title="What is still short ships short; backordered shorts stop waiting"
+                onClick={async () => { if (await close.run()) onDone() }}>Close shorts (ship short)</button>
+      </div>
     </Card>
   )
 }

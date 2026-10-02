@@ -13,6 +13,13 @@ public interface InventoryClient {
      */
     UUID moveLpn(String siteId, String idempotencyKey, String lpnId, String fromLocationId, String toLocationId);
 
+    /**
+     * Moves a quantity of one balance (owner, item, lot, status) onto an LPN, in base units. Used by the dock sweep to
+     * put loose dock stock on a generated LPN at the same location, so it gets a putaway task.
+     */
+    UUID moveQuantity(String siteId, String idempotencyKey, String ownerId, String itemNo, String lotNo, String status,
+                      java.math.BigDecimal qty, String fromLocationId, String toLocationId, String toLpnId);
+
     /** Picks (part of) an allocation into outbound staging; {@code shortClose} releases the remainder. */
     UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,
               String toLpnId, java.util.List<String> serials, boolean shortClose);
