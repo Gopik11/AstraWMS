@@ -61,7 +61,7 @@ unit 201 u1 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditi
 [[ "$(json "['disposition']" <<<"$BODY")" == RESTOCK ]] || fail "expected RESTOCK: $BODY"
 unit 201 u2 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"D","locationId":"RET-01"}'
 [[ "$(json "['disposition']" <<<"$BODY")" == RTV ]] || fail "expected RTV: $BODY"
-unit 422 u3 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"A","locationId":"RET-01","override":true}'
+unit 422 u3 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"A","locationId":"RET-01"}'  # no override: refused even for a supervisor
 grep -q RET_QTY_OVER_RMA <<<"$BODY" || fail "expected RET_QTY_OVER_RMA: $BODY"
 stock | grep -q AVAILABLE || fail "no AVAILABLE stock at RET-01"
 stock | grep -q BLOCKED || fail "no BLOCKED stock at RET-01"
