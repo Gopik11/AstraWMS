@@ -112,7 +112,7 @@ export interface Txn {
 
 export interface Task {
   id: string
-  taskType: 'PUTAWAY' | 'PICK' | 'RETURN' | 'COUNT' | 'REPLEN' | 'RECEIVE'
+  taskType: 'PUTAWAY' | 'PICK' | 'RETURN' | 'COUNT' | 'REPLEN' | 'RECEIVE' | 'MOVE'
   status: string
   priority: number
   ownerId: string

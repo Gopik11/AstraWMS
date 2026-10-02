@@ -50,6 +50,11 @@ public class ProjectionListeners {
     @KafkaListener(topics = InventoryContracts.TOPIC, groupId = "task-service.inventory")
     public void onInventory(ConsumerRecord<String, String> record) {
         EventEnvelope e = codec.read(record.value());
+        if (InventoryContracts.SlottingChanged.TYPE.equals(e.messageType())) {
+            InventoryContracts.SlottingChanged s = codec.payload(e, InventoryContracts.SlottingChanged.class);
+            process(e, () -> projections.upsertSlotting(e.siteId(), s));
+            return;
+        }
         if (InventoryContracts.PickFaceChanged.TYPE.equals(e.messageType())) {
             InventoryContracts.PickFaceChanged face = codec.payload(e, InventoryContracts.PickFaceChanged.class);
             process(e, () -> projections.upsertPickFace(e.siteId(), face));
@@ -86,6 +91,9 @@ public class ProjectionListeners {
                 case com.astrawms.common.contracts.ReceivingContracts.ReceiveEnded.TYPE ->
                         tasks.onReceiveEnded(e.siteId(), codec.payload(e,
                                 com.astrawms.common.contracts.ReceivingContracts.ReceiveEnded.class));
+                case com.astrawms.common.contracts.InventoryContracts.MoveRequested.TYPE ->
+                        tasks.onMoveRequested(e.siteId(), codec.payload(e,
+                                com.astrawms.common.contracts.InventoryContracts.MoveRequested.class));
                 case OutboundContracts.PickCancelled.TYPE ->
                         tasks.onPickCancelled(e.siteId(), codec.payload(e, OutboundContracts.PickCancelled.class));
                 default -> { }

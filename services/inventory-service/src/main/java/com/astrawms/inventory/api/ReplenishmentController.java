@@ -28,10 +28,42 @@ public class ReplenishmentController {
 
     private final Replenishments replenishments;
     private final InventoryCommandService commands;
+    private final com.astrawms.inventory.service.Slotting slotting;
 
-    public ReplenishmentController(Replenishments replenishments, InventoryCommandService commands) {
+    public ReplenishmentController(Replenishments replenishments, InventoryCommandService commands,
+                                   com.astrawms.inventory.service.Slotting slotting) {
         this.replenishments = replenishments;
         this.commands = commands;
+        this.slotting = slotting;
+    }
+
+    // ------------------------------------------------------------------ slotting (ADR-0021)
+
+    public record SlottingRequest(String reserveZone, BigDecimal unitsPerPallet, String velocityClass) {
+    }
+
+    public record ReslotRequest(String toLocation, BigDecimal minQty, BigDecimal maxQty) {
+    }
+
+    /** Item–location master with 30-day velocity and golden-zone suggestions. */
+    @GetMapping("/slotting")
+    public List<Map<String, Object>> slotting(@PathVariable String siteId) {
+        return slotting.analysis(siteId);
+    }
+
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','INV_MANAGER')")
+    @PutMapping("/slotting/{ownerId}/{itemNo}")
+    public Map<String, Object> putSlotting(@PathVariable String siteId, @PathVariable String ownerId,
+                                           @PathVariable String itemNo, @RequestBody SlottingRequest body) {
+        return slotting.put(siteId, ownerId, itemNo, body.reserveZone(), body.unitsPerPallet(), body.velocityClass());
+    }
+
+    /** Moves the item's pick face; free stock left at the old face becomes RF MOVE tasks. */
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','INV_MANAGER')")
+    @PostMapping("/slotting/{ownerId}/{itemNo}/reslot")
+    public Map<String, Object> reslot(@PathVariable String siteId, @PathVariable String ownerId,
+                                      @PathVariable String itemNo, @RequestBody ReslotRequest body) {
+        return slotting.reslot(siteId, ownerId, itemNo, body.toLocation(), body.minQty(), body.maxQty());
     }
 
     public record RuleRequest(@NotNull BigDecimal minQty, @NotNull BigDecimal maxQty, Boolean active) {

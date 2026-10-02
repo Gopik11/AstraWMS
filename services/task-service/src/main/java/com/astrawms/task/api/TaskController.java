@@ -74,6 +74,13 @@ public class TaskController {
         return tasks.release(siteId, taskId);
     }
 
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/{taskId}/move")
+    public TaskView move(@PathVariable String siteId, @PathVariable UUID taskId,
+                         @Valid @RequestBody TaskDtos.ReplenConfirmRequest body) {
+        return tasks.confirmMove(siteId, taskId, body.checkDigit());
+    }
+
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/pick")
     public TaskView pick(@PathVariable String siteId, @PathVariable UUID taskId,

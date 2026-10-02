@@ -56,10 +56,10 @@ public class TaskService {
      * Which task types each RF role works (ADR-0019); SUPERVISOR works all. A user with several roles gets the union.
      */
     static final Map<String, List<String>> TASK_TYPES_BY_ROLE = Map.of(
-            "RECEIVER", List.of("RECEIVE", "PUTAWAY", "RETURN", "REPLEN"),
-            "PICKER", List.of("PICK", "RETURN", "REPLEN", "COUNT"),
-            "INV_ANALYST", List.of("COUNT", "REPLEN"),
-            "SUPERVISOR", List.of("RECEIVE", "PUTAWAY", "PICK", "RETURN", "REPLEN", "COUNT"));
+            "RECEIVER", List.of("RECEIVE", "PUTAWAY", "RETURN", "REPLEN", "MOVE"),
+            "PICKER", List.of("PICK", "RETURN", "REPLEN", "COUNT", "MOVE"),
+            "INV_ANALYST", List.of("COUNT", "REPLEN", "MOVE"),
+            "SUPERVISOR", List.of("RECEIVE", "PUTAWAY", "PICK", "RETURN", "REPLEN", "COUNT", "MOVE"));
 
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
                        OutboxWriter outbox, Clock clock, com.astrawms.task.inbound.InboundClient inbound,
@@ -152,7 +152,7 @@ public class TaskService {
             String lpn = "DK" + UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase();
             try {
                 inventory.moveQuantity(siteId, "SWEEP-" + lpn, s.ownerId(), s.itemNo(), s.lotNo(), s.status(), s.qty(),
-                        s.locationId(), s.locationId(), lpn);
+                        s.locationId(), null, s.locationId(), lpn);
                 lpns++;
             } catch (ApiException e) {
                 // stale projection or a concurrent move: the next sweep tries again
@@ -451,6 +451,72 @@ public class TaskService {
                             inventory_operation_id = :op, completed_at = :now, updated_at = :now where id = :id""")
                 .param("op", operation).param("now", Timestamp.from(now)).param("id", taskId).update();
         event(taskId, "COMPLETED", "replenished " + r.to());
+        return view(siteId, taskId);
+    }
+
+    // =====================================================================================================
+    // MOVE tasks (ADR-0021: reslot)
+    // =====================================================================================================
+
+    @Transactional
+    public void onMoveRequested(String siteId, com.astrawms.common.contracts.InventoryContracts.MoveRequested m) {
+        Instant now = clock.instant();
+        UUID id = UUID.randomUUID();
+        int inserted = jdbc.sql("""
+                        insert into task (id, tenant_id, site_id, task_type, status, priority, owner_id, lpn_id,
+                                          from_location, target_location, strategy, move_id, item_no, lot_no, qty, uom,
+                                          created_at, updated_at)
+                        values (:id, :t, :site, 'MOVE', 'RELEASED', :prio, :owner, :lpn, :from, :to, :reason, :move,
+                                :item, :lot, :qty, :uom, :now, :now)
+                        on conflict (tenant_id, move_id) where task_type = 'MOVE' do nothing""")
+                .param("id", id).param("t", TenantContext.tenantId()).param("site", siteId).param("prio", m.priority())
+                .param("owner", m.ownerId()).param("lpn", m.lpnId() == null ? "" : m.lpnId())
+                .param("from", m.fromLocation()).param("to", m.toLocation()).param("reason", m.reason())
+                .param("move", m.moveId()).param("item", m.itemNo()).param("lot", m.lotNo()).param("qty", m.qty())
+                .param("uom", m.uom()).param("now", Timestamp.from(now)).update();
+        if (inserted == 1) {
+            event(id, "CREATED", m.reason() + ": move " + m.qty().toPlainString() + " " + m.itemNo() + " "
+                    + m.fromLocation() + " → " + m.toLocation());
+        }
+    }
+
+    /** RF move: take the stock at the source, drop it at the target and scan the target's check digit. */
+    @Transactional
+    public TaskView confirmMove(String siteId, UUID taskId, String checkDigit) {
+        record Mv(String status, String type, String assignedTo, String owner, String lpn, String from, String to,
+                  String item, String lot, java.math.BigDecimal qty) {
+        }
+        Mv m = jdbc.sql("""
+                        select status, task_type, assigned_to, owner_id, lpn_id, from_location, target_location, item_no,
+                               lot_no, qty
+                        from task where site_id = :site and id = :id for update""")
+                .param("site", siteId).param("id", taskId)
+                .query((rs, n) -> new Mv(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4),
+                        rs.getString(5), rs.getString(6), rs.getString(7), rs.getString(8), rs.getString(9),
+                        rs.getBigDecimal(10)))
+                .optional().orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + taskId + " not found"));
+        if (!"MOVE".equals(m.type())) {
+            throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + m.type() + " task");
+        }
+        if ("COMPLETED".equals(m.status())) {
+            return view(siteId, taskId);
+        }
+        String user = TenantContext.require().userId();
+        if (!"ASSIGNED".equals(m.status()) || !user.equals(m.assignedTo())) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + m.status() + " and not assigned to " + user);
+        }
+        Projections.Location target = projections.location(siteId, m.to()).orElseThrow(() ->
+                ApiException.unprocessable("TSK_LOCATION_UNKNOWN", "Location " + m.to() + " is not known"));
+        if (target.checkDigit() == null || checkDigit == null || !target.checkDigit().equals(checkDigit.trim())) {
+            throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + m.to());
+        }
+        UUID operation = inventory.moveQuantity(siteId, "TSK-" + taskId, m.owner(), m.item(), m.lot(), "AVAILABLE",
+                m.qty(), m.from(), m.lpn(), m.to(), null);
+        jdbc.sql("""
+                        update task set status = 'COMPLETED', qty_picked = qty, confirmed_location = target_location,
+                            inventory_operation_id = :op, completed_at = :now, updated_at = :now where id = :id""")
+                .param("op", operation).param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        event(taskId, "COMPLETED", "moved to " + m.to());
         return view(siteId, taskId);
     }
 

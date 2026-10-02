@@ -3,7 +3,7 @@ import { get, query, type Task } from '../api'
 import { Badge, ErrorBox, Page, SearchBox, Table, fmtDate, fmtQty, useLoad, useParamSetter, useSite } from '../ui'
 
 const STATUSES = ['', 'RELEASED', 'ASSIGNED', 'EXCEPTION', 'COMPLETED', 'CANCELLED']
-const TYPES = ['', 'RECEIVE', 'PUTAWAY', 'PICK', 'REPLEN', 'COUNT', 'RETURN']
+const TYPES = ['', 'RECEIVE', 'PUTAWAY', 'PICK', 'REPLEN', 'MOVE', 'COUNT', 'RETURN']
 
 function what(t: Task): string {
   switch (t.taskType) {
@@ -11,6 +11,7 @@ function what(t: Task): string {
     case 'PUTAWAY': return `LPN ${t.lpnId}`
     case 'COUNT': return `Count ${t.fromLocation}`
     case 'REPLEN': return `${fmtQty(t.qty)} × ${t.itemNo}`
+    case 'MOVE': return `${t.strategy ?? 'Move'}: ${fmtQty(t.qty)} × ${t.itemNo}`
     default: return `${fmtQty(t.qty)} × ${t.itemNo} · ${t.orderRef ?? ''}`
   }
 }

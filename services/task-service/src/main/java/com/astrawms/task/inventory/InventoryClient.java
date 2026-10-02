@@ -18,7 +18,7 @@ public interface InventoryClient {
      * put loose dock stock on a generated LPN at the same location, so it gets a putaway task.
      */
     UUID moveQuantity(String siteId, String idempotencyKey, String ownerId, String itemNo, String lotNo, String status,
-                      java.math.BigDecimal qty, String fromLocationId, String toLocationId, String toLpnId);
+                      java.math.BigDecimal qty, String fromLocationId, String fromLpnId, String toLocationId, String toLpnId);
 
     /** Picks (part of) an allocation into outbound staging; {@code shortClose} releases the remainder. */
     UUID pick(String siteId, String idempotencyKey, UUID allocationId, java.math.BigDecimal qty, String toLocationId,

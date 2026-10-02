@@ -63,16 +63,17 @@ class TaskIT {
 
         final List<Move> moves = new CopyOnWriteArrayList<>();
 
-        record QtyMove(String key, String item, String status, BigDecimal qty, String from, String to, String toLpn) {
+        record QtyMove(String key, String item, String status, BigDecimal qty, String from, String to, String toLpn,
+                       String fromLpn) {
         }
 
         final List<QtyMove> qtyMoves = new CopyOnWriteArrayList<>();
 
         @Override
         public UUID moveQuantity(String siteId, String key, String ownerId, String itemNo, String lotNo, String status,
-                                 BigDecimal qty, String from, String to, String toLpn) {
+                                 BigDecimal qty, String from, String fromLpn, String to, String toLpn) {
             if (qtyMoves.stream().noneMatch(m -> m.key().equals(key))) {
-                qtyMoves.add(new QtyMove(key, itemNo, status, qty, from, to, toLpn));
+                qtyMoves.add(new QtyMove(key, itemNo, status, qty, from, to, toLpn, fromLpn));
             }
             return UUID.nameUUIDFromBytes(key.getBytes());
         }
@@ -661,6 +662,58 @@ class TaskIT {
         return tasks(post("/api/v1/sites/DC1/tasks/" + id + "/pick"), """
                 {"checkDigit":"%s","qty":%s%s%s}""".formatted(checkDigit, qty,
                 item == null ? "" : ",\"item\":\"" + item + "\"", extra));
+    }
+
+    // ------------------------------------------------------------------ ADR-0021 slotting and MOVE tasks
+
+    private void slotting(String item, String zone, String velocity) throws Exception {
+        send(InventoryContracts.TOPIC, InventoryContracts.SlottingChanged.TYPE, "DC1:ACME:" + item,
+                new InventoryContracts.SlottingChanged("ACME", item, zone, null, velocity, Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_item_slotting where item_no = :i")
+                .param("i", item).query(Integer.class).single()) == 1);
+    }
+
+    @Test
+    void putawayPrefersTheItemsReserveZoneAndSendsSlowMoversFar() throws Exception {
+        location("R-NEAR", "RACK", null, false, "61", -5, "RESERVE");   // zone "RESERVE" (location helper uses type as id)
+        location("Z-FAR", "RACK", null, false, "62", 50, null);          // zone "Z"
+        await(() -> locations() == 6);
+        slotting("SKU-1", "Z", "A");
+        received("LPN-Z", "SKU-1");
+        String zoned = awaitTask("LPN-Z", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + zoned))
+                .andExpect(jsonPath("$.targetLocation", is("A-02")))            // nearest location of zone Z
+                .andExpect(jsonPath("$.strategy", is("EMPTY_NEAREST_ZONE")));
+        slotting("SKU-1", null, "C");
+        await(() -> asTenant(() -> jdbc.sql("select velocity_class from ref_item_slotting where item_no = 'SKU-1'")
+                .query(String.class).single()).equals("C"));
+        received("LPN-C", "SKU-1");
+        String slow = awaitTask("LPN-C", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + slow))
+                .andExpect(jsonPath("$.targetLocation", is("Z-FAR")))           // furthest empty slot
+                .andExpect(jsonPath("$.strategy", is("EMPTY_FAR_SLOW_MOVER")));
+    }
+
+    @Test
+    void reslotMoveTaskMovesTheStockToTheNewFace() throws Exception {
+        UUID move = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, InventoryContracts.MoveRequested.TYPE, "DC1:A-01",
+                new InventoryContracts.MoveRequested(move, "ACME", "SKU-1", "", "", new BigDecimal("3"), "EA", "A-01", "A-02",
+                        "RESLOT", 45));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from task where move_id = :m").param("m", move)
+                .query(Integer.class).single()) == 1);
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(jsonPath("$.taskType", is("MOVE"))).andExpect(jsonPath("$.strategy", is("RESLOT")))
+                .andReturn().getResponse().getContentAsString(), "$.id");
+        var pete = TestTokens.as(tenant, "pete", Roles.PICKER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/move").with(pete).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"checkDigit\":\"33\"}")).andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/move").with(pete).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"checkDigit\":\"22\"}")).andExpect(jsonPath("$.status", is("COMPLETED")));
+        StubInventory.QtyMove m = inventory.qtyMoves.getLast();
+        assertThat(m.from()).isEqualTo("A-01");
+        assertThat(m.to()).isEqualTo("A-02");
+        assertThat(m.qty()).isEqualByComparingTo("3");
     }
 
     // ------------------------------------------------------------------ ADR-0020 dock sweep

@@ -125,6 +125,32 @@ public class Projections {
                 .param("active", e.active()).param("at", Timestamp.from(e.changedAt())).update();
     }
 
+    /** Slotting of an item (ADR-0021): preferred reserve zone and velocity class. */
+    public record ItemSlotting(String reserveZone, String velocityClass) {
+    }
+
+    public void upsertSlotting(String siteId, com.astrawms.common.contracts.InventoryContracts.SlottingChanged e) {
+        jdbc.sql("""
+                        insert into ref_item_slotting (tenant_id, site_id, owner_id, item_no, reserve_zone, units_per_pallet,
+                                                       velocity_class, changed_at)
+                        values (:t, :site, :owner, :item, :zone, :upp, :vel, :at)
+                        on conflict (tenant_id, site_id, owner_id, item_no) do update set reserve_zone = excluded.reserve_zone,
+                            units_per_pallet = excluded.units_per_pallet, velocity_class = excluded.velocity_class,
+                            changed_at = excluded.changed_at
+                        where ref_item_slotting.changed_at <= excluded.changed_at""")
+                .param("t", TenantContext.tenantId()).param("site", siteId).param("owner", e.ownerId())
+                .param("item", e.itemNo()).param("zone", e.reserveZone()).param("upp", e.unitsPerPallet())
+                .param("vel", e.velocityClass()).param("at", Timestamp.from(e.changedAt())).update();
+    }
+
+    public Optional<ItemSlotting> slotting(String siteId, String ownerId, String itemNo) {
+        return jdbc.sql("""
+                        select reserve_zone, velocity_class from ref_item_slotting
+                        where site_id = :site and owner_id = :owner and item_no = :item""")
+                .param("site", siteId).param("owner", ownerId).param("item", itemNo)
+                .query((rs, n) -> new ItemSlotting(rs.getString(1), rs.getString(2))).optional();
+    }
+
     /** Active pick faces of the site, any item. */
     public List<PickFace> pickFaces(String siteId) {
         return jdbc.sql("select location_id, owner_id, item_no, max_qty from ref_pick_face where site_id = :site and active")

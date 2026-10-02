@@ -47,6 +47,26 @@ public final class InventoryContracts {
     }
 
     /**
+     * An item's slotting changed (ADR-0021), on {@link #TOPIC}: the reserve zone its pallets belong in, units per pallet
+     * and velocity class (A fast, C slow). The task service uses it for putaway. Business key {@code siteId:owner:item}.
+     */
+    public record SlottingChanged(String ownerId, String itemNo, String reserveZone, BigDecimal unitsPerPallet,
+                                  String velocityClass, Instant changedAt) {
+        public static final String TYPE = "SlottingChanged";
+        public static final String VERSION = "1.0";
+    }
+
+    /**
+     * An RF move of stock between two locations (ADR-0021), on the task request topic; today used to empty a pick face
+     * that was reslotted. {@code lpnId} empty = loose stock. The operator confirms with the target's check digit.
+     */
+    public record MoveRequested(UUID moveId, String ownerId, String itemNo, String lotNo, String lpnId, BigDecimal qty,
+                                String uom, String fromLocation, String toLocation, String reason, int priority) {
+        public static final String TYPE = "MoveRequested";
+        public static final String VERSION = "1.0";
+    }
+
+    /**
      * {@code InventoryChanged} v1: one message per item touched by an inventory operation, business key
      * {@code siteId:itemNo}. Each line carries the balance key and the quantity after the change, so consumers can
      * maintain an exact projection of stock per location / LPN (event-carried state transfer).

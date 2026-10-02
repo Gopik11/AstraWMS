@@ -62,10 +62,11 @@ public class HttpInventoryClient implements InventoryClient {
 
     @Override
     public UUID moveQuantity(String siteId, String idempotencyKey, String ownerId, String itemNo, String lotNo,
-                             String status, java.math.BigDecimal qty, String fromLocationId, String toLocationId,
-                             String toLpnId) {
+                             String status, java.math.BigDecimal qty, String fromLocationId, String fromLpnId,
+                             String toLocationId, String toLpnId) {
         Map<String, Object> body = new HashMap<>();
         body.put("fromLocationId", fromLocationId);
+        body.put("lpnId", fromLpnId == null || fromLpnId.isEmpty() ? null : fromLpnId);
         body.put("ownerId", ownerId);
         body.put("itemNo", itemNo);
         body.put("lotNo", lotNo == null || lotNo.isEmpty() ? null : lotNo);
