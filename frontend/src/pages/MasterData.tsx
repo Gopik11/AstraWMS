@@ -23,8 +23,15 @@ function FormCard({ title, onSubmit, action, children, busy, error, ok }: {
 /** Master data administration (UX-015): site, zones, locations, items, ERP plant mapping, release mode. */
 export default function MasterData() {
   const site = useSite()
+  // Sends every location of the site to the other services again, e.g. after an upgrade added zone types (ADR-0019).
+  const republish = useAction(() => post<{ locationsRepublished: number }>(`/api/v1/sites/${site}/locations/republish`))
   return (
-    <Page title={`Master data · ${site}`}>
+    <Page title={`Master data · ${site}`} actions={
+      <button disabled={republish.busy} onClick={() => void republish.run()}
+              title="Send all locations of this site to inventory, tasks and outbound again">Republish locations</button>
+    }>
+      <ErrorBox error={republish.error} />
+      <Success>{republish.result && `${republish.result.locationsRepublished} location(s) republished; the other services update within seconds`}</Success>
       <div className="grid">
         <SiteForm site={site} />
         <ZoneForm site={site} />
@@ -243,18 +250,11 @@ function AllocationPolicy({ site }: { site: string }) {
 function Locations({ site }: { site: string }) {
   const [zone, setZone] = useState('')
   const list = useLoad(() => get<ApiPage<Row>>(`/api/v1/sites/${site}/locations${query({ zoneId: zone, limit: 200 })}`), [site, zone])
-  // Sends every location of the site to the other services again, e.g. after an upgrade added zone types (ADR-0019).
-  const republish = useAction(() => post<{ locationsRepublished: number }>(`/api/v1/sites/${site}/locations/republish`))
   return (
     <Card title="Locations" actions={
-      <>
-        <input placeholder="Filter by zone" value={zone} onChange={(e) => setZone(e.target.value.toUpperCase())} size={10} />
-        <button disabled={republish.busy} onClick={() => void republish.run()}
-                title="Send all locations of this site to inventory, tasks and outbound again">Republish locations</button>
-      </>
+      <input placeholder="Filter by zone" value={zone} onChange={(e) => setZone(e.target.value.toUpperCase())} size={10} />
     }>
-      <ErrorBox error={list.error ?? republish.error} />
-      <Success>{republish.result && `${republish.result.locationsRepublished} location(s) republished; the other services update within seconds`}</Success>
+      <ErrorBox error={list.error} />
       <Table rows={list.data?.items} empty="No locations" columns={[
         { header: 'Location', cell: (l) => String(l.locationId) },
         { header: 'Zone', cell: (l) => `${String(l.zoneId)}${l.zoneType ? ` (${String(l.zoneType)})` : ''}` },
