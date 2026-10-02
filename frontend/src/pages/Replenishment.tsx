@@ -12,7 +12,12 @@ export default function Replenishment() {
   const [status, setStatus] = useState('OPEN')
   const list = useLoad(() => get<Row[]>(`${base}/replenishments${query({ status })}`), [base, status])
   const [f, setF] = useState({ locationId: '', ownerId: '', itemNo: '', minQty: '', maxQty: '' })
-  const save = useAction(() => put(`${base}/replenishment-rules/${f.locationId}/${f.ownerId}/${f.itemNo}`,
+  // Everything is required, and 0 ≤ min < max (the server checks the same; this avoids a request it must reject).
+  const problem = !f.locationId.trim() || !f.ownerId.trim() || !f.itemNo.trim() ? 'Enter the forward location, owner and item'
+    : f.minQty === '' || f.maxQty === '' ? 'Enter min and max'
+    : Number(f.minQty) < 0 || Number(f.maxQty) <= Number(f.minQty) ? 'Max must be greater than min (both in base units, min ≥ 0)'
+    : undefined
+  const save = useAction(() => put(`${base}/replenishment-rules/${encodeURIComponent(f.locationId.trim())}/${encodeURIComponent(f.ownerId.trim())}/${encodeURIComponent(f.itemNo.trim())}`,
     { minQty: Number(f.minQty), maxQty: Number(f.maxQty), active: true }))
   const evaluate = useAction(() => post<{ created: number }>(`${base}/replenishments/evaluate`))
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) => setF({ ...f, [k]: e.target.value.toUpperCase() })
@@ -32,8 +37,10 @@ export default function Replenishment() {
             <Field label="Item"><input value={f.itemNo} onChange={set('itemNo')} size={10} /></Field>
             <Field label="Min (base unit)"><input type="number" min={0} value={f.minQty} onChange={set('minQty')} size={5} /></Field>
             <Field label="Max"><input type="number" min={1} value={f.maxQty} onChange={set('maxQty')} size={5} /></Field>
-            <button className="primary" disabled={save.busy} onClick={async () => { await save.run(); refresh() }}>Save rule</button>
+            <button className="primary" disabled={save.busy || !!problem} title={problem}
+                    onClick={async () => { await save.run(); refresh() }}>Save rule</button>
           </div>
+          {problem && (f.locationId || f.ownerId || f.itemNo || f.minQty || f.maxQty) && <p className="muted">{problem}</p>}
           <ErrorBox error={save.error} />
           <Success>{save.done && 'Rule saved; the location is replenished now if it is at or below the minimum'}</Success>
         </Card>
