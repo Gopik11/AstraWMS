@@ -176,8 +176,9 @@ public class ReleasePolicy {
     @Transactional
     public Map<String, Object> putOwnerPolicy(String ownerId, Boolean shipComplete, Boolean packList, String labelTemplate) {
         String template = labelTemplate == null || labelTemplate.isBlank() ? null : labelTemplate.trim().toUpperCase();
-        if (template != null && !List.of("STANDARD", "RETAIL", "MINIMAL").contains(template)) {
-            throw ApiException.badRequest("OUT_OWNER_POLICY_INVALID", "labelTemplate must be STANDARD, RETAIL or MINIMAL");
+        if (template != null && !List.of("STANDARD", "RETAIL").contains(template)) {
+            throw ApiException.badRequest("OUT_OWNER_POLICY_INVALID",
+                    "labelTemplate must be STANDARD (carrier label) or RETAIL (carrier label and a content label)");
         }
         jdbc.sql("""
                         insert into outbound_owner_policy (tenant_id, owner_id, ship_complete, pack_list, label_template,

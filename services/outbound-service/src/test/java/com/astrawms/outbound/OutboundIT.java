@@ -604,6 +604,8 @@ class OutboundIT {
 
     @Test
     void packingWithSsccAndLabelsThenLoadCloseShips_SHP001_SHP002_SHP003() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/owner-policies/ACME"), """
+                {"packList":true,"labelTemplate":"retail"}""").andExpect(jsonPath("$.label_template", is("RETAIL")));
         order(1, "CREATE", "3", "1");
         await(() -> "RELEASED".equals(orderStatus()));
         for (JsonNode pick : outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList()) {
@@ -660,6 +662,10 @@ class OutboundIT {
         String label = JsonPath.read(call(get("/api/v1/sites/DC1/outbound/cartons/" + box1), "")
                 .andReturn().getResponse().getContentAsString(), "$.label");
         assertThat(label).contains("^XA", box1, "Customer One");
+        assertThat(label).contains("CONTENTS", "SKU-1 x 3");                      // the owner's retail content label
+        call(get("/api/v1/sites/DC1/outbound/cartons/" + box1), "")
+                .andExpect(jsonPath("$.owner_id", is("ACME")))
+                .andExpect(jsonPath("$.pack_list", org.hamcrest.Matchers.containsString("PACK LIST")));
     }
 
     @Test

@@ -246,7 +246,7 @@ function OwnerRules({ site }: { site: string }) {
         </Field>
         <Field label="Label">
           <select value={f.labelTemplate} onChange={(e) => setF({ ...f, labelTemplate: e.target.value })}>
-            <option value="">Standard</option><option value="RETAIL">Retail</option><option value="MINIMAL">Minimal</option>
+            <option value="">Standard (carrier label)</option><option value="RETAIL">Retail (+ content label)</option>
           </select>
         </Field>
         <label className="check"><input type="checkbox" checked={f.packList} onChange={(e) => setF({ ...f, packList: e.target.checked })} /> Pack list in each carton</label>

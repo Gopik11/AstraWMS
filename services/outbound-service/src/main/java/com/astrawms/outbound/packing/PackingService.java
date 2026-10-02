@@ -133,11 +133,16 @@ public class PackingService {
         JsonNode shipTo = o.shipTo() == null ? null : json.readTree(o.shipTo());
         CarrierGateway.Label label = carriers.label(new CarrierGateway.Parcel(o.carrier(), sscc, c.orderRef(),
                 text(shipTo, "name"), text(shipTo, "city"), text(shipTo, "country"), weightKg));
+        // ADR-0021: a RETAIL owner gets a content label (what is in the carton) after the carrier label.
+        String zpl = label.zpl();
+        if ("RETAIL".equals(ownerRules(c.orderId()).get("label_template"))) {
+            zpl = zpl + "\n" + contentLabel(c.id(), sscc, c.orderRef());
+        }
         jdbc.sql("""
                         update carton set status = 'CLOSED', weight_kg = :w, carrier_scac = :scac, tracking_no = :tracking,
                             label = :label, closed_at = :now where id = :id""")
                 .param("w", weightKg).param("scac", label.carrierScac()).param("tracking", label.trackingNo())
-                .param("label", label.zpl()).param("now", Timestamp.from(clock.instant())).param("id", c.id()).update();
+                .param("label", zpl).param("now", Timestamp.from(clock.instant())).param("id", c.id()).update();
         return carton(siteId, sscc);
     }
 
@@ -167,16 +172,53 @@ public class PackingService {
     public Map<String, Object> carton(String siteId, String sscc) {
         Map<String, Object> c = jdbc.sql("""
                         select k.sscc, k.carton_type, k.status, k.weight_kg, k.carrier_scac, k.tracking_no, k.label,
-                               o.erp_doc_no
+                               o.erp_doc_no, o.id as order_id, o.ship_to ->> 'name' as ship_to_name
                         from carton k join outbound_order o on o.id = k.order_id where k.site_id = :site and k.sscc = :sscc""")
                 .param("site", siteId).param("sscc", sscc).query().listOfRows().stream().findFirst()
                 .orElseThrow(() -> unknownCarton(sscc));
         Map<String, Object> out = new HashMap<>(c);
-        out.put("items", jdbc.sql("""
+        List<Map<String, Object>> items = jdbc.sql("""
                         select ci.erp_line_ref, ci.item_no, ci.qty from carton_item ci join carton k on k.id = ci.carton_id
                         where k.site_id = :site and k.sscc = :sscc order by ci.erp_line_ref""")
-                .param("site", siteId).param("sscc", sscc).query().listOfRows());
+                .param("site", siteId).param("sscc", sscc).query().listOfRows();
+        out.put("items", items);
+        // ADR-0021: the owner's rules: a pack list in the carton, and which label template applies.
+        Map<String, Object> rules = ownerRules((UUID) c.get("order_id"));
+        out.remove("order_id");
+        out.put("owner_id", rules.get("owner_id"));
+        out.put("label_template", rules.getOrDefault("label_template", "STANDARD"));
+        if (Boolean.TRUE.equals(rules.get("pack_list"))) {
+            StringBuilder list = new StringBuilder("PACK LIST\nDelivery " + c.get("erp_doc_no") + "  Carton " + sscc
+                    + "\nShip to " + (c.get("ship_to_name") == null ? "" : c.get("ship_to_name")) + "\n\nLine    Item                Qty\n");
+            items.forEach(i -> list.append("%-8s%-20s%s%n".formatted(i.get("erp_line_ref"), i.get("item_no"),
+                    ((BigDecimal) i.get("qty")).stripTrailingZeros().toPlainString())));
+            out.put("pack_list", list.toString());
+        }
         return out;
+    }
+
+    /** The owner rules of an order (its first line's owner); empty when the owner has none. */
+    private Map<String, Object> ownerRules(UUID orderId) {
+        return jdbc.sql("""
+                        select l.owner_id, p.ship_complete, coalesce(p.pack_list, false) as pack_list,
+                               coalesce(p.label_template, 'STANDARD') as label_template
+                        from outbound_line l left join outbound_owner_policy p on p.owner_id = l.owner_id
+                        where l.order_id = :o order by l.erp_line_ref limit 1""")
+                .param("o", orderId).query().listOfRows().stream().findFirst().orElse(Map.of());
+    }
+
+    /** A ZPL content label: delivery, carton and what it holds. */
+    private String contentLabel(UUID cartonId, String sscc, String orderRef) {
+        StringBuilder zpl = new StringBuilder("^XA\n^FO40,40^A0N,36,36^FDCONTENTS^FS\n^FO40,90^A0N,26,26^FDDelivery "
+                + orderRef + "^FS\n^FO40,125^A0N,26,26^FDSSCC " + sscc + "^FS\n");
+        int y = 175;
+        for (Map<String, Object> i : jdbc.sql("select item_no, qty from carton_item where carton_id = :c order by erp_line_ref")
+                .param("c", cartonId).query().listOfRows()) {
+            zpl.append("^FO40,%d^A0N,26,26^FD%s x %s^FS%n".formatted(y, i.get("item_no"),
+                    ((BigDecimal) i.get("qty")).stripTrailingZeros().toPlainString()));
+            y += 35;
+        }
+        return zpl.append("^XZ").toString();
     }
 
     /**
