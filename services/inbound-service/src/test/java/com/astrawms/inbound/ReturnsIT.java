@@ -86,6 +86,7 @@ class ReturnsIT {
 
     private ResultActions unit(String key, String body, RequestPostProcessor auth) throws Exception {
         return mvc.perform(post("/api/v1/sites/DC1/returns/" + rma + "/units").with(auth).header("Idempotency-Key", key)
+                .header("X-Channel", "RF")                      // as the task service's RF return-receiving calls it
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
 

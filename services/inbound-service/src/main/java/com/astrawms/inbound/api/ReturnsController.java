@@ -53,6 +53,7 @@ public class ReturnsController {
     public ResponseEntity<Map<String, Object>> receive(@PathVariable String siteId, @PathVariable String rmaNo,
                                                        @RequestHeader("Idempotency-Key") String key,
                                                        @RequestBody ReceiveUnit body) {
+        RfOnly.require("Receiving returns");
         return ResponseEntity.status(HttpStatus.CREATED).body(returns.receive(siteId, rmaNo, key, body));
     }
 

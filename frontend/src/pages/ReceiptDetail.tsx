@@ -58,7 +58,11 @@ export default function ReceiptDetail() {
               ]} />
             </Card>
           )}
-          {canReceive && open && <ReceiveForms base={base} detail={d} onChange={detail.reload} />}
+          {canReceive && open && !hasRole('SUPERVISOR') && (
+            <div className="alert">Receive this delivery on RF: <Link to="/rf">Work</Link> takes you to its receiving task.
+              The desktop receives only as a supervisor's exception.</div>
+          )}
+          {hasRole('SUPERVISOR') && open && <ReceiveForms base={base} detail={d} onChange={detail.reload} />}
           {canReceive && open && <CloseForm base={base} detail={d} onChange={detail.reload} />}
           {hasRole('SUPERVISOR') && d.header.status === 'POSTING_FAILED' && <Repost base={base} onChange={detail.reload} />}
         </>
@@ -94,7 +98,7 @@ function ReceiveForms({ base, detail, onChange }: { base: string; detail: Detail
   }
   return (
     <div className="grid">
-      <Card title="Receive a line">
+      <Card title="Exception receipt: a line (supervisor)">
         <form onSubmit={submit} className="form">
           <Field label="Line">
             <select value={line} onChange={(e) => setLine(e.target.value)}>
@@ -120,7 +124,7 @@ function ReceiveForms({ base, detail, onChange }: { base: string; detail: Detail
         </form>
       </Card>
       {detail.handlingUnits.some((h) => !h.received) && (
-        <Card title="Receive a pallet by SSCC">
+        <Card title="Exception receipt: a pallet by SSCC (supervisor)">
           <form className="form" onSubmit={async (e) => (e.preventDefault(), (await receiveSscc.run()) && onChange())}>
             <Field label="SSCC"><input value={sscc} onChange={(e) => setSscc(e.target.value)} required /></Field>
             <Field label="Dock location"><input value={ssccLocation} onChange={(e) => setSsccLocation(e.target.value)} required /></Field>

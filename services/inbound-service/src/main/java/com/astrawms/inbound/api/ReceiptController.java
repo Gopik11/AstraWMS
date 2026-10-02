@@ -54,6 +54,7 @@ public class ReceiptController {
                                                      @PathVariable String lineRef,
                                                      @RequestHeader("Idempotency-Key") String key,
                                                      @Valid @RequestBody ReceiveLineRequest body) {
+        RfOnly.require("Receiving");
         scope.require(siteId, erpDocNo);
         return respond(receiving.receiveLine(siteId, erpDocNo, lineRef, key, body));
     }
@@ -64,6 +65,7 @@ public class ReceiptController {
     public ResponseEntity<ReceiveResult> receiveItem(@PathVariable String siteId, @PathVariable String erpDocNo,
                                                      @RequestHeader("Idempotency-Key") String key,
                                                      @Valid @RequestBody ReceiveItemRequest body) {
+        RfOnly.require("Receiving");
         scope.require(siteId, erpDocNo);
         return respond(receiving.receiveItem(siteId, erpDocNo, body.itemNo(), key, body.line()));
     }
@@ -74,6 +76,7 @@ public class ReceiptController {
                                                      @PathVariable String sscc,
                                                      @RequestHeader("Idempotency-Key") String key,
                                                      @Valid @RequestBody ReceiveSsccRequest body) {
+        RfOnly.require("Receiving");
         scope.require(siteId, erpDocNo);
         return respond(receiving.receiveSscc(siteId, erpDocNo, sscc, key, body));
     }

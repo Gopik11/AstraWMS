@@ -364,6 +364,25 @@ class InboundIT {
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(acme)).andExpect(status().isOk());
     }
 
+    // ------------------------------------------------------------------ ADR-0021 RF-only floor work
+
+    @Test
+    void receiversReceiveOnRfOnlyTheDesktopIsForSupervisorsExceptions() throws Exception {
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        String body = """
+                {"qty":2,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""";
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive").with(rita)
+                        .header("Idempotency-Key", "desk-1").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("RF_ONLY")));
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive").with(rita).header("X-Channel", "RF")
+                        .header("Idempotency-Key", "rf-1").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+        mvc.perform(post("/api/v1/sites/DC1/receipts/" + DOC + "/lines/000010/receive")
+                        .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .header("Idempotency-Key", "desk-2").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+    }
+
     // ------------------------------------------------------------------ ADR-0021 yard and dock appointments
 
     @Test

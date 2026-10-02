@@ -27,8 +27,11 @@ for svc in master-data-service inventory-service inbound-service sap-adapter; do
 step "Identity and master data (returns location RET-01)"
 provision "$TENANT" "$TENANT-admin" SOLUTION_ADMIN ERP_INTEGRATION INV_ANALYST
 provision "$TENANT" "$TENANT-receiver" RECEIVER
+provision "$TENANT" "$TENANT-supervisor" SUPERVISOR
 bearer "$TENANT-admin";    ADM=("${AUTH[@]}" -H "Content-Type: application/json"); ADM_AUTH="${AUTH[1]}"
 bearer "$TENANT-receiver"; R=("${AUTH[@]}" -H "Content-Type: application/json")
+# Receiving on the desktop is a supervisor's exception (ADR-0021); receivers receive on RF (see smoke-flow.sh).
+bearer "$TENANT-supervisor"; S=("${AUTH[@]}" -H "Content-Type: application/json")
 expect 204 -X PUT "$GW/api/v1/sites/DC1" "${ADM[@]}" -d '{"name":"Dallas DC","timeZone":"America/Chicago","erpSite":"1000"}'
 expect 200 -X PUT "$GW/api/v1/sites/DC1/zones/RET" "${ADM[@]}" -d '{"zoneType":"RETURNS","erpBucket":"0001"}'
 expect 200 -X PUT "$GW/api/v1/sites/DC1/locations/RET-01" "${ADM[@]}" -d '{"zoneId":"RET","locationType":"FLOOR"}'
@@ -45,13 +48,15 @@ wait_for "RMA expected" has_status 0060000701 EXPECTED
 echo "RMA 0060000701 EXPECTED"
 
 step "Receive: grade A -> RESTOCK (AVAILABLE), grade D -> RTV (BLOCKED), a third unit refused (over RMA)"
-unit() { expect "$1" -X POST "$GW/api/v1/sites/DC1/returns/0060000701/units" "${R[@]}" -H "Idempotency-Key: $2" -d "$3"; }
+unit() { expect "$1" -X POST "$GW/api/v1/sites/DC1/returns/0060000701/units" "${S[@]}" -H "Idempotency-Key: $2" -d "$3"; }
 # Inventory may still be catching up on the item and location projections; retry the first unit.
 for _ in $(seq 1 30); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/api/v1/sites/DC1/returns/0060000701/units" "${R[@]}" -H "Idempotency-Key: u1" \
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/api/v1/sites/DC1/returns/0060000701/units" "${S[@]}" -H "Idempotency-Key: u1" \
     -d '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"A","locationId":"RET-01"}')"
   [[ "$code" == 201 ]] && break; sleep 1
 done
+expect 403 -X POST "$GW/api/v1/sites/DC1/returns/0060000701/units" "${R[@]}" -H "Idempotency-Key: desk"   -d '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"A","locationId":"RET-01"}'
+grep -q RF_ONLY <<<"$BODY" || fail "expected RF_ONLY for a receiver at the desktop: $BODY"
 unit 201 u1 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"A","locationId":"RET-01"}'
 [[ "$(json "['disposition']" <<<"$BODY")" == RESTOCK ]] || fail "expected RESTOCK: $BODY"
 unit 201 u2 '{"erpLineRef":"000010","itemNo":"SKU-1","qty":1,"uom":"EA","conditionGrade":"D","locationId":"RET-01"}'
@@ -74,7 +79,7 @@ echo "SAP: receipt $receipt (651), restock $disposition (453), RMA document $(js
 step "Blind return (no RMA)"
 expect 201 -X POST "$GW/api/v1/sites/DC1/returns" "${R[@]}" -d '{"customerName":"Walk-in"}'
 blind="$(json "['rma_no']" <<<"$BODY")"
-expect 201 -X POST "$GW/api/v1/sites/DC1/returns/$blind/units" "${R[@]}" -H "Idempotency-Key: b1" \
+expect 201 -X POST "$GW/api/v1/sites/DC1/returns/$blind/units" "${S[@]}" -H "Idempotency-Key: b1" \
   -d '{"itemNo":"SKU-1","ownerId":"ACME","qty":1,"uom":"EA","conditionGrade":"C","locationId":"RET-01"}'
 expect 200 -X POST "$GW/api/v1/sites/DC1/returns/$blind/close" "${R[@]}"
 wait_for "blind confirmed" has_status "$blind" CONFIRMED
