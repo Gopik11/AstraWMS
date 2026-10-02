@@ -144,6 +144,10 @@ export interface Task {
   partner?: string | null
   expectedLines?: { lineRef: string; itemNo: string; qty: number; uom: string; lotNo?: string | null }[] | null
   scans?: number
+  overrideReason?: string | null
+  shortReason?: string | null
+  shortAction?: string | null
+  assignedAt?: string | null
 }
 
 export interface ReceiptSummary {
@@ -155,6 +159,8 @@ export interface ReceiptSummary {
   lineCount: number
   erpDocument?: string | null
   erpErrorText?: string | null
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface ReceiptDetail {

@@ -301,7 +301,11 @@ class TaskIT {
         confirm(id, "LPN-1", "F-01", "44")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.code", is("TSK_LOCATION_NOT_ALLOWED")));
-        confirm(id, "LPN-1", "A-01", "33").andExpect(jsonPath("$.strategy", is("OVERRIDE")))
+        confirm(id, "LPN-1", "A-01", "33").andExpect(jsonPath("$.code", is("TSK_OVERRIDE_REASON_REQUIRED")));   // ADR-0021
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/confirm"), """
+                {"lpnId":"LPN-1","locationId":"A-01","checkDigit":"33","overrideReason":"LOCATION_FULL"}""")
+                .andExpect(jsonPath("$.strategy", is("OVERRIDE")))
+                .andExpect(jsonPath("$.overrideReason", is("LOCATION_FULL")))
                 .andExpect(jsonPath("$.confirmedLocation", is("A-01")))
                 // ADR-0019: the task shows where the LPN went; the engine's suggestion is kept beside it.
                 .andExpect(jsonPath("$.targetLocation", is("A-01")))

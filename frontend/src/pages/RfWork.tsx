@@ -55,13 +55,20 @@ function TaskHead({ task }: { task: Task }) {
   )
 }
 
+const OVERRIDE_REASONS = [['LOCATION_FULL', 'Location full'], ['LOCATION_BLOCKED', 'Location blocked'],
+  ['LOCATION_DAMAGED', 'Location damaged'], ['CLOSER_LOCATION', 'Closer location'], ['CONSOLIDATE', 'Consolidate with same item'],
+  ['OTHER', 'Other']]
+
 function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [lpn, setLpn] = useState('')
   const [location, setLocation] = useState(task.targetLocation)
   const [checkDigit, setCheckDigit] = useState('')
   const [reason, setReason] = useState('LOCATION_BLOCKED')
+  const [overrideReason, setOverrideReason] = useState('')
+  const overriding = location.trim().toUpperCase() !== (task.targetLocation ?? '').toUpperCase()
   const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/confirm`,
-    { lpnId: lpn.trim(), locationId: location.trim(), checkDigit: checkDigit.trim() }))
+    { lpnId: lpn.trim(), locationId: location.trim().toUpperCase(), checkDigit: checkDigit.trim(),
+      overrideReason: overriding ? overrideReason : null }))
   const exception = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/exception`, { reason }))
 
   const submit = async (e: FormEvent) => {
@@ -86,6 +93,14 @@ function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m:
       <Field label="Location" hint="Change only to override the suggested location">
         <input value={location} onChange={(e) => setLocation(e.target.value)} required />
       </Field>
+      {overriding && (
+        <Field label={`Why not ${task.targetLocation}?`}>
+          <select value={overrideReason} onChange={(e) => setOverrideReason(e.target.value)} required>
+            <option value="">Choose…</option>
+            {OVERRIDE_REASONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="Location check digit"><input inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required /></Field>
       <ErrorBox error={confirm.error ?? exception.error} />
       <div className="actions">

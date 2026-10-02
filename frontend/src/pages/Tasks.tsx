@@ -19,7 +19,7 @@ function what(t: Task): string {
 function to(t: Task): string {
   const target = t.targetLocation ?? ''
   if (t.taskType === 'PUTAWAY' && t.status === 'COMPLETED' && t.suggestedLocation && t.suggestedLocation !== target) {
-    return `${target} (suggested ${t.suggestedLocation})`
+    return `${target} (suggested ${t.suggestedLocation}${t.overrideReason ? `; ${t.overrideReason.toLowerCase().replace(/_/g, ' ')}` : ''})`
   }
   return target
 }
@@ -54,7 +54,7 @@ export default function Tasks() {
         { header: 'From', cell: (t) => t.fromLocation },
         { header: 'To', cell: to },
         { header: 'Assigned to', cell: (t) => t.assignedTo },
-        { header: 'Exception', cell: (t) => t.exceptionReason },
+        { header: 'Exception', cell: (t) => [t.exceptionReason, t.shortReason && `${t.shortReason} → ${t.shortAction}`].filter(Boolean).join(' · ') },
         { header: 'Created', cell: (t) => fmtDate(t.createdAt) },
       ]} />
     </Page>

@@ -395,7 +395,7 @@ public class ReceivingService {
     private static final String SUMMARY = """
             select e.id, e.erp_doc_no, e.erp_doc_type, e.revision, e.vendor_id, e.expected_arrival_utc, e.status,
                    (select count(*) from receipt_expectation_line l where l.expectation_id = e.id) as line_count,
-                   e.confirmation_txn_id, e.erp_document, e.erp_error_class, e.erp_error_text
+                   e.confirmation_txn_id, e.erp_document, e.erp_error_class, e.erp_error_text, e.created_at, e.updated_at
             from receipt_expectation e""";
 
     private static ExpectationSummary summary(ResultSet rs, int n) throws SQLException {
@@ -403,7 +403,8 @@ public class ReceivingService {
                 rs.getString("erp_doc_type"), rs.getLong("revision"), rs.getString("vendor_id"),
                 rs.getTimestamp("expected_arrival_utc").toInstant(), rs.getString("status"), rs.getInt("line_count"),
                 rs.getString("confirmation_txn_id"), rs.getString("erp_document"), rs.getString("erp_error_class"),
-                rs.getString("erp_error_text"));
+                rs.getString("erp_error_text"), rs.getTimestamp("created_at").toInstant(),
+                rs.getTimestamp("updated_at").toInstant());
     }
 
     // =====================================================================================================

@@ -752,8 +752,12 @@ public class TaskService {
      * check digit; a location other than the target is accepted only if it passes the engine's hard constraints.
      * Idempotent: confirming a completed task returns it unchanged.
      */
+    public static final List<String> OVERRIDE_REASONS = List.of("LOCATION_FULL", "LOCATION_BLOCKED", "LOCATION_DAMAGED",
+            "CLOSER_LOCATION", "CONSOLIDATE", "OTHER");
+
     @Transactional
-    public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit) {
+    public TaskView confirm(String siteId, UUID taskId, String lpnId, String locationId, String checkDigit,
+                            String overrideReason) {
         Task t = lockTask(siteId, taskId);
         if (!"PUTAWAY".equals(t.type())) {
             throw ApiException.unprocessable("TSK_WRONG_TYPE", "Task " + taskId + " is a " + t.type() + " task");
@@ -774,6 +778,7 @@ public class TaskService {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + locationId);
         }
         String strategy = null;
+        String reason = null;
         if (!locationId.equals(t.targetLocation())) {
             List<Stock> contents = projections.lpnContents(siteId, t.lpnId(), t.fromLocation());
             int reservedThere = reservations(siteId, t.id()).getOrDefault(locationId, 0);
@@ -781,17 +786,25 @@ public class TaskService {
             if (rejection.isPresent()) {
                 throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, rejection.get().code(), rejection.get().reason());
             }
+            // ADR-0021: an override says why, so the task explains itself like the engine's own choice does.
+            reason = overrideReason == null || overrideReason.isBlank() ? null : overrideReason.trim().toUpperCase();
+            if (reason == null || !OVERRIDE_REASONS.contains(reason)) {
+                throw ApiException.unprocessable("TSK_OVERRIDE_REASON_REQUIRED",
+                        "Putting away to " + locationId + " instead of " + t.targetLocation() + " needs a reason: one of "
+                                + OVERRIDE_REASONS);
+            }
             strategy = "OVERRIDE";
         }
         UUID operation = inventory.moveLpn(siteId, "TSK-" + taskId, t.lpnId(), t.fromLocation(), locationId);
         jdbc.sql("""
                         update task set status = 'COMPLETED', confirmed_location = :loc, target_location = :loc,
                             inventory_operation_id = :op, strategy = coalesce(:strategy, strategy), completed_at = :now,
-                            updated_at = :now
+                            override_reason = :reason, updated_at = :now
                         where id = :id""")
-                .param("loc", locationId).param("op", operation).param("strategy", strategy)
+                .param("loc", locationId).param("op", operation).param("strategy", strategy).param("reason", reason)
                 .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
-        event(taskId, "COMPLETED", (strategy != null ? "override of " + t.targetLocation() + " → " : "at ") + locationId);
+        event(taskId, "COMPLETED", (strategy != null ? "override (" + reason + ") of " + t.targetLocation() + " → " : "at ")
+                + locationId);
         return view(siteId, taskId);
     }
 
@@ -881,7 +894,7 @@ public class TaskService {
                                exception_reason, assigned_to, confirmed_location, inventory_operation_id, created_at,
                                completed_at, allocation_id, order_ref, order_line_ref, item_no, lot_no, qty, uom, to_lpn,
                                qty_picked, count_id, count_sequence, suggested_location, receive_kind, doc_no, partner,
-                               expected_lines::text, scans
+                               expected_lines::text, scans, override_reason, short_reason, short_action, assigned_at
                         from task where site_id = :site and id = :id""")
                 .param("site", siteId).param("id", id)
                 .query((rs, n) -> new TaskView(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getInt(4),
@@ -892,7 +905,9 @@ public class TaskService {
                         strip(rs.getBigDecimal(21)), rs.getString(22), rs.getString(23), strip(rs.getBigDecimal(24)),
                         rs.getObject(25, UUID.class), (Integer) rs.getObject(26), rs.getString(27), rs.getString(28),
                         rs.getString(29), rs.getString(30),
-                        rs.getString(31) == null ? null : json.readTree(rs.getString(31)), rs.getInt(32)))
+                        rs.getString(31) == null ? null : json.readTree(rs.getString(31)), rs.getInt(32), rs.getString(33),
+                        rs.getString(34), rs.getString(35),
+                        rs.getTimestamp(36) == null ? null : rs.getTimestamp(36).toInstant()))
                 .optional()
                 .orElseThrow(() -> ApiException.notFound("TSK_UNKNOWN", "Task " + id + " not found"));
         String where = base.status().equals("COMPLETED") ? base.confirmedLocation() : base.fromLocation();
@@ -906,7 +921,7 @@ public class TaskService {
                 base.allocationId(), base.orderRef(), base.orderLineRef(), base.itemNo(), base.lotNo(), base.qty(),
                 base.uom(), base.toLpn(), base.qtyPicked(), base.countId(), base.countSequence(),
                 base.suggestedLocation(), base.receiveKind(), base.docNo(), base.partner(), base.expectedLines(),
-                base.scans());
+                base.scans(), base.overrideReason(), base.shortReason(), base.shortAction(), base.assignedAt());
     }
 
     private static java.math.BigDecimal strip(java.math.BigDecimal v) {

@@ -26,16 +26,36 @@ function Tiles({ counts, link }: { counts: Record<string, number>; link: string 
   )
 }
 
-/** One number that needs attention; highlighted when not zero. */
-function Attention({ n, label, to, detail }: { n: number | undefined; label: string; to: string; detail?: string }) {
+/** One number that needs attention; highlighted when not zero, red when its oldest item is past the threshold. */
+function Attention({ n, label, to, detail, oldest, limitMin }: {
+  n: number | undefined; label: string; to: string; detail?: string; oldest?: number; limitMin?: number
+}) {
+  const late = oldest !== undefined && limitMin !== undefined && oldest > limitMin
   return (
-    <Link className={`tile ${n ? 'tile-warn' : ''}`} to={to} title={detail}>
+    <Link className={`tile ${late ? 'tile-late' : n ? 'tile-warn' : ''}`} to={to} title={detail}>
       <span className="tile-n">{n ?? '…'}</span>
       <span className="tile-l">{label}</span>
+      {oldest !== undefined && n ? <span className="tile-d">oldest {age(oldest)}{limitMin !== undefined ? ` (limit ${age(limitMin)})` : ''}</span> : null}
       {detail && <span className="tile-d">{detail}</span>}
     </Link>
   )
 }
+
+/** Minutes since a timestamp. */
+function minutesSince(at: unknown): number {
+  return at ? Math.max(0, (Date.now() - new Date(String(at)).getTime()) / 60000) : 0
+}
+
+function age(min: number): string {
+  return min < 60 ? `${Math.round(min)} min` : min < 2880 ? `${Math.round(min / 60)} h` : `${Math.round(min / 1440)} d`
+}
+
+function oldestOf(times: unknown[]): number | undefined {
+  return times.length ? Math.max(...times.map(minutesSince)) : undefined
+}
+
+/** Control-tower thresholds (minutes): past them a tile turns red. */
+const LIMITS = { receiptNotStarted: 30, dockStock: 15, pickAssigned: 15, postingFailed: 30 }
 
 /** Site overview (§G.6 control tower, first cut): what needs attention, then documents and work by status. */
 export default function Home() {
@@ -47,7 +67,12 @@ export default function Home() {
   const returns = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns`), [site])
   const dock = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/inbound-staging`), [site])
 
-  const notStarted = receipts.data?.filter((r) => r.status === 'NOT_STARTED').length
+  const notStartedRows = receipts.data?.filter((r) => r.status === 'NOT_STARTED') ?? []
+  const notStarted = receipts.data ? notStartedRows.length : undefined
+  const failedTimes = [...(receipts.data ?? []).filter((r) => r.status === 'POSTING_FAILED').map((r) => r.updatedAt),
+    ...(returns.data ?? []).filter((r) => r.status === 'POSTING_FAILED').map((r) => r.updated_at)]
+  const pickRows = (tasks.data ?? []).filter((t) => t.taskType === 'PICK' && t.status === 'ASSIGNED')
+  const pickStuck = tasks.data ? pickRows.filter((t) => minutesSince(t.assignedAt) > LIMITS.pickAssigned).length : undefined
   const openOrders = orders.data?.filter((o) => !['SHIPPED', 'CONFIRMED', 'CANCELLED', 'SHIP_ERROR'].includes(String(o.status)))
   const backorderedLines = openOrders?.reduce((n, o) => n + Number(o.lines_short ?? 0), 0)
   const postingFailed = receipts.data && returns.data
@@ -68,14 +93,22 @@ export default function Home() {
       <Card title="Needs attention">
         <ErrorBox error={receipts.error ?? orders.error ?? returns.error ?? dock.error} />
         <div className="tiles">
-          <Attention n={notStarted} label="Receipts not started" to="/receipts?status=NOT_STARTED" />
+          <Attention n={notStarted} label="Receipts not started" to="/receipts?status=NOT_STARTED"
+                     oldest={oldestOf(notStartedRows.map((r) => r.createdAt))} limitMin={LIMITS.receiptNotStarted} />
           <Attention n={backorderedLines} label="Order lines short" to="/orders?status=BACKORDERED"
                      detail="Unallocated quantity on open orders; recovered when stock is put away" />
           <Attention n={postingFailed} label="ERP posting failed" to="/receipts?status=POSTING_FAILED"
-                     detail="Receipts and returns the ERP rejected; repost after the fix" />
-          <Attention n={shipErrors} label="Goods issue failed" to="/orders?status=SHIP_ERROR" />
+                     detail="Receipts and returns the ERP rejected; repost after the fix"
+                     oldest={oldestOf(failedTimes)} limitMin={LIMITS.postingFailed} />
+          <Attention n={shipErrors} label="Goods issue failed" to="/orders?status=SHIP_ERROR"
+                     oldest={oldestOf((orders.data ?? []).filter((o) => o.status === 'SHIP_ERROR').map((o) => o.updated_at))}
+                     limitMin={LIMITS.postingFailed} />
+          <Attention n={pickStuck} label={`Picks assigned > ${LIMITS.pickAssigned} min`} to="/tasks?type=PICK&status=ASSIGNED"
+                     detail="Assigned to an operator but not confirmed"
+                     oldest={oldestOf(pickRows.map((t) => t.assignedAt))} limitMin={LIMITS.pickAssigned} />
           <Attention n={dockLpns} label="Pallets waiting on dock" to="/tasks?type=PUTAWAY"
-                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} units available at dock / receiving, not yet allocable`} />
+                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} units available at dock / receiving, not yet allocable`}
+                     oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} />
         </div>
         {hasRole('SUPERVISOR') && (dockLpns ?? 0) > 0 && (
           <div className="row">

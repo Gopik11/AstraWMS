@@ -49,7 +49,7 @@ public class TaskController {
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','SUPERVISOR')")
     @PostMapping("/{taskId}/confirm")
     public TaskView confirm(@PathVariable String siteId, @PathVariable UUID taskId, @Valid @RequestBody ConfirmRequest body) {
-        return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit());
+        return tasks.confirm(siteId, taskId, body.lpnId(), body.locationId(), body.checkDigit(), body.overrideReason());
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")

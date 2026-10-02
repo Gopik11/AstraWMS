@@ -105,6 +105,35 @@ public class AllocationRepository {
                 .list();
     }
 
+    /** Where the item's stock is when an allocation comes up short (ADR-0021); quantities in base units. */
+    public record ShortFacts(BigDecimal awaitingPutaway, String awaitingAt, BigDecimal notAvailable, String statuses,
+                             BigDecimal allocatedElsewhere, BigDecimal otherLots) {
+    }
+
+    public ShortFacts shortFacts(String siteId, String ownerId, String itemNo, String lotNo) {
+        return jdbc.sql("""
+                        select
+                          coalesce(sum(b.qty - b.allocated_qty) filter (where b.stock_status = 'AVAILABLE' and not ok), 0),
+                          string_agg(distinct b.location_id, ', ') filter (where b.stock_status = 'AVAILABLE' and not ok),
+                          coalesce(sum(b.qty) filter (where b.stock_status <> 'AVAILABLE' and not outbound), 0),
+                          string_agg(distinct b.stock_status, ', ') filter (where b.stock_status <> 'AVAILABLE' and not outbound),
+                          coalesce(sum(b.allocated_qty) filter (where b.stock_status = 'AVAILABLE' and ok), 0),
+                          coalesce(sum(b.qty - b.allocated_qty) filter (where b.stock_status = 'AVAILABLE' and ok
+                                   and cast(:lot as text) is not null and b.lot_no <> :lot), 0)
+                        from (select b.*, l.location_type,
+                                     (l.status = 'ACTIVE' and l.location_type not in (:staging)
+                                      and coalesce(l.zone_type, '') not in (:zones)) as ok,
+                                     (l.location_type = 'STAGING_OUT' or coalesce(l.zone_type, '') = 'SHIPPING') as outbound
+                              from inventory_balance b join ref_location l on l.site_id = b.site_id and l.location_id = b.location_id
+                              where b.site_id = :site and b.owner_id = :owner and b.item_no = :item) b""")
+                .param("site", siteId).param("owner", ownerId).param("item", itemNo).param("lot", lotNo)
+                .param("staging", NON_ALLOCABLE_TYPES).param("zones", NON_ALLOCABLE_ZONES)
+                .query((rs, n) -> new ShortFacts(Quantities.normalize(rs.getBigDecimal(1)), rs.getString(2),
+                        Quantities.normalize(rs.getBigDecimal(3)), rs.getString(4),
+                        Quantities.normalize(rs.getBigDecimal(5)), Quantities.normalize(rs.getBigDecimal(6))))
+                .single();
+    }
+
     // ------------------------------------------------------------------ balance-level reservation
 
     public void reserve(BalanceKey k, BigDecimal qty) {

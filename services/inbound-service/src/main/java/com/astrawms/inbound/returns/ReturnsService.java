@@ -371,7 +371,7 @@ public class ReturnsService {
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql("""
                         select r.rma_no, r.return_type, r.status, r.customer_name, r.expected_arrival_utc, r.erp_document,
-                               r.erp_error_text, r.created_at,
+                               r.erp_error_text, r.created_at, r.updated_at,
                                (select count(*) from return_line l where l.return_id = r.id) as lines,
                                (select coalesce(sum(u.qty), 0) from return_unit u where u.return_id = r.id) as units
                         from return_order r

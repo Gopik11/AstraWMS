@@ -203,6 +203,13 @@ class OutboundIT {
         stockArrived("SKU-SER", "ADJUST_POS");
         await(() -> shortOf("000020").signum() == 0);
         assertThat(outbox(OutboundContracts.PickRequested.TYPE)).hasSize(3);
+        // ADR-0021: which stock freed which line.
+        call(get("/api/v1/sites/DC1/outbound/orders/" + doc), "")
+                .andExpect(jsonPath("$.recoveries[0].erp_line_ref", is("000010")))
+                .andExpect(jsonPath("$.recoveries[0].trigger", is("AUTOMATIC")))
+                .andExpect(jsonPath("$.recoveries[0].txn_type", is("MOVE_IN")))
+                .andExpect(jsonPath("$.recoveries[0].lpn_id", is("LPN-NEW")))
+                .andExpect(jsonPath("$.recoveries[1].txn_type", is("ADJUST_POS")));
     }
 
     @Test

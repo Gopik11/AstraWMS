@@ -182,10 +182,11 @@ public class OutboundService {
                     l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of());
             jdbc.sql("""
                             update outbound_line set base_uom = :baseUom, qty_requested_base = :reqBase,
-                                qty_allocated = :alloc, qty_short = :short
+                                qty_allocated = :alloc, qty_short = :short, short_reason = :reason, short_detail = :detail
                             where order_id = :o and erp_line_ref = :ref""")
                     .param("baseUom", a.baseUom()).param("reqBase", a.requestedQty()).param("alloc", a.allocatedQty())
-                    .param("short", a.shortQty()).param("o", order.id()).param("ref", l.ref()).update();
+                    .param("short", a.shortQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                    .param("o", order.id()).param("ref", l.ref()).update();
             requestPicks(order, l.ref(), l.owner(), l.item(), a, null);
             totalAllocated = totalAllocated.add(a.allocatedQty());
         }
@@ -228,10 +229,15 @@ public class OutboundService {
      * goods issue first, then the highest order priority. A recovered order is RELEASED with pick tasks. Picked orders
      * are left alone (they may be packed); a supervisor recovers them with {@link #reallocateShorts}.
      */
+    /** The inventory movement that made stock available, kept in the recovery log (ADR-0021). */
+    public record StockArrival(String txnType, String locationId, String lpnId, UUID operationId) {
+    }
+
     @Transactional
-    public void onStockAvailable(String siteId, String ownerId, String itemNo, UUID operationId) {
+    public void onStockAvailable(String siteId, String ownerId, String itemNo, StockArrival arrival) {
         for (ShortLine s : shortLines(siteId, ownerId, itemNo, null, AUTO_RECOVERY, false)) {
-            BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + operationId + "-" + s.erpDocNo() + "-" + s.ref());
+            BigDecimal got = recover(s, AUTO_RECOVERY, "OUT-REC-" + arrival.operationId() + "-" + s.erpDocNo() + "-" + s.ref(),
+                    "AUTOMATIC", arrival);
             if (got.compareTo(s.shortQty()) < 0) {
                 break;   // the new stock is used up
             }
@@ -254,17 +260,14 @@ public class OutboundService {
         String attempt = UUID.randomUUID().toString().substring(0, 8);
         BigDecimal recovered = BigDecimal.ZERO;
         for (ShortLine s : shortLines(siteId, null, null, o.id(), MANUAL_RECOVERY, true)) {
-            recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref()));
+            recovered = recovered.add(recover(s, MANUAL_RECOVERY, "OUT-RS-" + attempt + "-" + erpDocNo + "-" + s.ref(),
+                    "MANUAL", null));
         }
         Map<String, Object> result = new HashMap<>(detail(siteId, erpDocNo));
         result.put("recoveredQty", strip(recovered));
         return result;
     }
 
-    /**
-     * Short lines in recovery order. Automatic recovery takes only the open short ({@code qty_short - qty_short_closed});
-     * a supervisor's reallocation ({@code includeClosed}) also reopens shorts that were going to ship short.
-     */
     /**
      * Supervisor "close shorts": what is still short ships short. Shorts waiting for stock (BACKORDER) stop waiting; an
      * order with nothing left to pick and something picked becomes PICKED.
@@ -287,6 +290,10 @@ public class OutboundService {
         return detail(siteId, erpDocNo);
     }
 
+    /**
+     * Short lines in recovery order. Automatic recovery takes only the open short ({@code qty_short - qty_short_closed});
+     * a supervisor's reallocation ({@code includeClosed}) also reopens shorts that were going to ship short.
+     */
     private List<ShortLine> shortLines(String siteId, String ownerId, String itemNo, UUID orderId, List<String> statuses,
                                        boolean includeClosed) {
         String qty = includeClosed ? "l.qty_short" : "l.qty_short - l.qty_short_closed";
@@ -307,7 +314,7 @@ public class OutboundService {
                 .list();
     }
 
-    private BigDecimal recover(ShortLine s, List<String> statuses, String key) {
+    private BigDecimal recover(ShortLine s, List<String> statuses, String key, String trigger, StockArrival arrival) {
         Order order = lockOrder(s.orderId());
         if (!statuses.contains(order.status())) {
             return BigDecimal.ZERO;
@@ -315,6 +322,11 @@ public class OutboundService {
         InventoryClient.AllocateResult a = inventory.allocate(order.siteId(), key, order.erpDocNo(), s.ref(), s.owner(),
                 s.item(), s.shortQty(), s.baseUom(), s.lot(), List.of());
         if (a.allocatedQty().signum() == 0) {
+            if (a.shortReason() != null) {          // still short: keep the latest explanation
+                jdbc.sql("update outbound_line set short_reason = :r, short_detail = :d where order_id = :o and erp_line_ref = :ref")
+                        .param("r", a.shortReason()).param("d", a.shortDetail()).param("o", order.id()).param("ref", s.ref())
+                        .update();
+            }
             return BigDecimal.ZERO;
         }
         requestPicks(order, s.ref(), s.owner(), s.item(), a, null);
@@ -322,9 +334,24 @@ public class OutboundService {
                         update outbound_line set qty_allocated = qty_allocated + :got, qty_short = qty_short - :got,
                             qty_short_pick = least(qty_short_pick, qty_short - :got),
                             qty_short_closed = least(qty_short_closed, qty_short - :got),
-                            short_hold = short_hold and qty_short - :got > qty_short_closed
+                            short_hold = short_hold and qty_short - :got > qty_short_closed,
+                            short_reason = case when qty_short - :got > 0 then :reason end,
+                            short_detail = case when qty_short - :got > 0 then :detail end
                         where order_id = :o and erp_line_ref = :ref""")
-                .param("got", a.allocatedQty()).param("o", order.id()).param("ref", s.ref()).update();
+                .param("got", a.allocatedQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                .param("o", order.id()).param("ref", s.ref()).update();
+        // Which stock freed which order (ADR-0021): the recovery log shown on the order.
+        jdbc.sql("""
+                        insert into outbound_recovery (tenant_id, order_id, erp_line_ref, qty, trigger, txn_type, location_id,
+                                                       lpn_id, operation_id, recovered_by, recovered_at)
+                        values (:t, :o, :ref, :qty, :trigger, :txn, :loc, :lpn, :op, :user, :now)""")
+                .param("t", TenantContext.tenantId()).param("o", order.id()).param("ref", s.ref())
+                .param("qty", a.allocatedQty()).param("trigger", trigger)
+                .param("txn", arrival == null ? null : arrival.txnType())
+                .param("loc", arrival == null ? null : arrival.locationId())
+                .param("lpn", arrival == null || arrival.lpnId() == null || arrival.lpnId().isEmpty() ? null : arrival.lpnId())
+                .param("op", arrival == null ? null : arrival.operationId())
+                .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
         if (!"RELEASED".equals(order.status())) {
             setStatus(order.id(), "RELEASED");
         }
@@ -675,7 +702,7 @@ public class OutboundService {
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         return jdbc.sql("""
                         select o.erp_doc_no, o.order_type, o.status, o.carrier_scac, o.planned_gi_utc, o.shipment_txn_id,
-                               o.erp_document, o.priority, o.ship_to ->> 'name' as ship_to_name,
+                               o.erp_document, o.priority, o.ship_to ->> 'name' as ship_to_name, o.updated_at,
                                (select count(*) from outbound_line l where l.order_id = o.id and l.qty_short > 0) as lines_short
                         from outbound_order o where o.site_id = :site and (cast(:status as text) is null or o.status = :status)
                           and (cast(:q as text) is null or upper(o.erp_doc_no) like :q
@@ -704,13 +731,17 @@ public class OutboundService {
         Map<String, Object> result = new HashMap<>(header);
         result.put("lines", jdbc.sql("""
                         select erp_line_ref, item_no, qty_requested, uom, base_uom, qty_requested_base, qty_allocated,
-                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold
+                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold, short_reason, short_detail
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         result.put("allocations", jdbc.sql("""
                         select allocation_id, erp_line_ref, location_id, lpn_id, lot_no, qty, qty_picked, qty_short,
                                status, replaces, short_reason, short_action
                         from outbound_allocation where order_id = :o order by erp_line_ref""")
+                .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
+        result.put("recoveries", jdbc.sql("""
+                        select erp_line_ref, qty, trigger, txn_type, location_id, lpn_id, operation_id, recovered_by, recovered_at
+                        from outbound_recovery where order_id = :o order by id""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         return result;
     }

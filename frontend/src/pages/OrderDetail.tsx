@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { get, post, type Row } from '../api'
 import { useAuth } from '../auth'
-import { Badge, Card, ErrorBox, Field, Page, Table, fmtQty, useAction, useLoad, useSite } from '../ui'
+import { Badge, Card, ErrorBox, Field, Page, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 interface OrderDetailView extends Row {
   status: string
@@ -46,12 +46,25 @@ export default function OrderDetail() {
               { header: 'Picked', cell: (l) => fmtQty(l.qty_picked), align: 'right' },
               { header: 'Short', cell: (l) => fmtQty(l.qty_short), align: 'right' },
               { header: 'Short (picks)', cell: (l) => fmtQty(l.qty_short_pick), align: 'right' },
+              { header: 'Why short', cell: (l) => (Number(l.qty_short) > 0 && l.short_reason
+                  ? <span title={String(l.short_detail ?? '')}>{String(l.short_reason).toLowerCase().replace(/_/g, ' ')}: {String(l.short_detail ?? '')}</span> : '') },
               { header: 'Short state', cell: (l) => Number(l.qty_short) <= 0 ? ''
                   : l.short_hold ? 'waiting for stock' : Number(l.qty_short_closed) >= Number(l.qty_short) ? 'ships short' : 'recoverable' },
               { header: 'From', cell: (l) => d.allocations.filter((a) => a.erp_line_ref === l.erp_line_ref && a.status !== 'CANCELLED')
                   .map((a) => `${String(a.location_id)}${a.lpn_id ? ` / ${String(a.lpn_id)}` : ''}`).join(', ') },
             ]} />
           </Card>
+          {(d.recoveries as Row[] | undefined)?.length ? (
+            <Card title="Recovered shorts">
+              <Table rows={d.recoveries as Row[]} columns={[
+                { header: 'When', cell: (r) => fmtDate(r.recovered_at) },
+                { header: 'Line', cell: (r) => String(r.erp_line_ref) },
+                { header: 'Qty', cell: (r) => fmtQty(r.qty), align: 'right' },
+                { header: 'Freed by', cell: (r) => (r.trigger === 'MANUAL' ? `supervisor reallocation (${String(r.recovered_by)})`
+                    : `${String(r.txn_type ?? 'stock')}${r.lpn_id ? ` of ${String(r.lpn_id)}` : ''} at ${String(r.location_id ?? '?')}`) },
+              ]} />
+            </Card>
+          ) : null}
           <Card title="Allocations and picks">
             <Table rows={d.allocations} empty="Not allocated (pooled or backordered)" columns={[
               { header: 'Line', cell: (a) => String(a.erp_line_ref) },
