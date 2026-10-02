@@ -18,6 +18,7 @@ import Counts from './pages/Counts'
 import Replenishment from './pages/Replenishment'
 import Slotting from './pages/Slotting'
 import Labor from './pages/Labor'
+import Yard from './pages/Yard'
 import Tasks from './pages/Tasks'
 import MasterData from './pages/MasterData'
 import ErpSimulator from './pages/ErpSimulator'
@@ -52,6 +53,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/replenishment', label: 'Replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
       { to: '/slotting', label: 'Slotting', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST'] },
       { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
+      { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
       { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'] },
     ],
   },
@@ -117,6 +119,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/" element={<Home />} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
           <Route path="/slotting" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST']}><Slotting /></Guard>} />
+          <Route path="/yard" element={<Guard roles={['SUPERVISOR', 'RECEIVER']}><Yard /></Guard>} />
           <Route path="/labor" element={<Guard roles={['SUPERVISOR', 'SOLUTION_ADMIN']}><Labor /></Guard>} />
           <Route path="/replenishment" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN']}><Replenishment /></Guard>} />
           <Route path="/counts" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR']}><Counts /></Guard>} />

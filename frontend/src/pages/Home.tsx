@@ -55,7 +55,7 @@ function oldestOf(times: unknown[]): number | undefined {
 }
 
 /** Control-tower thresholds (minutes): past them a tile turns red. */
-const LIMITS = { receiptNotStarted: 30, dockStock: 15, pickAssigned: 15, postingFailed: 30 }
+const LIMITS = { receiptNotStarted: 30, dockStock: 15, pickAssigned: 15, postingFailed: 30, trailerDwell: 120 }
 
 /** Site overview (§G.6 control tower, first cut): what needs attention, then documents and work by status. */
 export default function Home() {
@@ -66,6 +66,7 @@ export default function Home() {
   const tasks = useLoad(() => get<Task[]>(`/api/v1/sites/${site}/tasks`), [site])
   const returns = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns`), [site])
   const dock = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/inbound-staging`), [site])
+  const yard = useLoad(() => get<{ inYard: Row[]; late: Row[] }>(`/api/v1/sites/${site}/yard/summary`), [site])
 
   const notStartedRows = receipts.data?.filter((r) => r.status === 'NOT_STARTED') ?? []
   const notStarted = receipts.data ? notStartedRows.length : undefined
@@ -109,6 +110,9 @@ export default function Home() {
           <Attention n={dockLpns} label="Pallets waiting on dock" to="/tasks?type=PUTAWAY"
                      detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} units available at dock / receiving, not yet allocable`}
                      oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} />
+          <Attention n={yard.data?.inYard.length} label="Trailers in the yard" to="/yard"
+                     detail={yard.data?.late.length ? `${yard.data.late.length} appointment(s) late` : 'Dwell since gate check-in'}
+                     oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell} />
         </div>
         {hasRole('SUPERVISOR') && (dockLpns ?? 0) > 0 && (
           <div className="row">
