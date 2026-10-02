@@ -3,7 +3,7 @@ import { get, post, put, query, type Page as ApiPage, type Row } from '../api'
 import { Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 const LOCATION_TYPES = ['RACK', 'SHELF', 'FLOOR', 'BULK', 'DOOR', 'DOCK', 'STAGING_IN', 'STAGING_OUT', 'STAGING']
-const ZONE_TYPES = ['RESERVE', 'PICK', 'DOCK', 'SHIPPING', 'QC', 'FREEZER', 'CHILLED', 'HAZMAT']
+const ZONE_TYPES = ['RESERVE', 'PICK', 'DOCK', 'RECEIVING', 'RETURNS', 'SHIPPING', 'QC', 'FREEZER', 'CHILLED', 'HAZMAT']
 
 function FormCard({ title, onSubmit, action, children, busy, error, ok }: {
   title: string; onSubmit: () => void; action: string; children: ReactNode; busy: boolean; error: unknown; ok?: ReactNode
@@ -197,12 +197,21 @@ function ReleaseMode({ site }: { site: string }) {
 function Locations({ site }: { site: string }) {
   const [zone, setZone] = useState('')
   const list = useLoad(() => get<ApiPage<Row>>(`/api/v1/sites/${site}/locations${query({ zoneId: zone, limit: 200 })}`), [site, zone])
+  // Sends every location of the site to the other services again, e.g. after an upgrade added zone types (ADR-0019).
+  const republish = useAction(() => post<{ locationsRepublished: number }>(`/api/v1/sites/${site}/locations/republish`))
   return (
-    <Card title="Locations" actions={<input placeholder="Filter by zone" value={zone} onChange={(e) => setZone(e.target.value.toUpperCase())} size={10} />}>
-      <ErrorBox error={list.error} />
+    <Card title="Locations" actions={
+      <>
+        <input placeholder="Filter by zone" value={zone} onChange={(e) => setZone(e.target.value.toUpperCase())} size={10} />
+        <button disabled={republish.busy} onClick={() => void republish.run()}
+                title="Send all locations of this site to inventory, tasks and outbound again">Republish locations</button>
+      </>
+    }>
+      <ErrorBox error={list.error ?? republish.error} />
+      <Success>{republish.result && `${republish.result.locationsRepublished} location(s) republished; the other services update within seconds`}</Success>
       <Table rows={list.data?.items} empty="No locations" columns={[
         { header: 'Location', cell: (l) => String(l.locationId) },
-        { header: 'Zone', cell: (l) => String(l.zoneId) },
+        { header: 'Zone', cell: (l) => `${String(l.zoneId)}${l.zoneType ? ` (${String(l.zoneType)})` : ''}` },
         { header: 'Type', cell: (l) => String(l.locationType) },
         { header: 'Check digit', cell: (l) => String(l.checkDigit ?? '') },
         { header: 'ERP bucket', cell: (l) => String(l.erpBucket) },
