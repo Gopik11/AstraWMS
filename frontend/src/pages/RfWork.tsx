@@ -218,8 +218,8 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
         ? `Received ${String(unit.item_no)} → ${String(unit.disposition)} (${String(unit.stock_status)}) on ${String(unit.lpn_id ?? '')}`
         : `Received; ${scansDone} scan(s) on this task`)}</Success>
       <div className="actions"><button className="primary big" disabled={scan.busy}>Confirm receipt</button></div>
-      <details>
-        <summary>Finish {rma ? 'return' : 'delivery'}</summary>
+      <section className="finish" aria-label={`Finish ${rma ? 'return' : 'delivery'}`}>
+        <h3>Finish {rma ? 'return' : 'delivery'}</h3>
         {!rma && short.length > 0 && (
           <>
             <p className="muted">Lines received short need a reason:</p>
@@ -233,37 +233,52 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
             ))}
           </>
         )}
-        <div className="row">
-          <button type="button" className="primary" disabled={finish.busy}
+        <div className="actions">
+          <button type="button" className="primary big" disabled={finish.busy} aria-label={`Close ${task.docNo} and confirm to ERP`}
                   onClick={async () => { if (await finish.run()) onDone(`${task.docNo} closed and confirmed to the ERP`) }}>
             Close and confirm to ERP
           </button>
-          <button type="button" disabled={handBack.busy}
+          <button type="button" className="big" disabled={handBack.busy} aria-label={`Stop receiving ${task.docNo} for now`}
                   onClick={async () => { if (await handBack.run()) onDone(`${task.docNo} handed back to the queue`) }}>
             Stop for now
           </button>
         </div>
         <ErrorBox error={finish.error ?? handBack.error} />
-      </details>
+      </section>
     </form>
   )
 }
 
+const PICK_SHORT_REASONS = [['NOT_FOUND', 'Not found in location'], ['QTY_LESS', 'Less than expected'],
+  ['DAMAGED', 'Damaged'], ['WRONG_ITEM', 'Wrong item in location'], ['OTHER', 'Other']]
+const PICK_SHORT_ACTIONS = [['REALLOCATE', 'Reallocate from another location now'],
+  ['BACKORDER', 'Backorder: wait for stock (order stays open)'], ['SHIP_SHORT', 'Ship short (deallocate)']]
+
+/**
+ * RF pick (ADR-0020): scan the source location's check digit and the item (item number or GTIN): a location-only
+ * pick is refused. Less than requested is a short pick with a reason and a decision for the missing quantity.
+ */
 function Pick({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [checkDigit, setCheckDigit] = useState('')
+  const [item, setItem] = useState('')
   const [qty, setQty] = useState(String(task.qty ?? ''))
   const [serials, setSerials] = useState('')
+  const [shortReason, setShortReason] = useState('')
+  const [shortAction, setShortAction] = useState('REALLOCATE')
+  const short = qty !== '' && Number(qty) < Number(task.qty)
   const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/pick`, {
     checkDigit: checkDigit.trim(),
+    item: item.trim(),
     qty: Number(qty),
     serials: serials.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean),
+    shortReason: short ? shortReason : null,
+    shortAction: short ? shortAction : null,
   }))
-  const short = qty !== '' && Number(qty) < Number(task.qty)
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (await confirm.run()) {
-      onDone(`Picked ${qty} × ${task.itemNo} for ${task.orderRef}${short ? ' (short pick)' : ''}`)
+      onDone(`Picked ${qty} × ${task.itemNo} for ${task.orderRef}${short ? ` (short: ${shortReason}, ${shortAction})` : ''}`)
     }
   }
   return (
@@ -278,9 +293,28 @@ function Pick({ task, site, onDone }: { task: Task; site: string; onDone: (m: st
       <Field label="Source location check digit">
         <input autoFocus inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required />
       </Field>
-      <Field label="Quantity picked" hint={short ? 'Less than requested: this is a short pick; the rest is re-allocated' : undefined}>
+      <Field label="Scan item or GTIN" hint="The item barcode or its number; a location-only pick is not accepted">
+        <input value={item} onChange={(e) => setItem(e.target.value)} required autoComplete="off" />
+      </Field>
+      <Field label="Quantity picked" hint={short ? 'Less than requested: this is a short pick' : undefined}>
         <input type="number" min={0} max={task.qty ?? undefined} step="any" value={qty} onChange={(e) => setQty(e.target.value)} required />
       </Field>
+      {short && (
+        <fieldset className="short-pick">
+          <legend>Short pick: {fmtQty(Number(task.qty) - Number(qty))} {task.uom} missing</legend>
+          <Field label="Reason">
+            <select value={shortReason} onChange={(e) => setShortReason(e.target.value)} required>
+              <option value="">Choose…</option>
+              {PICK_SHORT_REASONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </Field>
+          <Field label="Missing quantity">
+            <select value={shortAction} onChange={(e) => setShortAction(e.target.value)}>
+              {PICK_SHORT_ACTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </Field>
+        </fieldset>
+      )}
       <Field label="Serial numbers" hint="Serial-tracked items only; scan one per unit">
         <textarea rows={2} value={serials} onChange={(e) => setSerials(e.target.value)} />
       </Field>

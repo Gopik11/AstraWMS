@@ -56,7 +56,7 @@ for _ in $(seq 1 20); do
   out="$(curl -s -w '\n%{http_code}' -X POST "$GW/api/v1/sites/DC1/tasks/next" "${P[@]}")"; [[ "${out##*$'\n'}" == "200" ]] && break; sleep 1
 done
 BODY="${out%$'\n'*}"; task="$(json "['id']" <<<"$BODY")"
-expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit R-01)\",\"qty\":5}"
+expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit R-01)\",\"item\":\"SKU-1\",\"qty\":5}"
 wait_for "picked" has_status 0080000601 PICKED
 expect 422 -X POST "$GW/api/v1/sites/DC1/outbound/orders/0080000601/ship" "${SUP[@]}" -d '{}'
 grep -q OUT_NOT_PACKED <<<"$BODY" || fail "expected OUT_NOT_PACKED: $BODY"

@@ -61,6 +61,22 @@ public class HttpInventoryClient implements InventoryClient {
     }
 
     @Override
+    public UUID moveQuantity(String siteId, String idempotencyKey, String ownerId, String itemNo, String lotNo,
+                             String status, java.math.BigDecimal qty, String fromLocationId, String toLocationId,
+                             String toLpnId) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("fromLocationId", fromLocationId);
+        body.put("ownerId", ownerId);
+        body.put("itemNo", itemNo);
+        body.put("lotNo", lotNo == null || lotNo.isEmpty() ? null : lotNo);
+        body.put("status", status);
+        body.put("qty", qty);
+        body.put("toLocationId", toLocationId);
+        body.put("toLpnId", toLpnId);
+        return post("/api/v1/sites/{site}/inventory/moves", siteId, idempotencyKey, body);
+    }
+
+    @Override
     public UUID returnToStock(String siteId, String idempotencyKey, UUID allocationId, String toLocationId,
                               String toLpnId) {
         Map<String, Object> body = new HashMap<>();

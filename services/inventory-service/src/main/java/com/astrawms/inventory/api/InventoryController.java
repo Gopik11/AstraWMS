@@ -52,9 +52,12 @@ public class InventoryController {
     private final InventoryQueryService queries;
     private final AllocationRepository allocationsRepo;
     private final ApprovalVerifier approvals;
+    private final com.astrawms.inventory.service.AllocationPolicies policies;
 
     public InventoryController(InventoryCommandService commands, InventoryQueryService queries,
-                               AllocationRepository allocationsRepo, ApprovalVerifier approvals) {
+                               AllocationRepository allocationsRepo, ApprovalVerifier approvals,
+                               com.astrawms.inventory.service.AllocationPolicies policies) {
+        this.policies = policies;
         this.commands = commands;
         this.queries = queries;
         this.allocationsRepo = allocationsRepo;
@@ -165,6 +168,22 @@ public class InventoryController {
                                       @RequestParam(required = false) Long after,
                                       @RequestParam(defaultValue = "100") int limit) {
         return queries.balances(siteId, new BalanceFilter(ownerId, itemNo, lotNo, lpnId, locationId, status), after, limit);
+    }
+
+    /** The site's allocation policy (ADR-0020); defaults until a solution admin sets it. */
+    @GetMapping("/allocation-policy")
+    public com.astrawms.inventory.service.AllocationPolicies.Policy allocationPolicy(@PathVariable String siteId) {
+        return policies.of(siteId);
+    }
+
+    public record PolicyRequest(String lotRotation, String otherRotation, Boolean pickFaceFirst, String fullLpn) {
+    }
+
+    @org.springframework.security.access.prepost.PreAuthorize("hasRole('SOLUTION_ADMIN')")
+    @org.springframework.web.bind.annotation.PutMapping("/allocation-policy")
+    public com.astrawms.inventory.service.AllocationPolicies.Policy putAllocationPolicy(@PathVariable String siteId,
+                                                                                         @RequestBody PolicyRequest r) {
+        return policies.put(siteId, r.lotRotation(), r.otherRotation(), r.pickFaceFirst(), r.fullLpn());
     }
 
     @GetMapping("/inbound-staging")

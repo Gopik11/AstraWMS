@@ -82,11 +82,13 @@ public class InventoryCommandService {
     private final CountRequests countRequests;
     private final Replenishments replenishments;
     private final org.springframework.jdbc.core.simple.JdbcClient jdbc;
+    private final AllocationPolicies policies;
 
     public InventoryCommandService(InventoryRepository repo, SerialRepository serials, AllocationRepository allocations,
                                    ReferenceRepository refs, OutboxWriter outbox, JsonMapper json, Clock clock,
                                    Topics topics, CountRequests countRequests, Replenishments replenishments,
-                                   org.springframework.jdbc.core.simple.JdbcClient jdbc) {
+                                   org.springframework.jdbc.core.simple.JdbcClient jdbc, AllocationPolicies policies) {
+        this.policies = policies;
         this.repo = repo;
         this.serials = serials;
         this.allocations = allocations;
@@ -221,8 +223,9 @@ public class InventoryCommandService {
 
     /**
      * Reserves stock for an order line, never from staging, receiving, returns, shipping or QC locations (PUT-006,
-     * ADR-0019). Policy, each step in rotation order (FEFO for lot-controlled items, otherwise FIFO, unless the
-     * request names one):
+     * ADR-0019). The site's {@link AllocationPolicies allocation policy} (ADR-0020) sets the rotation (by default FEFO
+     * for lot-controlled items, otherwise FIFO, unless the request names one) and the full-LPN rule. Default steps,
+     * each in rotation order:
      * <ol>
      *   <li>the item's pick faces;</li>
      *   <li>reserve: loose stock, and full LPNs that the remaining quantity covers;</li>
@@ -239,7 +242,10 @@ public class InventoryCommandService {
             ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
             BigDecimal wanted = toBase(item, r.qty(), r.uom());
             String lot = blank(r.lotNo()) ? null : r.lotNo().trim();
-            boolean fefo = r.rotation() == null ? item.lotControlled() : r.rotation() == Rotation.FEFO;
+            AllocationPolicies.Policy policy = policies.of(siteId);
+            boolean fefo = r.rotation() == null ? policy.fefo(item.lotControlled()) : r.rotation() == Rotation.FEFO;
+            boolean faceFirst = policy.pickFaceFirst();
+            AllocationPolicies.FullLpn fullLpn = policy.fullLpn();
             boolean hasFace = replenishments.hasPickFace(siteId, r.ownerId(), r.itemNo());
             List<AllocationRepository.Candidate> candidates = allocations.candidates(siteId, r.ownerId(), r.itemNo(), lot,
                     r.minExpiryDate(), fefo, r.excludeLocationIds());
@@ -257,12 +263,15 @@ public class InventoryCommandService {
                         continue;
                     }
                     boolean loose = c.key().lpnId().isEmpty();
+                    boolean face = c.face() && faceFirst;
                     BigDecimal take = switch (step) {
-                        case 1 -> c.face() ? left.min(remaining) : BigDecimal.ZERO;
-                        case 2 -> c.face() ? BigDecimal.ZERO
-                                : loose ? left.min(remaining)
+                        case 1 -> face ? left.min(remaining) : BigDecimal.ZERO;
+                        case 2 -> face ? BigDecimal.ZERO
+                                : loose || c.face() || fullLpn == AllocationPolicies.FullLpn.SPLIT_ALLOWED ? left.min(remaining)
                                 : c.wholeLpn() && left.compareTo(remaining) <= 0 ? left : BigDecimal.ZERO;
-                        default -> c.face() || hasFace ? BigDecimal.ZERO : left.min(remaining);
+                        default -> face || fullLpn == AllocationPolicies.FullLpn.NEVER_SPLIT
+                                || (fullLpn == AllocationPolicies.FullLpn.COVERED_ONLY && hasFace)
+                                ? BigDecimal.ZERO : left.min(remaining);
                     };
                     if (take.signum() == 0) {
                         continue;
@@ -516,15 +525,15 @@ public class InventoryCommandService {
     }
 
     private void moveQuantity(String siteId, MoveRequest r, OpContext ctx) {
-        if (blank(r.ownerId()) || blank(r.itemNo()) || r.qty() == null || blank(r.uom())) {
+        if (blank(r.ownerId()) || blank(r.itemNo()) || r.qty() == null) {
             throw ApiException.badRequest("INV_MOVE_FIELDS",
-                    "ownerId, itemNo, qty and uom are required unless a whole LPN is moved");
+                    "ownerId, itemNo and qty are required unless a whole LPN is moved");
         }
         AccessScope.current().requireOwner(r.ownerId());
         ItemRef item = requireItem(r.ownerId(), r.itemNo(), siteId);
         String lot = normalise(r.lotNo());
         validateLot(item, lot, null, false);
-        BigDecimal qty = toBase(item, r.qty(), r.uom());
+        BigDecimal qty = toBase(item, r.qty(), blank(r.uom()) ? item.baseUom() : r.uom());   // no unit: base unit
         StockStatus status = r.status() == null ? StockStatus.AVAILABLE : r.status();
         Map<String, LocationRef> locations = lockLocations(siteId, List.of(r.fromLocationId(), r.toLocationId()));
         LocationRef fromLoc = locations.get(r.fromLocationId());

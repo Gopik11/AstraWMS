@@ -146,3 +146,5 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
 .tile-warn .tile-n { color: var(--warn, #b54708); }
 .tile-d { font-size: .75rem; color: var(--muted, #667085); }
 .search input { min-width: 14rem; }
+.rf .finish { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
+.rf .short-pick { border: 1px solid var(--warn, #b54708); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }

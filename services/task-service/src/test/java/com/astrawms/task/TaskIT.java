@@ -62,6 +62,20 @@ class TaskIT {
         }
 
         final List<Move> moves = new CopyOnWriteArrayList<>();
+
+        record QtyMove(String key, String item, String status, BigDecimal qty, String from, String to, String toLpn) {
+        }
+
+        final List<QtyMove> qtyMoves = new CopyOnWriteArrayList<>();
+
+        @Override
+        public UUID moveQuantity(String siteId, String key, String ownerId, String itemNo, String lotNo, String status,
+                                 BigDecimal qty, String from, String to, String toLpn) {
+            if (qtyMoves.stream().noneMatch(m -> m.key().equals(key))) {
+                qtyMoves.add(new QtyMove(key, itemNo, status, qty, from, to, toLpn));
+            }
+            return UUID.nameUUIDFromBytes(key.getBytes());
+        }
         final List<Pick> picks = new CopyOnWriteArrayList<>();
 
         @Override
@@ -466,7 +480,16 @@ class TaskIT {
 
         pickConfirm(id, "22", "6").andExpect(jsonPath("$.code", is("TSK_CHECK_DIGIT_MISMATCH")));   // A-02's digit
         confirm(id, "LPN-X", "A-01", "33").andExpect(jsonPath("$.code", is("TSK_WRONG_TYPE")));
-        pickConfirm(id, "33", "6").andExpect(jsonPath("$.status", is("COMPLETED")))
+        // ADR-0020: a location-only pick is refused; the item must be scanned (number or GTIN).
+        pickConfirm(id, "33", "6", null, "").andExpect(jsonPath("$.code", is("TSK_ITEM_SCAN_REQUIRED")));
+        pickConfirm(id, "33", "6", "SKU-FZ", "").andExpect(jsonPath("$.code", is("TSK_WRONG_ITEM")));
+        pickConfirm(id, "33", "6", "4012345678901", "").andExpect(jsonPath("$.code", is("TSK_WRONG_ITEM")));
+        send(MasterDataEvents.TOPIC, MasterDataEvents.ITEM_UPSERTED, "ACME:SKU-1",
+                new ItemUpserted("ACME", "SKU-1", "EA", "ACTIVE", null, null, false,
+                        List.of(new ItemUpserted.Site("DC1", false, "NONE", "ACTIVE")),
+                        List.of(new ItemUpserted.Uom("EA", 1, 1, "04012345678901")), Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_item_gtin").query(Integer.class).single()) == 1);
+        pickConfirm(id, "33", "6", "4012345678901", "").andExpect(jsonPath("$.status", is("COMPLETED")))   // GTIN-13 = GTIN-14
                 .andExpect(jsonPath("$.qtyPicked", is(6)));
 
         StubInventory.Pick p = inventory.picks.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow();
@@ -485,10 +508,17 @@ class TaskIT {
         pickRequested(allocation, "SO-2", "A-01", "6");
         awaitPickTask(allocation, "RELEASED");
         String id = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
-        pickConfirm(id, "33", "4").andExpect(jsonPath("$.exceptionReason", is("SHORT_PICK")));
+        pickConfirm(id, "33", "4").andExpect(jsonPath("$.code", is("TSK_SHORT_REASON_REQUIRED")));   // ADR-0020
+        pickConfirm(id, "33", "4", "SKU-1", ",\"shortReason\":\"NOT_FOUND\",\"shortAction\":\"WAIT\"")
+                .andExpect(jsonPath("$.code", is("TSK_SHORT_ACTION_INVALID")));
+        pickConfirm(id, "33", "4", "SKU-1", ",\"shortReason\":\"NOT_FOUND\",\"shortAction\":\"BACKORDER\"")
+                .andExpect(jsonPath("$.exceptionReason", is("SHORT_PICK")));
         assertThat(inventory.picks.stream().filter(x -> x.key().equals("TSK-" + id)).findFirst().orElseThrow().shortClose())
                 .isTrue();
-        assertThat(taskCompleted(allocation).get("qtyShort").decimalValue()).isEqualByComparingTo("2");
+        tools.jackson.databind.JsonNode done = taskCompleted(allocation);
+        assertThat(done.get("qtyShort").decimalValue()).isEqualByComparingTo("2");
+        assertThat(done.get("shortReason").asString()).isEqualTo("NOT_FOUND");
+        assertThat(done.get("shortAction").asString()).isEqualTo("BACKORDER");
     }
 
     @Test
@@ -620,8 +650,40 @@ class TaskIT {
     }
 
     private ResultActions pickConfirm(String id, String checkDigit, String qty) throws Exception {
+        return pickConfirm(id, checkDigit, qty, "SKU-1", "");
+    }
+
+    private ResultActions pickConfirm(String id, String checkDigit, String qty, String item, String extra) throws Exception {
         return tasks(post("/api/v1/sites/DC1/tasks/" + id + "/pick"), """
-                {"checkDigit":"%s","qty":%s}""".formatted(checkDigit, qty));
+                {"checkDigit":"%s","qty":%s%s%s}""".formatted(checkDigit, qty,
+                item == null ? "" : ",\"item\":\"" + item + "\"", extra));
+    }
+
+    // ------------------------------------------------------------------ ADR-0020 dock sweep
+
+    @Test
+    void dockSweepCreatesPutawaysForEverythingLeftAtTheDock() throws Exception {
+        stockEvent(UUID.randomUUID(), "SKU-1", "ADJUST_POS", "LPN-LEFT", "DOCK-1", "5", "5");     // an LPN without a task
+        stockEvent(UUID.randomUUID(), "SKU-1", "RECEIPT", "", "DOCK-1", "1", "1");               // a loose unit
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from stock_projection").query(Integer.class).single()) == 2);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.putawaysCreated", is(1)))
+                .andExpect(jsonPath("$.lpnsCreated", is(1)));
+        awaitTask("LPN-LEFT", "RELEASED");
+        StubInventory.QtyMove m = inventory.qtyMoves.getLast();
+        assertThat(m.from()).isEqualTo("DOCK-1");
+        assertThat(m.to()).isEqualTo("DOCK-1");
+        assertThat(m.toLpn()).startsWith("DK");
+        assertThat(m.qty()).isEqualByComparingTo("1");
+        // The loose unit arrives on its new LPN at the dock: that is a normal putaway trigger.
+        stockEvent(UUID.randomUUID(), "SKU-1", "MOVE_IN", m.toLpn(), "DOCK-1", "1", "1");
+        awaitTask(m.toLpn(), "RELEASED");
+        // A second sweep finds nothing new for the LPNs that have tasks.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.putawaysCreated", is(0)));
     }
 
     @Test

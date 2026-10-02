@@ -63,7 +63,7 @@ export default function Returns() {
   return (
     <Page title="Customer returns" actions={
       <>
-        <SearchBox value={q} onSearch={setQ} placeholder="RMA, customer, item" />
+        <SearchBox value={q} onSearch={setQ} placeholder="RMA, customer, item, LPN" />
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           {STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}
         </select>

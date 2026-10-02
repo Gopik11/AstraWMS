@@ -74,7 +74,7 @@ expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/replenish" "${P[@]}" -d "{\
 next_task P PICK
 task="$(json "['id']" <<<"$BODY")"; from="$(json "['fromLocation']" <<<"$BODY")"
 [[ "$from" == "F-01" ]] || fail "expected the pick from the pick face F-01, got $from"
-expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit F-01)\",\"qty\":4}"
+expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/pick" "${P[@]}" -d "{\"checkDigit\":\"$(check_digit F-01)\",\"item\":\"SKU-1\",\"qty\":4}"
 [[ "$(qty_at F-01)" == "12" ]] || fail "F-01 should hold 12, holds $(qty_at F-01)"
 [[ "$(qty_at R-01)" == "30" ]] || fail "R-01 should hold 30, holds $(qty_at R-01)"
 echo "F-01 replenished before the pick and holds 12; R-01 down to 30"

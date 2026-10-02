@@ -52,6 +52,42 @@ public class Projections {
                 .param("t", TenantContext.tenantId()).param("owner", e.ownerId()).param("item", e.itemNo())
                 .param("temp", e.temperatureClass()).param("haz", e.hazardous())
                 .param("at", Timestamp.from(e.sourceChangedAt())).update();
+        // GTINs for RF item scans (ItemUpserted 1.3); an older message without GTINs leaves them as they are.
+        if (e.uoms() != null && e.uoms().stream().anyMatch(u -> u.gtin() != null)) {
+            jdbc.sql("delete from ref_item_gtin where owner_id = :o and item_no = :i")
+                    .param("o", e.ownerId()).param("i", e.itemNo()).update();
+            e.uoms().stream().filter(u -> u.gtin() != null && !u.gtin().isBlank()).forEach(u -> jdbc.sql("""
+                            insert into ref_item_gtin (tenant_id, owner_id, item_no, gtin, uom) values (:t, :o, :i, :g, :u)
+                            on conflict do nothing""")
+                    .param("t", TenantContext.tenantId()).param("o", e.ownerId()).param("i", e.itemNo())
+                    .param("g", normaliseGtin(u.gtin())).param("u", u.uom()).update());
+        }
+    }
+
+    /** GTIN-8/12/13/14 are compared as GTIN-14 without leading zeros. */
+    public static String normaliseGtin(String gtin) {
+        String digits = gtin == null ? "" : gtin.trim();
+        int i = 0;
+        while (i < digits.length() - 1 && digits.charAt(i) == '0') {
+            i++;
+        }
+        return digits.substring(i);
+    }
+
+    /** Whether a scan identifies the item: its item number, or a GTIN of one of its units (ADR-0020). */
+    public boolean scanMatchesItem(String ownerId, String itemNo, String scan) {
+        if (scan == null || scan.isBlank()) {
+            return false;
+        }
+        String s = scan.trim();
+        if (s.equalsIgnoreCase(itemNo)) {
+            return true;
+        }
+        if (!s.chars().allMatch(Character::isDigit)) {
+            return false;
+        }
+        return jdbc.sql("select exists (select 1 from ref_item_gtin where owner_id = :o and item_no = :i and gtin = :g)")
+                .param("o", ownerId).param("i", itemNo).param("g", normaliseGtin(s)).query(Boolean.class).single();
     }
 
     public void upsertLocation(LocationUpserted e) {
@@ -151,6 +187,15 @@ public class Projections {
     /** All stock of a site (putaway planning reads it once per plan). */
     public List<Stock> stockAtSite(String siteId) {
         return jdbc.sql(STOCK + " where site_id = :site").param("site", siteId).query(Projections::stock).list();
+    }
+
+    /** Stock at the site's inbound staging locations (dock, door, receiving, returns), for the dock sweep. */
+    public List<Stock> stockAtLocations(String siteId, java.util.Collection<String> locationIds) {
+        if (locationIds.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql(STOCK + " where site_id = :site and location_id in (:locs) order by location_id, lpn_id, item_no")
+                .param("site", siteId).param("locs", locationIds).query(Projections::stock).list();
     }
 
     public List<Stock> stockAt(String siteId, String locationId) {

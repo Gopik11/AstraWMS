@@ -76,6 +76,61 @@ class AllocationPolicyIT extends IntegrationTest {
                 .andExpect(jsonPath("$.allocations[0].lpnId", is("LPN-X")));
     }
 
+    // ------------------------------------------------------------------ ADR-0020 explicit site policy
+
+    private ResultActions policy(String json, String role) throws Exception {
+        return mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .put("/api/v1/sites/" + SITE + "/inventory/allocation-policy")
+                .with(TestTokens.as(tenant, "ada", role))
+                .contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(json));
+    }
+
+    @Test
+    void sitePolicyIsExplicitAndOnlyAdminsChangeIt() throws Exception {
+        getJson("/allocation-policy")
+                .andExpect(jsonPath("$.lotRotation", is("FEFO"))).andExpect(jsonPath("$.otherRotation", is("FIFO")))
+                .andExpect(jsonPath("$.pickFaceFirst", is(true))).andExpect(jsonPath("$.fullLpn", is("COVERED_ONLY")));
+        policy("{\"fullLpn\":\"NEVER_SPLIT\"}", Roles.SUPERVISOR).andExpect(status().isForbidden());
+        policy("{\"fullLpn\":\"SOMETIMES\"}", Roles.SOLUTION_ADMIN).andExpect(jsonPath("$.code", is("INV_POLICY_INVALID")));
+        policy("{\"fullLpn\":\"NEVER_SPLIT\"}", Roles.SOLUTION_ADMIN)
+                .andExpect(jsonPath("$.fullLpn", is("NEVER_SPLIT"))).andExpect(jsonPath("$.lotRotation", is("FEFO")))
+                .andExpect(jsonPath("$.updatedBy", is("ada")));
+    }
+
+    @Test
+    void neverSplitTakesOnlyWholeReservePallets() throws Exception {
+        policy("{\"fullLpn\":\"NEVER_SPLIT\"}", Roles.SOLUTION_ADMIN).andExpect(status().isOk());
+        receive("SKU-EA", "20", "EA", "A-01-01", "LPN-W", null).andExpect(status().isCreated());
+        allocate("SO-N1", "5").andExpect(jsonPath("$.allocatedQty", is(0))).andExpect(jsonPath("$.shortQty", is(5)));
+        allocate("SO-N2", "25").andExpect(jsonPath("$.allocatedQty", is(20)))
+                .andExpect(jsonPath("$.allocations[0].lpnId", is("LPN-W")));
+    }
+
+    @Test
+    void splitAllowedBreaksReservePalletsEvenForItemsWithAFace() throws Exception {
+        receive("SKU-EA", "30", "EA", "A-02-01", "LPN-S", null).andExpect(status().isCreated());
+        faceRule("A-01-01", "2", "10").andExpect(status().isOk());            // empty face
+        allocate("SO-S1", "4").andExpect(jsonPath("$.allocatedQty", is(0)));   // default: the face is replenished instead
+        policy("{\"fullLpn\":\"SPLIT_ALLOWED\"}", Roles.SOLUTION_ADMIN).andExpect(status().isOk());
+        allocate("SO-S2", "4").andExpect(jsonPath("$.allocatedQty", is(4)))
+                .andExpect(jsonPath("$.allocations[0].lpnId", is("LPN-S")));
+    }
+
+    @Test
+    void lotRotationFollowsThePolicy() throws Exception {
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"OLD-LATE","expiryDate":"2029-01-01","qty":5,"uom":"EA","locationId":"A-01-01"}""")
+                .andExpect(status().isCreated());
+        post("/receipts", """
+                {"ownerId":"ACME","itemNo":"SKU-LOT","lotNo":"NEW-EARLY","expiryDate":"2027-01-01","qty":5,"uom":"EA","locationId":"A-01-02"}""")
+                .andExpect(status().isCreated());
+        String lot = """
+                {"orderRef":"%s","orderLineRef":"000010","ownerId":"ACME","itemNo":"SKU-LOT","qty":1,"uom":"EA"}""";
+        post("/allocations", lot.formatted("SO-L1")).andExpect(jsonPath("$.allocations[0].lotNo", is("NEW-EARLY")));   // FEFO
+        policy("{\"lotRotation\":\"FIFO\"}", Roles.SOLUTION_ADMIN).andExpect(status().isOk());
+        post("/allocations", lot.formatted("SO-L2")).andExpect(jsonPath("$.allocations[0].lotNo", is("OLD-LATE")));    // FIFO
+    }
+
     @Test
     void stockInReceivingReturnsShippingOrQcZonesIsNotAllocable() throws Exception {
         zoned("RET-01", "RETURNS", "FLOOR");

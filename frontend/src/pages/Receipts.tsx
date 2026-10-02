@@ -16,7 +16,7 @@ export default function Receipts() {
   return (
     <Page title="Receipts" actions={
       <>
-        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, vendor, item" />
+        <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Delivery, vendor, item, LPN, SSCC" />
         <select value={status} onChange={(e) => setParam('status', e.target.value)}>
           {STATUSES.map((s) => <option key={s} value={s}>{s || 'All statuses'}</option>)}
         </select>

@@ -79,9 +79,22 @@ public final class OutboundContracts {
         public static final String VERSION = "1.0";
     }
 
+    /**
+     * @param shortReason why a pick came up short (NOT_FOUND, DAMAGED, QTY_LESS, WRONG_ITEM, OTHER); null when not short
+     * @param shortAction what to do with the missing quantity (ADR-0020): {@code REALLOCATE} elsewhere now (default),
+     *                    {@code BACKORDER} (wait for stock; backorder recovery allocates it), {@code SHIP_SHORT}
+     *                    (deallocate: the line ships short). Both added in 1.1.
+     */
     public record TaskCompleted(UUID taskId, String taskType, UUID allocationId, String orderRef, String orderLineRef,
-                                BigDecimal qtyPicked, BigDecimal qtyShort, String completedBy, Instant completedAt) {
+                                BigDecimal qtyPicked, BigDecimal qtyShort, String completedBy, Instant completedAt,
+                                String shortReason, String shortAction) {
         public static final String TYPE = "TaskCompleted";
-        public static final String VERSION = "1.0";
+        public static final String VERSION = "1.1";
+
+        public TaskCompleted(UUID taskId, String taskType, UUID allocationId, String orderRef, String orderLineRef,
+                             BigDecimal qtyPicked, BigDecimal qtyShort, String completedBy, Instant completedAt) {
+            this(taskId, taskType, allocationId, orderRef, orderLineRef, qtyPicked, qtyShort, completedBy, completedAt,
+                    null, null);
+        }
     }
 }

@@ -183,7 +183,7 @@ class MasterDataIT {
                 .andExpect(jsonPath("$.standardCost", is(12.5)));
         JsonNode event = outbox("ItemUpserted").getLast();
         assertThat(event.get("payload").get("standardCost").decimalValue()).isEqualByComparingTo("12.5");
-        assertThat(event.get("schemaVersion").asString()).isEqualTo("1.2");
+        assertThat(event.get("schemaVersion").asString()).isEqualTo("1.3");
     }
 
     @Test

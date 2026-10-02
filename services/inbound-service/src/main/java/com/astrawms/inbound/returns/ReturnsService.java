@@ -378,7 +378,8 @@ public class ReturnsService {
                         where r.site_id = :site and (cast(:status as text) is null or r.status = :status)
                           and (:all or not exists (select 1 from return_line l where l.return_id = r.id and l.owner_id not in (:owners)))
                           and (cast(:q as text) is null or upper(r.rma_no) like :q or upper(coalesce(r.customer_name, '')) like :q
-                               or exists (select 1 from return_line l where l.return_id = r.id and upper(l.item_no) like :q))
+                               or exists (select 1 from return_line l where l.return_id = r.id and upper(l.item_no) like :q)
+                               or exists (select 1 from return_unit u where u.return_id = r.id and upper(coalesce(u.lpn_id, '')) like :q))
                         order by r.created_at desc limit 500""")
                 .param("site", siteId).param("status", status).param("all", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("q", like)
