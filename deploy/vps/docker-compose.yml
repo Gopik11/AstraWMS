@@ -112,7 +112,10 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME: ${PUBLIC_URL}
       KC_HOSTNAME_ADMIN: http://localhost:8181
-      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      # Every endpoint in the discovery document uses PUBLIC_URL (https). A dynamic backchannel would take the scheme
+      # of the request the gateway forwards (http) and the browser would block the token call as mixed content.
+      # The services reach Keycloak by OIDC_JWK_SET_URI / OIDC_TOKEN_URI on the private network, not by discovery.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
       KC_HEALTH_ENABLED: "true"
       JAVA_OPTS_KC_HEAP: "-XX:MaxRAMPercentage=60 -XX:InitialRAMPercentage=20"
     volumes:
