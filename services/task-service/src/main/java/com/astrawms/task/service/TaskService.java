@@ -810,6 +810,9 @@ public class TaskService {
                                  on z.site_id = l.site_id and z.zone_id = l.zone_id
                                  where l.site_id = t.site_id and l.location_id in (t.from_location, t.target_location)
                                    and not (z.equipment = any(string_to_array(:equipment, ','))))
+                          and (t.automation_manual or not exists (select 1 from ref_location l join automation_zone a
+                                 on a.site_id = l.site_id and a.zone_id = l.zone_id and a.enabled
+                                 where l.site_id = t.site_id and l.location_id = t.from_location))
                         order by t.priority desc, f.pick_seq nulls last, t.from_location, t.created_at
                         limit 1 for update of t skip locked""")
                 .param("equipment", profile[0]).param("skills", profile[1])

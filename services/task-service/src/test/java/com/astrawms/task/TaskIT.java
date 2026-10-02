@@ -699,6 +699,54 @@ class TaskIT {
         mvc.perform(get("/api/v1/sites/DC1/tasks/labor").with(rita)).andExpect(status().isForbidden());
     }
 
+    // ------------------------------------------------------------------ ADR-0021 automation adapter
+
+    @Test
+    void devicesClaimConfirmAndHandBackTasksOfAutomatedZones() throws Exception {
+        tasks(put("/api/v1/sites/DC1/tasks/automation/zones/z"), "{\"deviceType\":\"pick_to_light\"}")
+                .andExpect(jsonPath("$[0].device_type", is("PICK_TO_LIGHT")));
+        UUID first = UUID.randomUUID();
+        UUID second = UUID.randomUUID();
+        pickRequested(first, "SO-A1", "A-01", "5");
+        pickRequested(second, "SO-A2", "A-02", "2");
+        awaitPickTask(first, "RELEASED");
+        awaitPickTask(second, "RELEASED");
+        // People do not get tasks of an automated zone on RF.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isNoContent());
+        var robot = TestTokens.as(tenant, "ptl-controller", "AUTOMATION");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(TestTokens.as(tenant, "pete", Roles.PICKER))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}")).andExpect(status().isForbidden());
+        String claimed = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andExpect(jsonPath("$.taskType", is("PICK"))).andExpect(jsonPath("$.fromZone", is("Z")))
+                .andExpect(jsonPath("$.deviceId", is("L-1")))
+                .andReturn().getResponse().getContentAsString(), "$.taskId");
+        // A short confirmation needs a reason, like on RF; then the device confirms what it picked.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\",\"qty\":1}"))
+                .andExpect(jsonPath("$.code", is("TSK_SHORT_REASON_REQUIRED")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-2\"}"))
+                .andExpect(jsonPath("$.code", is("TSK_NOT_ASSIGNED")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + claimed + "/confirm").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.assignedTo", is("device:L-1")));
+        // The next one the device cannot do: it goes to people.
+        String other = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}"))
+                .andReturn().getResponse().getContentAsString(), "$.taskId");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/tasks/" + other + "/exception").with(robot)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\",\"reason\":\"device_fault\"}"))
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.exceptionReason", is("AUTOMATION_DEVICE_FAULT")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(jsonPath("$.id", is(other)));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/automation/claim").with(robot)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"deviceId\":\"L-1\"}")).andExpect(status().isNoContent());
+    }
+
     // ------------------------------------------------------------------ ADR-0021 slotting and MOVE tasks
 
     private void slotting(String item, String zone, String velocity) throws Exception {

@@ -60,6 +60,7 @@ export default function Labor() {
       </Card>
       <Standards base={base} />
       <Equipment base={base} />
+      <AutomationZones base={base} />
     </Page>
   )
 }
@@ -134,6 +135,41 @@ function Equipment({ base }: { base: string }) {
         </div>
       </div>
       <ErrorBox error={operators.error ?? zones.error ?? saveOp.error ?? saveZone.error} />
+    </Card>
+  )
+}
+
+/** Automation zones (ADR-0021): tasks starting there are claimed by devices through the automation API, not on RF. */
+function AutomationZones({ base }: { base: string }) {
+  const zones = useLoad(() => get<Row[]>(`${base}/automation/zones`), [base])
+  const [f, setF] = useState({ zone: '', deviceType: 'PICK_TO_LIGHT' })
+  const save = useAction((zone: string, deviceType: string, enabled: boolean) =>
+    put(`${base}/automation/zones/${zone}`, { deviceType, enabled }))
+  return (
+    <Card title="Automation zones">
+      <p className="muted">Devices (pick-to-light, robots) claim, confirm and hand back the tasks of these zones through the
+        automation API. A task a device hands back goes to RF.</p>
+      <Table rows={zones.data} empty="No automated zones" columns={[
+        { header: 'Zone', cell: (z) => String(z.zone_id) },
+        { header: 'Devices', cell: (z) => String(z.device_type) },
+        { header: 'Queued', cell: (z) => String(z.queued), align: 'right' },
+        { header: 'On devices', cell: (z) => String(z.on_devices), align: 'right' },
+        { header: '', cell: (z) => (
+          <button className="small" disabled={save.busy}
+                  onClick={async () => { if (await save.run(String(z.zone_id), String(z.device_type), !z.enabled)) zones.reload() }}>
+            {z.enabled ? 'Disable' : 'Enable'}</button>
+        ) },
+      ]} />
+      <div className="row">
+        <Field label="Zone"><input value={f.zone} onChange={(e) => setF({ ...f, zone: e.target.value.toUpperCase() })} size={8} /></Field>
+        <Field label="Device type">
+          <select value={f.deviceType} onChange={(e) => setF({ ...f, deviceType: e.target.value })}>
+            <option value="PICK_TO_LIGHT">Pick-to-light</option><option value="ROBOT">Robot</option><option value="ASRS">AS/RS</option>
+          </select>
+        </Field>
+        <button disabled={save.busy || !f.zone} onClick={async () => { if (await save.run(f.zone, f.deviceType, true)) zones.reload() }}>Automate zone</button>
+      </div>
+      <ErrorBox error={zones.error ?? save.error} />
     </Card>
   )
 }
