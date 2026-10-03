@@ -9,6 +9,10 @@
   "bruteForceProtected": true,
   "failureFactor": 10,
   "accessTokenLifespan": 600,
+  "webAuthnPolicyPasswordlessRpEntityName": "AstraWMS",
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
+  "webAuthnPolicyPasswordlessPasskeysEnabled": true,
   "roles": {
     "realm": [
       {

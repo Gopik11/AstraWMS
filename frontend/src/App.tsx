@@ -87,7 +87,7 @@ function Guard({ roles, children }: { roles?: Role[]; children: ReactNode }) {
 }
 
 export default function App({ environment }: { environment?: string }) {
-  const { session, hasRole, logout } = useAuth()
+  const { session, hasRole, logout, setUpPasskey } = useAuth()
   const { site, setSite } = useSiteContext()
   const [menuOpen, setMenuOpen] = useState(false)
   const sites = session.sites === '*' ? null : session.sites
@@ -112,6 +112,7 @@ export default function App({ environment }: { environment?: string }) {
         <span className="who" title={session.roles.join(', ')}>
           {session.userName} · {session.tenant}
         </span>
+        <button className="link" onClick={setUpPasskey} title="Sign in next time with your device's face, fingerprint or PIN unlock">Set up passkey</button>
         <button className="link" onClick={logout}>Sign out</button>
       </header>
       <nav className="sidebar" onClick={() => setMenuOpen(false)}>

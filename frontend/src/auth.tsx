@@ -69,6 +69,11 @@ interface AuthContextValue {
   session: Session
   hasRole: (...roles: Role[]) => boolean
   logout: () => void
+  /**
+   * Registers a passkey (ADR-0023): Keycloak's application-initiated action asks the device for its face, fingerprint
+   * or PIN unlock and returns to the app. Afterwards the sign-in page offers "Sign in with Passkey".
+   */
+  setUpPasskey: () => void
   /** A fresh sign-in of another person in a popup (approvals); returns their access token. */
   approverToken: () => Promise<string>
 }
@@ -99,6 +104,9 @@ export function AuthProvider({ config, manager, initial, children }: {
     session,
     hasRole: (...roles) => roles.some((r) => session.roles.includes(r)),
     logout: () => void manager.signoutRedirect({ id_token_hint: user.id_token }),
+    setUpPasskey: () => void manager.signinRedirect({
+      state: window.location.pathname, extraQueryParams: { kc_action: 'webauthn-register-passwordless' },
+    }),
     approverToken: async () => {
       const approver = await userManager(config, true).signinPopup({ prompt: 'login' })
       return approver.access_token
