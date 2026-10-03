@@ -72,4 +72,21 @@ describe('offline queue', () => {
     discard(left.id)
     expect(queue()).toHaveLength(0)
   })
+
+  it('puts the task of a refused confirmation in exception: the server wins (SYNC_CONFLICT)', async () => {
+    const calls: { url: string; body: string }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: String(init.body) })
+      return calls.length === 1
+        ? new Response('{"code":"TSK_WRONG_LPN","detail":"LPN moved"}', { status: 422 })
+        : new Response('{"status":"EXCEPTION"}', { status: 200 })
+    }))
+    online = false
+    const task = '/api/v1/sites/ST01/tasks/0b8c6c1e-6c7e-4a8e-9a39-6d2f0c2b7f10'
+    await rfPost(`${task}/confirm`, { lpnId: 'L1' }, 'Putaway L1')
+    online = true
+    expect(await sync()).toEqual({ sent: 0, failed: 1 })
+    expect(calls.map((c) => c.url)).toEqual([`${task}/confirm`, `${task}/sync-conflict`])
+    expect(calls[1].body).toContain('TSK_WRONG_LPN')
+  })
 })

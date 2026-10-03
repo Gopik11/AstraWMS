@@ -31,7 +31,8 @@ import org.springframework.transaction.annotation.Transactional;
  *   <li>VAS: value-added services entered by a supervisor (labelling, kitting, ...).</li>
  * </ul>
  * Each event is priced when captured, by the owner's rate for its type (and service) or the site's default rate:
- * per unit, line, LPN (storage: unit-day or LPN-day) or event. Events without a rate are kept at zero, so a rate set
+ * per unit, line, LPN (storage: unit-day or LPN-day) or event. Events without a rate are stored at zero and reported as
+ * unrated (amount null, ADR-0024), never as a silent 0.00, so a rate set
  * later does not reprice history.
  */
 @Service
@@ -237,8 +238,8 @@ public class Billing {
         AccessScope scope = AccessScope.current();
         return jdbc.sql("""
                         select owner_id, event_type, service, count(*) as events, sum(units) as units, sum(lines) as lines,
-                               sum(lpns) as lpns, sum(amount) as amount, max(currency) as currency,
-                               count(*) filter (where rate is null) as unpriced
+                               sum(lpns) as lpns, sum(amount) filter (where rate is not null) as amount,
+                               max(currency) as currency, count(*) filter (where rate is null) as unpriced
                         from billing_event
                         where site_id = :site and occurred_at >= :from and occurred_at < :to
                           and (cast(:owner as text) is null or owner_id = :owner)
@@ -253,8 +254,8 @@ public class Billing {
     public List<Map<String, Object>> events(String siteId, Instant from, Instant to, String ownerId, String type) {
         AccessScope scope = AccessScope.current();
         return jdbc.sql("""
-                        select id, owner_id, event_type, service, ref, occurred_at, units, lines, lpns, basis, rate, amount,
-                               currency, description, created_by
+                        select id, owner_id, event_type, service, ref, occurred_at, units, lines, lpns, basis, rate,
+                               case when rate is null then null else amount end as amount, currency, description, created_by
                         from billing_event
                         where site_id = :site and (cast(:from as timestamptz) is null or occurred_at >= :from)
                           and (cast(:to as timestamptz) is null or occurred_at < :to)

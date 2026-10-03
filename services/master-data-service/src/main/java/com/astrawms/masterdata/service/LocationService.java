@@ -3,6 +3,7 @@ package com.astrawms.masterdata.service;
 import com.astrawms.common.contracts.MasterDataEvents;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.common.messaging.OutboxWriter;
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.masterdata.api.MasterDataDtos.GenerateRequest;
@@ -12,6 +13,7 @@ import com.astrawms.masterdata.api.MasterDataDtos.LocationStatus;
 import com.astrawms.masterdata.api.MasterDataDtos.LocationView;
 import com.astrawms.masterdata.api.MasterDataDtos.Page;
 import com.astrawms.masterdata.api.MasterDataDtos.SiteRequest;
+import com.astrawms.masterdata.api.MasterDataDtos.SiteView;
 import com.astrawms.masterdata.api.MasterDataDtos.ZoneRequest;
 import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
@@ -57,13 +59,48 @@ public class LocationService {
         } catch (RuntimeException e) {
             throw ApiException.unprocessable("MD_TIME_ZONE_INVALID", "Unknown time zone " + r.timeZone());
         }
+        String type = r.siteType() == null || r.siteType().isBlank() ? "MAIN" : r.siteType().trim().toUpperCase();
+        if (!List.of("MAIN", "STORE").contains(type)) {
+            throw ApiException.unprocessable("MD_SITE_TYPE_INVALID", "Site type is MAIN or STORE, not " + r.siteType());
+        }
+        String supplier = r.supplyingSite() == null || r.supplyingSite().isBlank() ? null : r.supplyingSite().trim().toUpperCase();
+        if (supplier != null && !"STORE".equals(type)) {
+            throw ApiException.unprocessable("MD_SITE_SUPPLIER", "Only a store has a supplying site");
+        }
+        if (supplier != null && site(supplier).filter(s -> "MAIN".equals(s.siteType())).isEmpty()) {
+            throw ApiException.unprocessable("MD_SITE_SUPPLIER", "Supplying site " + supplier + " is not a main site");
+        }
         jdbc.sql("""
-                        insert into site (tenant_id, site_id, name, time_zone, erp_site)
-                        values (:tenant, :site, :name, :tz, :erp)
+                        insert into site (tenant_id, site_id, name, time_zone, erp_site, site_type, supplying_site)
+                        values (:tenant, :site, :name, :tz, :erp, :type, :supplier)
                         on conflict (tenant_id, site_id) do update set
-                            name = excluded.name, time_zone = excluded.time_zone, erp_site = excluded.erp_site""")
+                            name = excluded.name, time_zone = excluded.time_zone, erp_site = excluded.erp_site,
+                            site_type = excluded.site_type, supplying_site = excluded.supplying_site""")
                 .param("tenant", TenantContext.tenantId()).param("site", siteId).param("name", r.name())
-                .param("tz", r.timeZone()).param("erp", r.erpSite()).update();
+                .param("tz", r.timeZone()).param("erp", r.erpSite()).param("type", type).param("supplier", supplier)
+                .update();
+    }
+
+    /** The sites the user may work at (their site scope), main sites first. */
+    @Transactional(readOnly = true)
+    public List<SiteView> sites() {
+        AccessScope scope = AccessScope.current();
+        return jdbc.sql("""
+                        select site_id, name, time_zone, erp_site, site_type, supplying_site from site
+                        where (:all or site_id in (:sites)) order by site_type, site_id""")
+                .param("all", scope.sitesAll()).param("sites", scope.siteList())
+                .query(LocationService::siteView).list();
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<SiteView> site(String siteId) {
+        return jdbc.sql("select site_id, name, time_zone, erp_site, site_type, supplying_site from site where site_id = :site")
+                .param("site", siteId).query(LocationService::siteView).optional();
+    }
+
+    private static SiteView siteView(ResultSet rs, int n) throws SQLException {
+        return new SiteView(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5),
+                rs.getString(6));
     }
 
     @Transactional

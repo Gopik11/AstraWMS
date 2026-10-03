@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { del, get, post, put, type Row } from '../api'
+import { del, get, post, put, query, type Row } from '../api'
 import { useAuth } from '../auth'
 import { code128Svg } from '../code128'
-import { Card, ErrorBox, Field, Page, Success, Table, useAction, useLoad, useSite } from '../ui'
+import { Badge, Card, ErrorBox, Field, Page, SearchBox, Success, Table, fmtDate, useAction, useLoad, useSite } from '../ui'
 
 interface Label { barcode: string; symbology: string; lines: string[]; zpl: string }
 interface Labels { count: number; labels: Label[]; zpl: string; printedOn?: string | null }
@@ -105,8 +105,64 @@ export default function LabelsPage() {
           </div>
         </Card>
       )}
+      <Printed base={base} printer={target} onPreview={(l) => setResult(l)} />
       {hasRole('SOLUTION_ADMIN') && <Printers base={base} onChange={printers.reload} rows={printers.data} />}
     </Page>
+  )
+}
+
+/**
+ * Label lifecycle (ADR-0024): every label made here is recorded. Scan a label after it is stuck on to verify it;
+ * reprint a damaged one (to the chosen printer, or as a browser preview); void one on the wrong pallet.
+ */
+function Printed({ base, printer, onPreview }: { base: string; printer: string | null; onPreview: (l: Labels) => void }) {
+  const { hasRole } = useAuth()
+  const [f, setF] = useState({ type: '', status: '', q: '' })
+  const list = useLoad(() => get<Row[]>(`${base}/printed${query(f)}`), [base, f.type, f.status, f.q])
+  const [scan, setScan] = useState('')
+  const verify = useAction(() => post<Row>(`${base}/printed/verify`, { scan }))
+  const reprint = useAction((r: Row) => post<Row & { zpl: string }>(`${base}/printed/${String(r.id)}/reprint`, { printer }))
+  const voidIt = useAction((r: Row, reason: string) => post<Row>(`${base}/printed/${String(r.id)}/void`, { reason }))
+  return (
+    <Card title="Printed labels">
+      <form className="row" onSubmit={async (e) => { e.preventDefault(); if (await verify.run()) { setScan(''); list.reload() } }}>
+        <Field label="Verify: scan the label after it is applied">
+          <input value={scan} onChange={(e) => setScan(e.target.value)} autoComplete="off" placeholder="Scan" />
+        </Field>
+        <button className="primary" disabled={!scan || verify.busy}>Verify scan</button>
+      </form>
+      <Success>{verify.result && `${String(verify.result.barcode)} verified`}</Success>
+      <ErrorBox error={verify.error ?? reprint.error ?? voidIt.error} />
+      <div className="row">
+        <Field label="Type"><select value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })}>
+          <option value="">All</option><option>LOCATION</option><option>ITEM</option><option>LPN</option></select></Field>
+        <Field label="Status"><select value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
+          <option value="">All</option><option>PRINTED</option><option>VERIFIED</option><option>VOID</option></select></Field>
+        <SearchBox value={f.q} onSearch={(q) => setF({ ...f, q })} placeholder="Barcode or text" />
+      </div>
+      <Table rows={list.data} empty="No labels printed yet" columns={[
+        { header: 'Label', cell: (r) => <><strong>{String(r.barcode)}</strong> <span className="muted">{String(r.label_type).toLowerCase()}</span></> },
+        { header: 'Status', cell: (r) => <Badge value={String(r.status)} /> },
+        { header: 'Printed', cell: (r) => `${fmtDate(r.printed_at)} by ${String(r.printed_by)}${r.printer ? ` on ${String(r.printer)}` : ' (browser)'} · ${String(r.print_count)}×` },
+        { header: 'Verified / void', cell: (r) => (r.status === 'VOID' ? `void: ${String(r.void_reason)} (${String(r.voided_by)})`
+          : r.verified_at ? `${fmtDate(r.verified_at)} by ${String(r.verified_by)}` : '') },
+        { header: '', cell: (r) => r.status === 'VOID' ? null : (
+          <div className="row tight">
+            <button className="small" disabled={reprint.busy} onClick={async () => {
+              const out = await reprint.run(r)
+              if (out && !printer) onPreview({ count: 1, labels: [{ barcode: String(out.barcode), symbology: String(out.barcode).startsWith('(01)') ? 'GS1-128' : 'CODE128', lines: (out.lines as string[]) ?? [], zpl: out.zpl }], zpl: out.zpl })
+              list.reload()
+            }}>Reprint</button>
+            {hasRole('SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER') && (
+              <button className="small" disabled={voidIt.busy} onClick={async () => {
+                const reason = window.prompt(`Void ${String(r.barcode)}: reason?`)
+                if (reason && await voidIt.run(r, reason)) list.reload()
+              }}>Void</button>
+            )}
+          </div>
+        ) },
+      ]} />
+    </Card>
   )
 }
 

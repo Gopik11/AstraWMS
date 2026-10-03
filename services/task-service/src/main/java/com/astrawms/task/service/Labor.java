@@ -173,15 +173,16 @@ public class Labor {
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(), rs.getTimestamp(5).toInstant()))
                 .list();
         record Open(String id, String user, String type, BigDecimal qty, Instant assigned, String status, String from,
-                    String to) {
+                    String to, String orderRef) {
         }
         List<Open> open = jdbc.sql("""
-                        select id::text, assigned_to, task_type, qty, assigned_at, status, from_location, target_location
+                        select id::text, assigned_to, task_type, qty, assigned_at, status, from_location, target_location,
+                               order_ref
                         from task where site_id = :site and status in ('RELEASED', 'ASSIGNED')""")
                 .param("site", siteId)
                 .query((rs, n) -> new Open(rs.getString(1), rs.getString(2), rs.getString(3), rs.getBigDecimal(4),
                         rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toInstant(), rs.getString(6),
-                        rs.getString(7), rs.getString(8)))
+                        rs.getString(7), rs.getString(8), rs.getString(9)))
                 .list();
         Map<String, Instant> lastActivity = new HashMap<>();
         jdbc.sql("""
@@ -204,9 +205,15 @@ public class Labor {
             byType.merge(d.type(), 1, Integer::sum);
         }
         Map<String, long[]> backlog = new TreeMap<>();
+        Map<String, long[]> byOrder = new TreeMap<>();
         for (Open t : open) {
             Standard s = std.get(t.type());
             long expected = s == null ? 0 : s.seconds(t.qty());
+            if ("PICK".equals(t.type()) && t.orderRef() != null) {
+                long[] o = byOrder.computeIfAbsent(t.orderRef(), k -> new long[2]);
+                o[0]++;
+                o[1] += expected;
+            }
             if ("RELEASED".equals(t.status())) {
                 long[] b = backlog.computeIfAbsent(t.type(), k -> new long[2]);
                 b[0]++;
@@ -252,6 +259,11 @@ public class Labor {
         result.put("activeOperators", rows.stream().filter(r -> Boolean.TRUE.equals(r.get("active"))).count());
         result.put("operators", rows);
         result.put("backlog", backlogRows);
+        // ADR-0024 cutoff forecast: open pick work per order in standard minutes; the UI sets it against the cutoffs.
+        List<Map<String, Object>> orderRows = new ArrayList<>();
+        byOrder.forEach((order, o) -> orderRows.add(Map.of("orderRef", order, "openPicks", o[0],
+                "standardMinutes", round(o[1] / 60.0))));
+        result.put("pickWorkByOrder", orderRows);
         return result;
     }
 

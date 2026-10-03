@@ -60,6 +60,15 @@ public record AccessScope(Set<String> sites, Set<String> owners, Set<String> zon
         return owners == null || owners.isEmpty() ? List.of("") : List.copyOf(owners);
     }
 
+    public boolean sitesAll() {
+        return sites == null;
+    }
+
+    /** The allowed sites for an {@code in (...)} list; never empty. Use as: (:sitesAll or site_id in (:sites)). */
+    public List<String> siteList() {
+        return sites == null || sites.isEmpty() ? List.of("") : List.copyOf(sites);
+    }
+
     public boolean zonesAll() {
         return zones == null;
     }

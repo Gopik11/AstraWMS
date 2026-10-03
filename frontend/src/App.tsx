@@ -29,52 +29,55 @@ const Tasks = lazy(() => import('./pages/Tasks'))
 const MasterData = lazy(() => import('./pages/MasterData'))
 const ErpSimulator = lazy(() => import('./pages/ErpSimulator'))
 const Operations = lazy(() => import('./pages/Operations'))
+const Network = lazy(() => import('./pages/Network'))
 
 interface NavItem {
   to: string
   label: string
   roles?: Role[]          // undefined = every signed-in user (reads)
+  /** Shown at a satellite store too (ADR-0024: a store works transfers in, issues, counts and its sync state). */
+  store?: boolean
 }
 
 const NAV: { group: string; items: NavItem[] }[] = [
-  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'] },
-    { to: '/rf/issue', label: 'RF material issue', roles: ['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR'] }] },
+  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'], store: true },
+    { to: '/rf/issue', label: 'RF material issue', roles: ['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR'], store: true }] },
   {
     group: 'Operations',
     items: [
-      { to: '/', label: 'Overview' },
-      { to: '/receipts', label: 'Receipts' },
+      { to: '/', label: 'Overview', store: true },
+      { to: '/network', label: 'Site network', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
+      { to: '/receipts', label: 'Receipts', store: true },
       { to: '/returns', label: 'Customer returns' },
       { to: '/orders', label: 'Outbound orders' },
       { to: '/waves', label: 'Waves', roles: ['SUPERVISOR'] },
       { to: '/pack', label: 'Pack station', roles: ['PICKER', 'SUPERVISOR'] },
       { to: '/loads', label: 'Loads', roles: ['PICKER', 'SUPERVISOR'] },
-      { to: '/tasks', label: 'Tasks' },
+      { to: '/tasks', label: 'Tasks', store: true },
     ],
   },
   {
     group: 'Inventory',
     items: [
-      { to: '/inventory', label: 'Stock inquiry' },
-      { to: '/counts', label: 'Cycle counts', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR'] },
+      { to: '/inventory', label: 'Stock inquiry', store: true },
+      { to: '/counts', label: 'Cycle counts', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR'], store: true },
       { to: '/replenishment', label: 'Replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
       { to: '/slotting', label: 'Slotting', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST'] },
       { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
       { to: '/billing', label: 'Billing', roles: ['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR'] },
-      { to: '/transfers', label: 'Transfers', roles: ['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER'] },
-      { to: '/labels', label: 'Labels', roles: ['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER'] },
-      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
-      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
-      { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'] },
+      { to: '/transfers', label: 'Transfers', roles: ['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER'], store: true },
+      { to: '/labels', label: 'Labels', roles: ['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER'], store: true },
+      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'], store: true },
+      { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'], store: true },
     ],
   },
   {
     group: 'Setup',
     items: [
-      { to: '/master-data', label: 'Master data', roles: ['SOLUTION_ADMIN'] },
-      { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
-      { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'] },
+      { to: '/master-data', label: 'Master data', roles: ['SOLUTION_ADMIN'], store: true },
+      { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'], store: true },
+      { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'], store: true },
     ],
   },
 ]
@@ -89,9 +92,14 @@ function Guard({ roles, children }: { roles?: Role[]; children: ReactNode }) {
 
 export default function App({ environment }: { environment?: string }) {
   const { session, hasRole, logout, setUpPasskey } = useAuth()
-  const { site, setSite } = useSiteContext()
+  const { site, setSite, sites: known, isStore } = useSiteContext()
   const [menuOpen, setMenuOpen] = useState(false)
-  const sites = session.sites === '*' ? null : session.sites
+  // The selector lists the sites master data knows for the user (ADR-0024), else the sites of the sign-in.
+  const sites = known.length ? known.map((k) => k.siteId) : session.sites === '*' ? null : session.sites
+  const label = (id: string) => {
+    const k = known.find((x) => x.siteId === id)
+    return k ? `${id}${k.siteType === 'STORE' ? ' · store' : ''} – ${k.name}` : id
+  }
 
   return (
     <div className={`shell ${menuOpen ? 'menu-open' : ''}`}>
@@ -104,7 +112,8 @@ export default function App({ environment }: { environment?: string }) {
           Site
           {sites ? (
             <select value={site} onChange={(e) => setSite(e.target.value)}>
-              {sites.map((s) => <option key={s}>{s}</option>)}
+              {!sites.includes(site) && <option value={site}>{site}</option>}
+              {sites.map((s) => <option key={s} value={s}>{label(s)}</option>)}
             </select>
           ) : (
             <input value={site} onChange={(e) => setSite(e.target.value.toUpperCase())} size={6} />
@@ -118,7 +127,7 @@ export default function App({ environment }: { environment?: string }) {
       </header>
       <nav className="sidebar" onClick={() => setMenuOpen(false)}>
         {NAV.map((g) => {
-          const items = g.items.filter((i) => !i.roles || hasRole(...i.roles))
+          const items = g.items.filter((i) => (!i.roles || hasRole(...i.roles)) && (!isStore || i.store))
           return items.length === 0 ? null : (
             <div key={g.group} className="nav-group">
               <div className="nav-title">{g.group}</div>
@@ -131,6 +140,7 @@ export default function App({ environment }: { environment?: string }) {
         <Suspense fallback={<p className="muted">Loading…</p>}>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/network" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN']}><Network /></Guard>} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
           <Route path="/rf/issue" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR']}><RfIssue /></Guard>} />
           <Route path="/transfers" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER']}><Transfers /></Guard>} />

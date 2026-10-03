@@ -61,7 +61,13 @@ public final class MasterDataDtos {
 
     // ------------------------------------------------------------------ sites, zones, locations
 
-    public record SiteRequest(@NotBlank String name, @NotBlank String timeZone, @NotBlank String erpSite) {
+    /** A site; {@code siteType} MAIN (default) or STORE, a store optionally names the main site supplying it (ADR-0024). */
+    public record SiteRequest(@NotBlank String name, @NotBlank String timeZone, @NotBlank String erpSite, String siteType,
+                              String supplyingSite) {
+    }
+
+    public record SiteView(String siteId, String name, String timeZone, String erpSite, String siteType,
+                           String supplyingSite) {
     }
 
     public record ZoneRequest(@NotBlank String zoneType, @NotBlank String erpBucket, String temperatureClass,

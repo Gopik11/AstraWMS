@@ -240,6 +240,28 @@ class MasterDataIT {
         call(post("/api/v1/sites/DC1/labels/lpns"), "{\"count\":1}")
                 .andExpect(jsonPath("$.labels[0].barcode", is("LDC1000000003")));       // never reused
 
+        // ADR-0024 lifecycle: each label is recorded; a scan verifies it; a voided label is refused and never reprinted.
+        call(get("/api/v1/sites/DC1/labels/printed?type=ITEM"), "")
+                .andExpect(jsonPath("$.length()", is(2)));                                 // GS1 case label and EA label
+        call(post("/api/v1/sites/DC1/labels/printed/verify"), "{\"scan\":\"]C10110614141000415\"}")
+                .andExpect(jsonPath("$.status", is("VERIFIED"))).andExpect(jsonPath("$.barcode", is("(01)10614141000415")));
+        String lpnLabel = JsonPath.read(call(get("/api/v1/sites/DC1/labels/printed?q=LDC1000000002"), "")
+                .andReturn().getResponse().getContentAsString(), "$[0].id");
+        call(post("/api/v1/sites/DC1/labels/printed/" + lpnLabel + "/void"), "{}")
+                .andExpect(jsonPath("$.code", is("MD_LABEL_REASON")));
+        call(post("/api/v1/sites/DC1/labels/printed/" + lpnLabel + "/void"), "{\"reason\":\"on the wrong pallet\"}")
+                .andExpect(jsonPath("$.status", is("VOID")));
+        call(post("/api/v1/sites/DC1/labels/printed/verify"), "{\"scan\":\"LDC1000000002\"}")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("MD_LABEL_VOID")));
+        call(post("/api/v1/sites/DC1/labels/printed/" + lpnLabel + "/reprint"), "{}")
+                .andExpect(jsonPath("$.code", is("MD_LABEL_VOID")));
+        call(post("/api/v1/sites/DC1/labels/printed/verify"), "{\"scan\":\"NOPE\"}")
+                .andExpect(status().isNotFound());
+        String location = JsonPath.read(call(get("/api/v1/sites/DC1/labels/printed?type=LOCATION&q=A-01-101"), "")
+                .andReturn().getResponse().getContentAsString(), "$[0].id");
+        call(post("/api/v1/sites/DC1/labels/printed/" + location + "/reprint"), "{}")
+                .andExpect(jsonPath("$.print_count", is(2))).andExpect(jsonPath("$.zpl", containsString("A-01-101")));
+
         // A network printer on its raw port receives the ZPL.
         call(put("/api/v1/sites/DC1/labels/printers/p1"), "{\"host\":\"127.0.0.1\",\"port\":5432}")
                 .andExpect(jsonPath("$.code", is("MD_PRINTER_INVALID")));               // not a print port
@@ -260,6 +282,31 @@ class MasterDataIT {
         mvc.perform(post("/api/v1/sites/DC1/labels/lpns").with(TestTokens.as(tenant, "pete", Roles.PICKER))
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void storesBelongToAMainSiteAndUsersSeeOnlyTheirSites_ADR0024() throws Exception {
+        call(put("/api/v1/sites/ST01"), """
+                {"name":"Store 1","timeZone":"America/Chicago","erpSite":"2001","siteType":"store","supplyingSite":"DC1"}""")
+                .andExpect(status().isNoContent());
+        call(put("/api/v1/sites/ST02"), """
+                {"name":"Store 2","timeZone":"America/Chicago","erpSite":"2002","siteType":"STORE","supplyingSite":"ST01"}""")
+                .andExpect(jsonPath("$.code", is("MD_SITE_SUPPLIER")));
+        call(put("/api/v1/sites/DC2"), """
+                {"name":"DC 2","timeZone":"America/Chicago","erpSite":"1002","supplyingSite":"DC1"}""")
+                .andExpect(jsonPath("$.code", is("MD_SITE_SUPPLIER")));
+        call(put("/api/v1/sites/X1"), """
+                {"name":"X","timeZone":"America/Chicago","erpSite":"9","siteType":"DEPOT"}""")
+                .andExpect(jsonPath("$.code", is("MD_SITE_TYPE_INVALID")));
+        call(get("/api/v1/sites"), "")
+                .andExpect(jsonPath("$[*].siteId", org.hamcrest.Matchers.contains("DC1", "ST01")))
+                .andExpect(jsonPath("$[0].siteType", is("MAIN")))
+                .andExpect(jsonPath("$[1].siteType", is("STORE"))).andExpect(jsonPath("$[1].supplyingSite", is("DC1")));
+        call(get("/api/v1/sites/ST01"), "").andExpect(jsonPath("$.erpSite", is("2001")));
+        // A store user scoped to ST01 sees only that site.
+        mvc.perform(get("/api/v1/sites").with(TestTokens.bearer(TestTokens.token().tenant(tenant).user("st01")
+                        .roles(Roles.RECEIVER).sites("ST01").sign())))
+                .andExpect(jsonPath("$.length()", is(1))).andExpect(jsonPath("$[0].siteId", is("ST01")));
     }
 
     private ResultActions call(MockHttpServletRequestBuilder request, String body) throws Exception {

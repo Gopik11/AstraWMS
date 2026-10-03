@@ -316,6 +316,7 @@ public class MaterialIssues {
 
     @Transactional(readOnly = true)
     public List<Map<String, Object>> list(String siteId, String status, String q) {
+        status = status == null || status.isBlank() ? null : status.trim().toUpperCase();   // "All statuses"
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
         AccessScope scope = AccessScope.current();
         return jdbc.sql("""
@@ -323,7 +324,8 @@ public class MaterialIssues {
                                i.requested_at, i.decided_by, i.updated_at,
                                (select count(*) from material_issue_line l where l.issue_id = i.id) as lines
                         from material_issue i
-                        where i.site_id = :site and (cast(:status as text) is null or i.status = :status)
+                        where i.site_id = :site
+                          and (cast(:status as text) is null or i.status = any(string_to_array(:status, ',')))
                           and (:ownersAll or i.owner_id in (:owners))
                           and (cast(:q as text) is null or upper(i.issue_no) like :q or upper(i.object_code) like :q
                                or upper(i.recipient) like :q or upper(i.requested_by) like :q

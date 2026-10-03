@@ -8,7 +8,8 @@ function monthStart(offset = 0): string {
   return new Date(d.getFullYear(), d.getMonth() + offset, 1).toISOString().slice(0, 10)
 }
 
-const money = (v: unknown, cur?: unknown) => (v == null ? '' : `${Number(v).toFixed(2)}${cur ? ` ${String(cur)}` : ''}`)
+/** An amount; null is an event without a rate: "unrated", never a silent 0.00 (ADR-0024). */
+const money = (v: unknown, cur?: unknown) => (v == null ? 'unrated' : `${Number(v).toFixed(2)}${cur ? ` ${String(cur)}` : ''}`)
 
 /**
  * 3PL billing (ADR-0021): billable events from the inventory ledger (receipts, picks, returns), storage days and
@@ -24,6 +25,7 @@ export default function Billing() {
   const events = useLoad(() => get<Row[]>(`${base}/events?${range}`), [base, range])
   const capture = useAction(() => post<Row>(`${base}/capture`))
   const total = (summary.data ?? []).reduce((n, r) => n + Number(r.amount ?? 0), 0)
+  const unrated = (summary.data ?? []).reduce((n, r) => n + Number(r.unpriced ?? 0), 0)
 
   return (
     <Page title="Billing" actions={
@@ -39,7 +41,9 @@ export default function Billing() {
           <Field label="Owner"><input value={period.owner} onChange={(e) => setPeriod({ ...period, owner: e.target.value.toUpperCase() })} size={8} /></Field>
         </div>
       </Card>
-      <Card title={`Totals: ${total.toFixed(2)}`}>
+      <Card title={`Totals: ${total.toFixed(2)}${unrated ? ` + ${unrated} unrated event(s)` : ''}`}>
+        {unrated > 0 && <p className="text-late">{unrated} event(s) have no rate and are not in the total: set a rate below
+          (it prices events captured from then on).</p>}
         <Table rows={summary.data} empty="No billable events in this period (capture first?)" columns={[
           { header: 'Owner', cell: (r) => String(r.owner_id) },
           { header: 'Event', cell: (r) => `${String(r.event_type)}${r.service ? ` · ${String(r.service)}` : ''}` },

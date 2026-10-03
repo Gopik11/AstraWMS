@@ -1,14 +1,45 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { ApiError } from './api'
+import { ApiError, get } from './api'
 
 // ------------------------------------------------------------------ site context
+
+/** A site of the network (ADR-0024): the main warehouse or a satellite store supplied by it. */
+export interface SiteInfo {
+  siteId: string
+  name: string
+  timeZone: string
+  erpSite: string
+  siteType: 'MAIN' | 'STORE'
+  supplyingSite?: string | null
+}
 
 interface SiteContextValue {
   site: string
   setSite: (site: string) => void
+  /** The sites the user may work at; empty until loaded (or when the API is not reachable and nothing is cached). */
+  sites: SiteInfo[]
+  /** The current site is a satellite store: the UI shows only store work. */
+  isStore: boolean
 }
 
-const SiteContext = createContext<SiteContextValue>({ site: 'DC1', setSite: () => {} })
+const SiteContext = createContext<SiteContextValue>({ site: 'DC1', setSite: () => {}, sites: [], isStore: false })
+
+function stored<T>(key: string, fallback: T): T {
+  try {
+    const v = window.localStorage.getItem(key)
+    return v === null ? fallback : (JSON.parse(v) as T)
+  } catch {
+    return fallback
+  }
+}
+
+function store(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // per-browser convenience only
+  }
+}
 
 function storedSite(fallback: string): string {
   try {
@@ -20,6 +51,11 @@ function storedSite(fallback: string): string {
 
 export function SiteProvider({ initial, children }: { initial: string; children: ReactNode }) {
   const [site, setSiteState] = useState(() => storedSite(initial))
+  // The last list is kept on the device so a store client opened offline still knows its site type.
+  const [sites, setSites] = useState<SiteInfo[]>(() => stored<SiteInfo[]>('astrawms.sites', []))
+  useEffect(() => {
+    get<SiteInfo[]>('/api/v1/sites').then((list) => { setSites(list); store('astrawms.sites', list) }).catch(() => undefined)
+  }, [])
   const setSite = (s: string) => {
     setSiteState(s)
     try {
@@ -28,7 +64,8 @@ export function SiteProvider({ initial, children }: { initial: string; children:
       // per-browser convenience only
     }
   }
-  return <SiteContext.Provider value={{ site, setSite }}>{children}</SiteContext.Provider>
+  const isStore = sites.find((x) => x.siteId === site)?.siteType === 'STORE'
+  return <SiteContext.Provider value={{ site, setSite, sites, isStore }}>{children}</SiteContext.Provider>
 }
 
 export const useSite = () => useContext(SiteContext).site

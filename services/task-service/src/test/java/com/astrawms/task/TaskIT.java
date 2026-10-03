@@ -476,6 +476,10 @@ class TaskIT {
         UUID allocation = UUID.randomUUID();
         pickRequested(allocation, "SO-1", "A-01", "6");
         String id = awaitPickTask(allocation, "RELEASED");
+        // ADR-0024 cutoff forecast: the labor board gives the open pick work per order.
+        tasks(get("/api/v1/sites/DC1/tasks/labor"))
+                .andExpect(jsonPath("$.pickWorkByOrder[0].orderRef", is("SO-1")))
+                .andExpect(jsonPath("$.pickWorkByOrder[0].openPicks", is(1)));
         String next = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
         assertThat(next).isEqualTo(id);
         tasks(get("/api/v1/sites/DC1/tasks/" + id))
@@ -897,6 +901,63 @@ class TaskIT {
         // A second sweep finds nothing new for the LPNs that have tasks.
         mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
                 .andExpect(jsonPath("$.putawaysCreated", is(0)));
+    }
+
+    @Test
+    void sweptDockStockGoesToStorageNeverOutboundStagingAndTheDockIsEmptyAfterConfirm() throws Exception {
+        location("STAGE-OUT", "STAGING_OUT", null, false, "66", -5, "SHIPPING");
+        await(() -> locations() == 5);
+        stockEvent(UUID.randomUUID(), "SKU-1", "ADJUST_POS", "LPN-OLD", "DOCK-1", "4", "4");
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from stock_projection").query(Integer.class).single()) == 1);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.putawaysCreated", is(1)));
+        String id = awaitTask("LPN-OLD", "RELEASED");
+        tasks(get("/api/v1/sites/DC1/tasks/" + id)).andExpect(jsonPath("$.targetLocation", is("A-02")));
+        tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(jsonPath("$.id", is(id)));
+        confirm(id, "LPN-OLD", "A-02", "22").andExpect(jsonPath("$.status", is("COMPLETED")))
+                .andExpect(jsonPath("$.confirmedLocation", is("A-02")));
+        assertThat(inventory.moves.getLast().to()).isEqualTo("A-02");
+        // The inventory move comes back as stock events; the dock is then empty and a sweep has nothing to do.
+        stockEvent(UUID.randomUUID(), "SKU-1", "MOVE_OUT", "LPN-OLD", "DOCK-1", "-4", "0");
+        stockEvent(UUID.randomUUID(), "SKU-1", "MOVE_IN", "LPN-OLD", "A-02", "4", "4");
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from stock_projection where location_id = 'DOCK-1' and qty > 0")
+                .query(Integer.class).single()) == 0);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.putawaysCreated", is(0))).andExpect(jsonPath("$.lpnsCreated", is(0)));
+    }
+
+    // ------------------------------------------------------------------ ADR-0024 supervisor unassign
+
+    @Test
+    void supervisorsUnassignStaleTasksBackToTheQueue() throws Exception {
+        received("LPN-U", "SKU-1");
+        String id = awaitTask("LPN-U", "RELEASED");
+        tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(jsonPath("$.id", is(id)));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/unassign").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(status().isForbidden());
+        // Not stale yet: nothing to unassign.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/unassign-stale?minutes=30").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.length()", is(0)));
+        asTenant(() -> jdbc.sql("update task set assigned_at = now() - interval '29 hours' where id = cast(:id as uuid)")
+                .param("id", id).update());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/unassign-stale?minutes=30&type=PUTAWAY")
+                        .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(jsonPath("$.length()", is(1)))
+                .andExpect(jsonPath("$[0].status", is("RELEASED")))
+                .andExpect(jsonPath("$[0].assignedTo").doesNotExist());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/unassign").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("TSK_NOT_ASSIGNED")));
+        assertThat(asTenant(() -> jdbc.sql("select detail from task_event where task_id = cast(:id as uuid) and event = 'UNASSIGNED'")
+                .param("id", id).query(String.class).single())).contains("driver1").contains("sue");
+
+        // An offline confirmation refused on sync: the server wins and the task waits for the supervisor.
+        tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(jsonPath("$.id", is(id)));
+        tasks(post("/api/v1/sites/DC1/tasks/" + id + "/sync-conflict"), "{\"detail\":\"TSK_WRONG_LPN: LPN moved\"}")
+                .andExpect(jsonPath("$.status", is("EXCEPTION"))).andExpect(jsonPath("$.exceptionReason", is("SYNC_CONFLICT")));
+        tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(status().isNoContent());
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/unassign").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"checked the dock\"}"))
+                .andExpect(jsonPath("$.status", is("RELEASED"))).andExpect(jsonPath("$.exceptionReason").doesNotExist());
     }
 
     @Test

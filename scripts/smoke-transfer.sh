@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Transfer between sites started in the WMS (ADR-0023), end to end through the gateway with Keycloak users:
-#   main warehouse DC1 -> store ST01 without an SAP stock transport order: transfer created -> RF pick -> shipped
-#   -> SAP 303 (plant 1000 -> 2000) -> ST01 gets the expected receipt -> RF RECEIVE at ST01 -> closed -> SAP 305.
+#   main warehouse DC1 -> store ST03 without an SAP stock transport order: transfer TR-DC1-000001 created -> RF pick
+#   -> shipped -> SAP 303 (plant 1000 -> 2003) -> ST03 gets the expected receipt (in transit on the network view)
+#   -> RF RECEIVE at ST03 -> closed -> SAP 305. ST03 is a STORE supplied by DC1 (ADR-0024).
 set -euo pipefail
 
 GW="${GATEWAY_URL:-http://localhost:8080}"
@@ -17,7 +18,7 @@ json() { python -c "import json,sys; d=json.load(sys.stdin); print(eval('d'+sys.
 wait_for() { local what="$1"; shift; for _ in $(seq 1 90); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; fail "timed out: $what"; }
 check_digit() { curl -sf "$GW/api/v1/sites/$1/locations/$2" "${ADM[@]}" | json "['checkDigit']"; }
 order_is() { [[ "$(curl -sf "$GW/api/v1/sites/DC1/outbound/orders/$1" "${SUP[@]}" | json "['status']")" == "$2" ]]; }
-receipt_is() { [[ "$(curl -sf "$GW/api/v1/sites/ST01/receipts/$1" "${SUP[@]}" | json "['header']['status']")" == "$2" ]]; }
+receipt_is() { [[ "$(curl -sf "$GW/api/v1/sites/ST03/receipts/$1" "${SUP[@]}" | json "['header']['status']")" == "$2" ]]; }
 # next_task <site> <auth-array-name> <task type>: polls RF "next" until a task of that type is assigned; sets TASK / BODY.
 next_task() { local site="$1"; local -n who="$2"; local out
   for _ in $(seq 1 60); do
@@ -36,7 +37,7 @@ wait_for_keycloak
 for svc in master-data-service inventory-service inbound-service task-service outbound-service sap-adapter; do
   wait_for "$svc" curl -sf "$GW/health/$svc"; done
 
-step "Two sites: main warehouse DC1 (plant 1000) and store ST01 (plant 2000)"
+step "Two sites: main warehouse DC1 (plant 1000) and store ST03 (plant 2003)"
 provision "$TENANT" "$TENANT-admin" SOLUTION_ADMIN RECEIVER
 provision "$TENANT" "$TENANT-picker" PICKER
 provision "$TENANT" "$TENANT-receiver" RECEIVER
@@ -45,9 +46,10 @@ bearer "$TENANT-admin";      ADM=("${AUTH[@]}" -H "Content-Type: application/jso
 bearer "$TENANT-picker";     P=("${AUTH[@]}" -H "Content-Type: application/json")
 bearer "$TENANT-receiver";   RCV=("${AUTH[@]}" -H "Content-Type: application/json")
 bearer "$TENANT-supervisor"; SUP=("${AUTH[@]}" -H "Content-Type: application/json")
-for s in DC1:1000 ST01:2000; do
-  site="${s%%:*}"; plant="${s##*:}"
-  expect 204 -X PUT "$GW/api/v1/sites/$site" "${ADM[@]}" -d "{\"name\":\"$site\",\"timeZone\":\"America/Chicago\",\"erpSite\":\"$plant\"}"
+for s in DC1:1000:MAIN ST03:2003:STORE; do
+  IFS=: read -r site plant type <<<"$s"
+  supplier=""; [[ "$type" == STORE ]] && supplier=',"supplyingSite":"DC1"'
+  expect 204 -X PUT "$GW/api/v1/sites/$site" "${ADM[@]}" -d "{\"name\":\"$site\",\"timeZone\":\"America/Chicago\",\"erpSite\":\"$plant\",\"siteType\":\"$type\"$supplier}"
   expect 200 -X PUT "$GW/api/v1/sites/$site/zones/DOCK" "${ADM[@]}" -d '{"zoneType":"DOCK","erpBucket":"0001"}'
   expect 200 -X PUT "$GW/api/v1/sites/$site/zones/STOR" "${ADM[@]}" -d '{"zoneType":"RESERVE","erpBucket":"0001"}'
   expect 200 -X PUT "$GW/api/v1/sites/$site/zones/SHIP" "${ADM[@]}" -d '{"zoneType":"SHIPPING","erpBucket":"0001"}'
@@ -57,7 +59,7 @@ for s in DC1:1000 ST01:2000; do
   expect 204 -X PUT "$GW/api/v1/sap/site-map/$plant" "${ADM[@]}" -d "{\"siteId\":\"$site\",\"timeZone\":\"America/Chicago\",\"defaultOwner\":\"ACME\"}"
 done
 expect 200 -X PUT "$GW/api/v1/items/ACME/SKU-1" "${ADM[@]}" -d '{"description":"Speaker","baseUom":"EA","status":"ACTIVE",
-  "sites":[{"siteId":"DC1","lotControlled":false,"serialControl":"NONE"},{"siteId":"ST01","lotControlled":false,"serialControl":"NONE"}]}'
+  "sites":[{"siteId":"DC1","lotControlled":false,"serialControl":"NONE"},{"siteId":"ST03","lotControlled":false,"serialControl":"NONE"}]}'
 for _ in $(seq 1 30); do
   code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GW/api/v1/sites/DC1/inventory/receipts" "${ADM[@]}" -H "Idempotency-Key: s1" \
     -d '{"ownerId":"ACME","itemNo":"SKU-1","qty":30,"uom":"EA","locationId":"A-01-10"}')"
@@ -65,10 +67,11 @@ for _ in $(seq 1 30); do
 done
 [[ "$code" =~ ^20 ]] || fail "stock receipt at DC1: HTTP $code"
 
-step "Transfer DC1 -> ST01 (6 EA), picked on RF at DC1, shipped"
+step "Transfer DC1 -> ST03 (6 EA), picked on RF at DC1, shipped"
 expect 201 -X POST "$GW/api/v1/sites/DC1/outbound/transfers" "${SUP[@]}" \
-  -d '{"toSiteId":"ST01","note":"Store replenishment","lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":6,"uom":"EA"}]}'
+  -d '{"toSiteId":"ST03","note":"Store replenishment","lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":6,"uom":"EA"}]}'
 TR="$(json "['erp_doc_no']" <<<"$BODY")"
+[[ "$TR" == TR-DC1-000001 ]] || fail "first transfer of the tenant should be TR-DC1-000001, got $TR"
 echo "Transfer $TR ($(json "['status']" <<<"$BODY"))"
 next_task DC1 P PICK
 expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$TASK/pick" "${P[@]}" \
@@ -78,19 +81,30 @@ expect 200 -X POST "$GW/api/v1/sites/DC1/outbound/orders/$TR/ship" "${SUP[@]}" -
 TXN="$(json "['shipment_txn_id']" <<<"$BODY")"
 wait_for "$TR posted to SAP (303)" order_is "$TR" CONFIRMED
 curl -sf "$GW/mock-sap/documents?xblnr=$TXN" -H "$ADM_AUTH" | grep -q 'MOVE_TYPE[^0-9]*303' || fail "no 303 for $TXN"
-echo "$TR shipped; SAP 303 plant 1000 -> 2000 (in transit)"
+echo "$TR shipped; SAP 303 plant 1000 -> 2003 (in transit)"
+expect 200 "$GW/api/v1/sites" "${SUP[@]}"
+[[ "$(json "[1]['siteType']" <<<"$BODY")" == STORE ]] || fail "ST03 is not listed as a store: $BODY"
+in_transit() { curl -sf "$GW/api/v1/network/inbound" "${SUP[@]}" | python -c "import json,sys
+rows = {r['site_id']: r for r in json.load(sys.stdin)}
+sys.exit(0 if int(rows.get('ST03', {}).get('transfers_in_transit', 0)) == 1 else 1)"; }
+wait_for "network view shows $TR in transit to ST03" in_transit
+for half in inventory inbound outbound tasks; do expect 200 "$GW/api/v1/network/$half" "${SUP[@]}"; done
+expect 200 "$GW/api/v1/sites/DC1/inventory/aisles" "${SUP[@]}"
+grep -q '"aisle":"A-01"' <<<"$BODY" || fail "DC1 aisle A-01 missing from the twin: $BODY"
+expect 200 "$GW/api/v1/sites/DC1/tasks/aisles" "${SUP[@]}"
+echo "Network view: 1 transfer in transit to ST03; all four halves and the DC1 aisles answer"
 
-step "ST01: the transfer is an expected receipt; RF RECEIVE, close -> SAP 305"
-expect 200 "$GW/api/v1/sites/ST01/outbound/transfers?direction=IN" "${SUP[@]}"
-[[ "$(json "[0]['erp_doc_no']" <<<"$BODY")" == "$TR" ]] || fail "ST01 does not see $TR coming: $BODY"
-next_task ST01 RCV RECEIVE
+step "ST03: the transfer is an expected receipt; RF RECEIVE, close -> SAP 305"
+expect 200 "$GW/api/v1/sites/ST03/outbound/transfers?direction=IN" "${SUP[@]}"
+[[ "$(json "[0]['erp_doc_no']" <<<"$BODY")" == "$TR" ]] || fail "ST03 does not see $TR coming: $BODY"
+next_task ST03 RCV RECEIVE
 [[ "$(json "['docNo']" <<<"$BODY")" == "$TR" ]] || fail "RECEIVE task is not for $TR: $BODY"
-expect 200 -X POST "$GW/api/v1/sites/ST01/tasks/$TASK/receive" "${RCV[@]}" -d "{\"scanId\":\"$(date +%s%N)\",
+expect 200 -X POST "$GW/api/v1/sites/ST03/tasks/$TASK/receive" "${RCV[@]}" -d "{\"scanId\":\"$(date +%s%N)\",
   \"docNo\":\"$TR\",\"itemNo\":\"SKU-1\",\"qty\":6,\"uom\":\"EA\",\"locationId\":\"DOCK-01\",
-  \"checkDigit\":\"$(check_digit ST01 DOCK-01)\"}"
-expect 200 -X POST "$GW/api/v1/sites/ST01/tasks/$TASK/receive/close" "${RCV[@]}" -d '{}'
-wait_for "$TR received at ST01 and posted (305)" receipt_is "$TR" CONFIRMED
-expect 200 "$GW/api/v1/sites/ST01/receipts/$TR" "${SUP[@]}"
-echo "$TR received at ST01, SAP document $(json "['header']['erpDocument']" <<<"$BODY") (305)"
+  \"checkDigit\":\"$(check_digit ST03 DOCK-01)\"}"
+expect 200 -X POST "$GW/api/v1/sites/ST03/tasks/$TASK/receive/close" "${RCV[@]}" -d '{}'
+wait_for "$TR received at ST03 and posted (305)" receipt_is "$TR" CONFIRMED
+expect 200 "$GW/api/v1/sites/ST03/receipts/$TR" "${SUP[@]}"
+echo "$TR received at ST03, SAP document $(json "['header']['erpDocument']" <<<"$BODY") (305)"
 
 printf '\nTRANSFER SMOKE TEST PASSED (tenant %s)\n' "$TENANT"
