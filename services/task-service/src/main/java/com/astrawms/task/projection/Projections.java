@@ -74,12 +74,16 @@ public class Projections {
         return digits.substring(i);
     }
 
-    /** Whether a scan identifies the item: its item number, or a GTIN of one of its units (ADR-0020). */
+    /**
+     * Whether a scan identifies the item: its item number, a GTIN of one of its units (ADR-0020), or a GS1 element
+     * string whose GTIN (AI 01, or AI 02 on a logistic unit) is one of them (ADR-0022).
+     */
     public boolean scanMatchesItem(String ownerId, String itemNo, String scan) {
         if (scan == null || scan.isBlank()) {
             return false;
         }
-        String s = scan.trim();
+        String s = com.astrawms.common.barcode.Gs1.parse(scan).map(com.astrawms.common.barcode.Gs1.Data::itemGtin)
+                .orElse(scan.trim());
         if (s.equalsIgnoreCase(itemNo)) {
             return true;
         }
@@ -88,6 +92,12 @@ public class Projections {
         }
         return jdbc.sql("select exists (select 1 from ref_item_gtin where owner_id = :o and item_no = :i and gtin = :g)")
                 .param("o", ownerId).param("i", itemNo).param("g", normaliseGtin(s)).query(Boolean.class).single();
+    }
+
+    /** Items (owner, item number) having a unit with this GTIN. */
+    public List<String[]> itemsByGtin(String gtin) {
+        return jdbc.sql("select distinct owner_id, item_no from ref_item_gtin where gtin = :g order by owner_id, item_no")
+                .param("g", normaliseGtin(gtin)).query((rs, n) -> new String[] {rs.getString(1), rs.getString(2)}).list();
     }
 
     public void upsertLocation(LocationUpserted e) {

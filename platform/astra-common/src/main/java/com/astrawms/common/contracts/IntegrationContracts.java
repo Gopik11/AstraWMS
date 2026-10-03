@@ -89,12 +89,27 @@ public final class IntegrationContracts {
 
     // ------------------------------------------------------------------ IF-INV-001
 
-    /** {@code GoodsMovement} v2 (ISD IF-INV-001 §4). Quantities in the item's base UoM. Business key site:item. */
+    /**
+     * {@code GoodsMovement} v2 (ISD IF-INV-001 §4). Quantities in the item's base UoM. Business key site:item.
+     * 2.1 (ADR-0022, additive): {@code account}, the cost object a material issue or its return is posted to.
+     */
     public record GoodsMovement(String wmsTxnId, String movementType, String reasonCode, Instant physicalDateTimeUtc,
-                                String approvedBy, List<Item> items) {
+                                String approvedBy, List<Item> items, AccountAssignment account) {
 
         public static final String TYPE = "GoodsMovement";
-        public static final String VERSION = "2.0";
+        public static final String VERSION = "2.1";
+
+        public GoodsMovement(String wmsTxnId, String movementType, String reasonCode, Instant physicalDateTimeUtc,
+                             String approvedBy, List<Item> items) {
+            this(wmsTxnId, movementType, reasonCode, physicalDateTimeUtc, approvedBy, items, null);
+        }
+
+        /**
+         * Account assignment of a consumption posting: {@code objectType} COST_CENTER, WBS or ORDER with its code; the
+         * recipient (person or department) and the WMS issue document as reference.
+         */
+        public record AccountAssignment(String objectType, String code, String recipient, String issueNo) {
+        }
 
         /** {@code stockType}: ERP stock type of the source stock (UNRESTRICTED, QUALITY_INSPECTION, BLOCKED). */
         public record Item(String itemNo, BigDecimal qty, String uom, String fromBucket, String toBucket,

@@ -31,6 +31,7 @@ export default function ErpSimulator() {
         {canSend && <Delivery inbound={false} />}
         {canSend && <ReturnDelivery />}
         {canSend && <Cancel />}
+        {canSend && <MaterialMaster />}
         <IdocStatus />
       </div>
       {hasRole('SOLUTION_ADMIN') && <Documents />}
@@ -117,6 +118,40 @@ function ReturnDelivery() {
       <button className="primary" disabled={send.busy || !f.vbeln || !f.item} onClick={() => void send.run()}>Send IDoc</button>
       <ErrorBox error={send.error} />
       <Success>{send.result && `IDoc ${String(send.result.idocNumber)} accepted; the RMA appears under Customer returns`}</Success>
+    </Card>
+  )
+}
+
+/** MATMAS05 (ADR-0022): a material with its description, units with EAN/GTIN and plant data, into the item master. */
+function MaterialMaster() {
+  const [f, setF] = useState({ matnr: '', text: '', werks: '1000', batch: false, ean: '', caseQty: '', caseEan: '' })
+  const send = useAction(() => post<Row>('/api/v1/sap/idocs/matmas05', {
+    DOCNUM: docnum(),
+    MESTYP: 'MATMAS',
+    E1MARAM: {
+      MATNR: f.matnr, MTART: 'HAWA', MEINS: 'ST',
+      E1MAKTM: [{ SPRAS_ISO: 'EN', MAKTX: f.text || f.matnr }],
+      E1MARMM: [{ MEINH: 'ST', UMREZ: 1, UMREN: 1, EAN11: f.ean || undefined },
+        ...(f.caseQty ? [{ MEINH: 'KAR', UMREZ: Number(f.caseQty), UMREN: 1, EAN11: f.caseEan || undefined }] : [])],
+      E1MARCM: f.werks.split(',').map((w) => ({ WERKS: w.trim(), XCHPF: f.batch ? 'X' : '' })),
+    },
+  }))
+  return (
+    <Card title="Material master (MATMAS)">
+      <div className="row">
+        <Field label="Material"><input value={f.matnr} onChange={(e) => setF({ ...f, matnr: e.target.value.toUpperCase() })} size={12} /></Field>
+        <Field label="Description"><input value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} /></Field>
+        <Field label="Plants" hint="Comma-separated"><input value={f.werks} onChange={(e) => setF({ ...f, werks: e.target.value })} size={10} /></Field>
+      </div>
+      <div className="row">
+        <Field label="EAN (each)"><input value={f.ean} onChange={(e) => setF({ ...f, ean: e.target.value })} size={14} /></Field>
+        <Field label="Each per carton"><input type="number" min={1} value={f.caseQty} onChange={(e) => setF({ ...f, caseQty: e.target.value })} size={5} /></Field>
+        <Field label="EAN (carton)"><input value={f.caseEan} onChange={(e) => setF({ ...f, caseEan: e.target.value })} size={14} /></Field>
+        <label className="check"><input type="checkbox" checked={f.batch} onChange={(e) => setF({ ...f, batch: e.target.checked })} /> Batch managed</label>
+      </div>
+      <button className="primary" disabled={send.busy || !f.matnr} onClick={() => void send.run()}>Send IDoc</button>
+      <ErrorBox error={send.error} />
+      <Success>{send.result && `IDoc ${String(send.result.idocNumber)}: status ${String(send.result.status)} – ${String(send.result.statusText)}`}</Success>
     </Card>
   )
 }

@@ -29,6 +29,19 @@ public class AdapterConfig {
     }
 
     @Bean
+    com.astrawms.sapadapter.flow.MasterDataClient masterDataClient(
+            JsonMapper json, com.astrawms.common.security.ServiceCallInterceptor serviceCalls,
+            @org.springframework.beans.factory.annotation.Value("${astra.master-data.base-url}") String baseUrl,
+            @org.springframework.beans.factory.annotation.Value("${astra.master-data.timeout-ms:5000}") long timeoutMs) {
+        org.springframework.http.client.SimpleClientHttpRequestFactory factory =
+                new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(java.time.Duration.ofMillis(timeoutMs));
+        factory.setReadTimeout(java.time.Duration.ofMillis(timeoutMs));
+        return new com.astrawms.sapadapter.flow.MasterDataClient.Http(org.springframework.web.client.RestClient.builder()
+                .baseUrl(baseUrl).requestFactory(factory).requestInterceptor(serviceCalls).build(), json);
+    }
+
+    @Bean
     @ConditionalOnProperty(name = "astra.sap.gateway", havingValue = "mock", matchIfMissing = true)
     SapGateway mockSapGateway(JdbcClient jdbc, JsonMapper json, Clock clock) {
         log.warn("Using MockSapGateway: postings go to a simulated SAP backend, not to a real SAP system");

@@ -183,6 +183,70 @@ public class InventoryCommandService {
         });
     }
 
+    // =====================================================================================================
+    // Material issue to a cost object and its return (ADR-0022)
+    // =====================================================================================================
+
+    /** One issue or return scan of a material issue document; {@code qty} in {@code uom}. */
+    public record MaterialMove(String issueNo, String ownerId, String itemNo, String lotNo, BigDecimal qty, String uom,
+                               String locationId, String lpnId, List<String> serials,
+                               GoodsMovement.AccountAssignment account) {
+    }
+
+    /**
+     * Takes AVAILABLE, unallocated stock out of the warehouse for consumption by the cost object; the ERP gets a goods
+     * issue to it (SAP 201 / 221 / 261) with the account assignment.
+     */
+    @Transactional
+    public OperationResult materialIssue(String siteId, String idempotencyKey, MaterialMove m) {
+        AccessScope.current().requireOwner(m.ownerId());
+        return idempotent(siteId, idempotencyKey, "MATERIAL_ISSUE", m, ctx -> {
+            ItemRef item = requireItem(m.ownerId(), m.itemNo(), siteId);
+            String lot = normalise(m.lotNo());
+            validateLot(item, lot, null, false);
+            BigDecimal qty = toBase(item, m.qty(), m.uom());
+            LocationRef location = lockLocations(siteId, List.of(m.locationId())).get(m.locationId());
+            String lpn = requireLpnAt(siteId, m.lpnId(), location.locationId());
+            BalanceKey key = new BalanceKey(siteId, m.ownerId(), m.itemNo(), lot, lpn, location.locationId(),
+                    StockStatus.AVAILABLE);
+            ctx.reasonCode = "ISSUE";
+            ctx.sourceDoc = "ISSUE " + m.issueNo();
+            ctx.account = m.account();
+            List<String> sn = serialsFor(item, qty, m.serials());
+            requireSerialsAt(key, sn);
+            ctx.line(TxnType.MATERIAL_ISSUE, key, qty.negate(), decrementOrFail(key, qty), sn);
+            serials.remove(key, sn, ctx.operationId, ctx.now);
+            ctx.erp(ErpMovementType.issueTo(m.account().objectType()), item, qty, lot, StockStatus.AVAILABLE,
+                    location.erpBucket(), null, sn);
+        });
+    }
+
+    /** Issued material comes back unused: AVAILABLE stock again, and the ERP reverses the consumption (202 / 222 / 262). */
+    @Transactional
+    public OperationResult materialReturn(String siteId, String idempotencyKey, MaterialMove m) {
+        AccessScope.current().requireOwner(m.ownerId());
+        return idempotent(siteId, idempotencyKey, "MATERIAL_RETURN", m, ctx -> {
+            ItemRef item = requireItem(m.ownerId(), m.itemNo(), siteId);
+            String lot = normalise(m.lotNo());
+            validateLot(item, lot, null, false);
+            BigDecimal qty = toBase(item, m.qty(), m.uom());
+            LocationRef location = lockLocations(siteId, List.of(m.locationId())).get(m.locationId());
+            checkPutaway(siteId, item, location, lot);
+            String lpn = ensureLpn(siteId, m.lpnId(), m.ownerId(), location.locationId());
+            BalanceKey key = new BalanceKey(siteId, m.ownerId(), m.itemNo(), lot, lpn, location.locationId(),
+                    StockStatus.AVAILABLE);
+            ctx.reasonCode = "ISSUE_RETURN";
+            ctx.sourceDoc = "ISSUE " + m.issueNo();
+            ctx.account = m.account();
+            List<String> sn = serialsFor(item, qty, m.serials());
+            requireNotInStock(item, sn);
+            ctx.line(TxnType.MATERIAL_RETURN, key, qty, repo.increment(key, qty, null, ctx.now), sn);
+            serials.place(key, sn, ctx.operationId, ctx.now);
+            ctx.erp(ErpMovementType.returnFrom(m.account().objectType()), item, qty, lot, StockStatus.AVAILABLE,
+                    location.erpBucket(), null, sn);
+        });
+    }
+
     @Transactional
     public OperationResult changeStatus(String siteId, String idempotencyKey, StatusChangeRequest r,
                                         AccessScope approver) {
@@ -718,6 +782,25 @@ public class InventoryCommandService {
     }
 
     private Map<String, LocationRef> lockLocations(String siteId, List<String> ids) {
+        return lockLocations(siteId, ids, false);
+    }
+
+    /**
+     * Locks the locations of a stock movement. A location frozen by a physical inventory in progress (ADR-0022) takes
+     * no movement, except the count postings themselves ({@code countPosting}).
+     */
+    private Map<String, LocationRef> lockLocations(String siteId, List<String> ids, boolean countPosting) {
+        if (!countPosting) {
+            List<String> frozen = jdbc.sql("""
+                            select f.location_id || ' (' || p.pi_no || ')' from location_freeze f
+                            join physical_inventory p on p.id = f.pi_id
+                            where f.site_id = :site and f.location_id in (:ids)""")
+                    .param("site", siteId).param("ids", ids).query(String.class).list();
+            if (!frozen.isEmpty()) {
+                throw ApiException.unprocessable("INV_LOCATION_FROZEN",
+                        "Frozen for physical inventory: " + String.join(", ", frozen));
+            }
+        }
         Map<String, LocationRef> found = new LinkedHashMap<>();
         refs.lockLocations(siteId, ids).forEach(l -> found.put(l.locationId(), l));
         for (String id : ids) {
@@ -840,7 +923,7 @@ public class InventoryCommandService {
             ctx.reasonCode = reason.code();
             ctx.approvedBy = approvedBy;
             ctx.sourceDoc = "COUNT " + countId;
-            LocationRef location = lockLocations(siteId, List.of(locationId)).get(locationId);
+            LocationRef location = lockLocations(siteId, List.of(locationId), true).get(locationId);
             for (CountAdjustment a : adjustments) {
                 ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
                 if (item.serialTracked()) {
@@ -963,6 +1046,7 @@ public class InventoryCommandService {
         String reasonCode;
         String sourceDoc;
         String approvedBy;
+        GoodsMovement.AccountAssignment account;
 
         OpContext(UUID operationId, String wmsTxnId, String opType, String siteId, TenantContext.Scope scope, Instant now) {
             this.operationId = operationId;
@@ -1108,7 +1192,8 @@ public class InventoryCommandService {
             repo.insertErpMovement(txnId, ctx.operationId, ctx.siteId, m.itemNo(), m.type().name(), ctx.now);
             outbox.append(new OutboxWriter.Message(topics.goodsMovements(), GoodsMovement.TYPE, GoodsMovement.VERSION, "ERP",
                     ctx.siteId, m.ownerId(), ctx.siteId + ":" + m.itemNo(),
-                    new GoodsMovement(txnId, m.type().name(), ctx.reasonCode, ctx.now, ctx.approvedBy, m.items())));
+                    new GoodsMovement(txnId, m.type().name(), ctx.reasonCode, ctx.now, ctx.approvedBy, m.items(),
+                            ctx.account)));
             erpMovements.add(new OperationResult.ErpMovement(txnId, m.type().name(), m.itemNo()));
         }
         return new OperationResult(ctx.operationId, ctx.wmsTxnId, ctx.opType, resultLines, erpMovements, ctx.now, false);

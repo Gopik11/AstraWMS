@@ -30,10 +30,31 @@ public class SapAdapterController {
 
     private final InboundDeliveryFlow deliveries;
     private final SiteMapRepository sites;
+    private final com.astrawms.sapadapter.flow.MaterialMasterFlow materials;
 
-    public SapAdapterController(InboundDeliveryFlow deliveries, SiteMapRepository sites) {
+    public SapAdapterController(InboundDeliveryFlow deliveries, SiteMapRepository sites,
+                                com.astrawms.sapadapter.flow.MaterialMasterFlow materials) {
         this.deliveries = deliveries;
         this.sites = sites;
+        this.materials = materials;
+    }
+
+    /** MATMAS05 material master (ADR-0022): 200 with status 53 when the item master took it, else 422 / status 51. */
+    @PreAuthorize("hasRole('ERP_INTEGRATION')")
+    @PostMapping("/api/v1/sap/idocs/matmas05")
+    public IdocStatus receiveMatmas(@RequestBody com.astrawms.sapadapter.sap.Matmas05 idoc) {
+        if (idoc.docnum() == null || idoc.docnum().isBlank()) {
+            throw ApiException.badRequest("IDOC_DOCNUM_MISSING", "DOCNUM is required");
+        }
+        // Master data records items it receives on the ERP channel as maintained by the ERP.
+        com.astrawms.common.tenancy.TenantContext.Scope me = com.astrawms.common.tenancy.TenantContext.require();
+        try {
+            return com.astrawms.common.tenancy.TenantContext.callAs(new com.astrawms.common.tenancy.TenantContext.Scope(
+                    me.tenantId(), me.userId(), "ERP", me.access()), () -> materials.receive(idoc));
+        } catch (MappingException e) {
+            throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, e.code(), e.getMessage(),
+                    Map.of("idocNumber", idoc.docnum(), "idocStatus", "51"));
+        }
     }
 
     // ------------------------------------------------------------------ IDoc port

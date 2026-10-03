@@ -114,9 +114,16 @@ public final class BapiMapper {
         SapCodes.Movement sap = SapCodes.movement(m.movementType()).orElseThrow(() -> new MappingException(
                 "GM_TYPE_UNMAPPED", "Movement type " + m.movementType() + " has no SAP mapping"));
         String date = SAP_DATE.format(m.physicalDateTimeUtc().atZone(plantZone).toLocalDate());
+        GoodsMovement.AccountAssignment a = m.account();
+        String type = a == null ? "" : a.objectType();
         List<Bapi.GoodsmvtItem> items = m.items().stream().map(i -> new Bapi.GoodsmvtItem(
                 i.itemNo(), plant, i.fromBucket(), i.lotNo(), sap.moveType(), SapCodes.stckType(i.stockType()),
-                i.qty(), SapCodes.uomToSap(i.uom()), i.toBucket(), truncate(i.text(), 50))).toList();
+                i.qty(), SapCodes.uomToSap(i.uom()), i.toBucket(), truncate(i.text(), 50),
+                "COST_CENTER".equals(type) ? a.code() : null, "WBS".equals(type) ? a.code() : null,
+                "ORDER".equals(type) ? a.code() : null, a == null ? null : truncate(a.recipient(), 12))).toList();
+        if (a != null && a.code() == null) {
+            throw new MappingException("GM_ACCOUNT_MISSING", "Consumption posting " + m.wmsTxnId() + " has no cost object");
+        }
         List<Bapi.GoodsmvtSerial> serials = new ArrayList<>();
         for (int n = 0; n < m.items().size(); n++) {
             String position = String.format("%04d", n + 1);

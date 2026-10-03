@@ -139,12 +139,19 @@ public class CountService {
                 .update();
 
         List<Variance> variances = evaluate(c, counted);
+        // ADR-0022: counts of a physical inventory never post on their own; differences wait for the PI's posting.
+        boolean physical = jdbc.sql("select pi_id is not null from stock_count where id = :id").param("id", countId)
+                .query(Boolean.class).single();
         String next;
         if (variances.isEmpty()) {
             next = "CLOSED";
         } else if (sequence == 1 && withinTolerance(siteId, variances)) {
-            apply(c, variances, "CC_TOL", null, "count-" + countId + "-tol");
-            next = "ADJUSTED";
+            if (physical) {
+                next = "PENDING_APPROVAL";
+            } else {
+                apply(c, variances, "CC_TOL", null, "count-" + countId + "-tol");
+                next = "ADJUSTED";
+            }
         } else if (sequence == 1 || (sequence == 2 && !counted.equals(previous(countId, 1)))) {
             List<String> excluded = new ArrayList<>(counters);
             excluded.add(user);
@@ -167,6 +174,21 @@ public class CountService {
     /** Approves the variance of the final count (INV-008: not by a counter; value within the approver's limit). */
     @Transactional
     public CountView approve(String siteId, UUID countId) {
+        boolean physical = jdbc.sql("select pi_id is not null from stock_count where site_id = :site and id = :id")
+                .param("site", siteId).param("id", countId).query(Boolean.class).optional().orElse(false);
+        if (physical) {
+            throw ApiException.unprocessable("INV_COUNT_IN_PHYSICAL_INVENTORY",
+                    "This count belongs to a physical inventory; its differences are posted with the physical inventory");
+        }
+        return decide(siteId, countId, "CC_VAR");
+    }
+
+    /** Posting of a physical inventory (ADR-0022): approves one of its counts with reason PI_DIFF. */
+    CountView approveForPhysicalInventory(String siteId, UUID countId) {
+        return decide(siteId, countId, "PI_DIFF");
+    }
+
+    private CountView decide(String siteId, UUID countId, String reason) {
         Count c = lock(siteId, countId);
         if (!"PENDING_APPROVAL".equals(c.status())) {
             throw ApiException.conflict("INV_COUNT_NOT_PENDING", "Count is " + c.status());
@@ -189,7 +211,7 @@ public class CountService {
                         Map.of("value", value, "approvalLimit", limit));
             }
         }
-        UUID operation = variances.isEmpty() ? null : apply(c, variances, "CC_VAR", approver, "count-" + countId + "-var");
+        UUID operation = variances.isEmpty() ? null : apply(c, variances, reason, approver, "count-" + countId + "-var");
         jdbc.sql("""
                         update stock_count set status = :status, decided_by = :user, decided_at = :now, operation_id = :op,
                             variance_value = :value, updated_at = :now where id = :id""")

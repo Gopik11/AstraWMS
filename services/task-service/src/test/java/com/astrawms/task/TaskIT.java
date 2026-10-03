@@ -665,6 +665,50 @@ class TaskIT {
                 item == null ? "" : ",\"item\":\"" + item + "\"", extra));
     }
 
+    // ------------------------------------------------------------------ ADR-0022 GS1-128 scans
+
+    @Test
+    void gs1ScansIdentifyTheItemCheckTheLotAndFillTheReceipt() throws Exception {
+        send(MasterDataEvents.TOPIC, MasterDataEvents.ITEM_UPSERTED, "ACME:SKU-1",
+                new ItemUpserted("ACME", "SKU-1", "EA", "ACTIVE", null, null, false,
+                        List.of(new ItemUpserted.Site("DC1", false, "NONE", "ACTIVE")),
+                        List.of(new ItemUpserted.Uom("EA", 1, 1, "04012345678901")), Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_item_gtin").query(Integer.class).single()) == 1);
+
+        // Pick: the GTIN in the GS1 string identifies the item; its lot must be the task's.
+        location("STAGE-OUT", "STAGING_OUT", null, false, "77", 99);
+        UUID allocation = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickRequested.TYPE, "DC1:SO-G1",
+                new OutboundContracts.PickRequested(allocation, "SO-G1", "000010", "ACME", "SKU-1", "L7",
+                        new BigDecimal("2"), "EA", "A-01", "", "STAGE-OUT", "PK-SO-G1", 60));
+        String pick = awaitPickTask(allocation, "RELEASED");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "driver1", TestTokens.ALL_ROLES)));
+        pickConfirm(pick, "33", "2", "(01)04012345678901(10)L8", "").andExpect(jsonPath("$.code", is("TSK_WRONG_LOT")));
+        pickConfirm(pick, "33", "2", "]C10104012345678901" + "10L7", "").andExpect(jsonPath("$.status", is("COMPLETED")));
+
+        // Receive: one scan gives item, lot, expiry and the pallet's SSCC as the LPN.
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:1800009", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("ASN", "1800009",
+                        "ACME", "V-100", Instant.now(), List.of(new com.astrawms.common.contracts.ReceivingContracts
+                        .ReceiveRequested.Line("000010", "SKU-1", new BigDecimal("24"), "EA", null)), 40));
+        await(() -> receiveTasks("1800009", "RELEASED") == 1);
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita))
+                .andReturn().getResponse().getContentAsString(), "$.id");
+        receive(rita, id, """
+                {"scanId":"g1","docNo":"1800009","itemNo":"(01)04012345678901(10)B1(17)271231(00)106141410000000019",
+                 "qty":24,"uom":"EA","locationId":"DOCK-1","checkDigit":"11"}""").andExpect(status().isOk());
+        StubInbound.Call call = inbound.calls.getLast();
+        assertThat(call.body().get("itemNo")).isEqualTo("SKU-1");
+        assertThat(call.body().get("lotNo")).isEqualTo("B1");
+        assertThat(call.body().get("expiryDate")).isEqualTo("2027-12-31");
+        assertThat(call.body().get("lpnId")).isEqualTo("106141410000000019");
+        receive(rita, id, """
+                {"scanId":"g2","docNo":"1800009","itemNo":"(01)09506000134352","qty":1,"uom":"EA","locationId":"DOCK-1",
+                 "checkDigit":"11"}""").andExpect(jsonPath("$.code", is("TSK_GTIN_UNKNOWN")));
+        inbound.calls.clear();                                       // the stub is shared by the tests
+    }
+
     // ------------------------------------------------------------------ ADR-0021 labor
 
     @Test

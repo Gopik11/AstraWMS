@@ -193,6 +193,7 @@ services:
     image: astrawms/sap-adapter:${IMAGE_TAG}
     environment:
       <<: *service-env
+      MASTER_DATA_URL: http://master-data-service:8080
       SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="sap-adapter" password="${KAFKA_SAPADAPTER_PASSWORD}";
       DB_NAME: sapadapter
       SAP_LOGICAL_SYSTEM: SAP_S4_DEV_100

@@ -67,16 +67,23 @@ public final class SapCodes {
     public record Movement(String gmCode, String moveType) {
     }
 
-    private static final Map<String, Movement> MOVEMENTS = Map.of(
-            "ADJ_POS", new Movement("05", "701"),
-            "ADJ_NEG", new Movement("03", "702"),
-            "STATUS_AVL_TO_QI", new Movement("04", "322"),
-            "STATUS_QI_TO_AVL", new Movement("04", "321"),
-            "STATUS_AVL_TO_BLK", new Movement("04", "344"),
-            "STATUS_BLK_TO_AVL", new Movement("04", "343"),
-            "STATUS_QI_TO_BLK", new Movement("04", "350"),
-            "STATUS_BLK_TO_QI", new Movement("04", "349"),
-            "BUCKET_TRANSFER", new Movement("04", "311"));
+    private static final Map<String, Movement> MOVEMENTS = Map.ofEntries(
+            // ADR-0022: consumption to a cost object (GM_CODE 03 goods issue), and its reversal for returns.
+            Map.entry("ISSUE_COST_CENTER", new Movement("03", "201")),
+            Map.entry("ISSUE_WBS", new Movement("03", "221")),
+            Map.entry("ISSUE_ORDER", new Movement("03", "261")),
+            Map.entry("RETURN_COST_CENTER", new Movement("03", "202")),
+            Map.entry("RETURN_WBS", new Movement("03", "222")),
+            Map.entry("RETURN_ORDER", new Movement("03", "262")),
+            Map.entry("ADJ_POS", new Movement("05", "701")),
+            Map.entry("ADJ_NEG", new Movement("03", "702")),
+            Map.entry("STATUS_AVL_TO_QI", new Movement("04", "322")),
+            Map.entry("STATUS_QI_TO_AVL", new Movement("04", "321")),
+            Map.entry("STATUS_AVL_TO_BLK", new Movement("04", "344")),
+            Map.entry("STATUS_BLK_TO_AVL", new Movement("04", "343")),
+            Map.entry("STATUS_QI_TO_BLK", new Movement("04", "350")),
+            Map.entry("STATUS_BLK_TO_QI", new Movement("04", "349")),
+            Map.entry("BUCKET_TRANSFER", new Movement("04", "311")));
 
     public static Optional<Movement> movement(String movementType) {
         return Optional.ofNullable(MOVEMENTS.get(movementType));

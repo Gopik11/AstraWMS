@@ -113,10 +113,11 @@ public class ReferenceRepository {
                 .param("owner", e.ownerId()).param("item", e.itemNo()).update();
         for (ItemUpserted.Uom u : e.uoms()) {
             jdbc.sql("""
-                            insert into ref_item_uom (tenant_id, owner_id, item_no, uom, numerator, denominator)
-                            values (:tenant, :owner, :item, :uom, :num, :den)""")
+                            insert into ref_item_uom (tenant_id, owner_id, item_no, uom, numerator, denominator, gtin)
+                            values (:tenant, :owner, :item, :uom, :num, :den, :gtin)""")
                     .param("tenant", tenant).param("owner", e.ownerId()).param("item", e.itemNo())
                     .param("uom", u.uom()).param("num", u.numerator()).param("den", u.denominator())
+                    .param("gtin", u.gtin() == null || u.gtin().isBlank() ? null : u.gtin().trim().replaceFirst("^0+(?=.)", ""))
                     .update();
         }
         return true;

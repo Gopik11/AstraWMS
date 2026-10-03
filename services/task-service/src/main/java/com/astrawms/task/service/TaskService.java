@@ -203,8 +203,9 @@ public class TaskService {
      * follows from the stock arriving at the dock.
      */
     @Transactional
-    public ReceiveScanResult confirmReceive(String siteId, UUID taskId, ReceiveScan s) {
+    public ReceiveScanResult confirmReceive(String siteId, UUID taskId, ReceiveScan scan) {
         Receiving t = lockReceiving(siteId, taskId);
+        ReceiveScan s = withGs1(siteId, taskId, scan);
         if (s.docNo() == null || !t.docNo().equals(s.docNo().trim())) {
             throw ApiException.unprocessable("TSK_WRONG_DOCUMENT",
                     "Scanned document " + s.docNo() + " but the task is for " + t.docNo());
@@ -244,6 +245,51 @@ public class TaskService {
         event(taskId, "SCANNED", s.qty().stripTrailingZeros().toPlainString() + " " + s.uom() + " " + s.itemNo()
                 + (s.lpnId() == null || s.lpnId().isBlank() ? "" : " LPN " + s.lpnId()) + " at " + s.locationId());
         return new ReceiveScanResult(view(siteId, taskId), result);
+    }
+
+    /**
+     * ADR-0022: the item field may hold a GS1 element string (or a bare GTIN). The GTIN becomes the item (among the
+     * items of the document when several share it); lot, expiry, serial, count (AI 37/30) and SSCC (as the LPN) fill
+     * what the operator left empty. What the operator typed wins.
+     */
+    private ReceiveScan withGs1(String siteId, UUID taskId, ReceiveScan s) {
+        if (s.itemNo() == null) {
+            return s;
+        }
+        java.util.Optional<com.astrawms.common.barcode.Gs1.Data> gs1 = com.astrawms.common.barcode.Gs1.parse(s.itemNo());
+        String gtin = gs1.map(com.astrawms.common.barcode.Gs1.Data::itemGtin)
+                .orElse(s.itemNo().trim().matches("\\d{8}|\\d{12,14}") ? s.itemNo().trim() : null);
+        if (gtin == null) {
+            return s;
+        }
+        List<String[]> items = projections.itemsByGtin(gtin);
+        String expected = jdbc.sql("select coalesce(expected_lines::text, '') from task where id = :id").param("id", taskId)
+                .query(String.class).single();
+        List<String[]> onDoc = items.stream().filter(i -> expected.contains("\"" + i[1] + "\"")).toList();
+        List<String[]> candidates = onDoc.isEmpty() ? items : onDoc;
+        if (candidates.isEmpty()) {
+            if (gs1.isEmpty()) {
+                return s;                                   // digits that are no known GTIN: maybe an item number
+            }
+            throw ApiException.unprocessable("TSK_GTIN_UNKNOWN", "GTIN " + gtin + " is not a unit of any item");
+        }
+        if (candidates.size() > 1) {
+            throw ApiException.unprocessable("TSK_GTIN_AMBIGUOUS", "GTIN " + gtin + " belongs to several items; scan the item number");
+        }
+        com.astrawms.common.barcode.Gs1.Data d = gs1.orElse(null);
+        List<String> serials = s.serials() != null && !s.serials().isEmpty() ? s.serials()
+                : d != null && d.serial() != null ? List.of(d.serial()) : s.serials();
+        return new ReceiveScan(s.scanId(), s.docNo(), candidates.getFirst()[1],
+                s.ownerId() == null || s.ownerId().isBlank() ? candidates.getFirst()[0] : s.ownerId(),
+                s.qty() != null ? s.qty() : d == null ? null : d.count(), s.uom(),
+                blank(s.lotNo()) && d != null ? d.lot() : s.lotNo(),
+                s.expiryDate() == null && d != null ? d.expiry() : s.expiryDate(), serials,
+                blank(s.lpnId()) && d != null ? d.sscc() : s.lpnId(), s.locationId(), s.checkDigit(), s.conditionGrade(),
+                s.disposition(), s.returnReason(), s.overrideReason());
+    }
+
+    private static boolean blank(String v) {
+        return v == null || v.isBlank();
     }
 
     /**
@@ -358,6 +404,14 @@ public class TaskService {
         }
         if (!projections.scanMatchesItem(p.owner(), p.item(), itemScan)) {
             throw ApiException.unprocessable("TSK_WRONG_ITEM", "Scanned " + itemScan.trim() + " is not item " + p.item());
+        }
+        // ADR-0022: a GS1 scan that carries a lot must be the task's lot.
+        String scannedLot = com.astrawms.common.barcode.Gs1.parse(itemScan).map(com.astrawms.common.barcode.Gs1.Data::lot)
+                .orElse(null);
+        String taskLot = jdbc.sql("select coalesce(lot_no, '') from task where id = :id").param("id", taskId)
+                .query(String.class).single();
+        if (scannedLot != null && !taskLot.isEmpty() && !taskLot.equals(scannedLot)) {
+            throw ApiException.unprocessable("TSK_WRONG_LOT", "Scanned lot " + scannedLot + " but the task is for lot " + taskLot);
         }
         if (qty.compareTo(p.requested()) > 0) {
             throw ApiException.unprocessable("TSK_PICK_QTY_EXCEEDS", "Requested " + p.requested().stripTrailingZeros().toPlainString());
