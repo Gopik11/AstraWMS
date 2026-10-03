@@ -41,7 +41,7 @@ class MessagingIT extends IntegrationTest {
         assertThat(record.key()).isEqualTo(tenant + ":DC1:SKU-EA");
         assertThat(header(record, "ce_type")).isEqualTo("GoodsMovement");
         assertThat(header(record, "tenantid")).isEqualTo(tenant);
-        assertThat(envelope.get("schemaVersion").asString()).isEqualTo("2.0");
+        assertThat(envelope.get("schemaVersion").asString()).isEqualTo("2.1");   // 2.1 adds the account assignment (ADR-0022)
         assertThat(envelope.get("targetSystem").asString()).isEqualTo("ERP");
         assertThat(envelope.get("businessKey").asString()).isEqualTo("DC1:SKU-EA");
         assertThat(envelope.get("sequence").asLong()).isEqualTo(1);
