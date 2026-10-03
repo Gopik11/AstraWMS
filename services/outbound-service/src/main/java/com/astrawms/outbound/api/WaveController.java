@@ -99,6 +99,21 @@ public class WaveController {
         return policy.putOwnerPolicy(ownerId, body.shipComplete(), body.packList(), body.labelTemplate());
     }
 
+    /** ADR-0023: a transfer to another site started in the WMS (no SAP stock transport order). */
+    @PreAuthorize("hasAnyRole('SUPERVISOR','INV_MANAGER')")
+    @PostMapping("/transfers")
+    public ResponseEntity<Map<String, Object>> createTransfer(@PathVariable String siteId,
+                                                              @RequestBody OutboundService.TransferRequest body) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(outbound.createTransfer(siteId, body));
+    }
+
+    /** Transfers leaving this site ({@code direction=OUT}, default) or coming to it ({@code IN}, in transit). */
+    @GetMapping("/transfers")
+    public List<Map<String, Object>> transfers(@PathVariable String siteId,
+                                               @RequestParam(defaultValue = "OUT") String direction) {
+        return outbound.transfers(siteId, direction);
+    }
+
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PutMapping("/orders/{erpDocNo}/policy")
     public Map<String, Object> orderPolicy(@PathVariable String siteId, @PathVariable String erpDocNo,

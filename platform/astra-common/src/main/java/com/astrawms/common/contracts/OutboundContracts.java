@@ -39,10 +39,16 @@ public final class OutboundContracts {
 
     /** {@code ShipmentConfirmation} v4 (ISD IF-OB-003 §4, release subset). Quantities in the item's base UoM. */
     public record ShipmentConfirmation(String wmsTxnId, String erpDocNo, Instant shipDateTimeUtc, String carrierScac,
-                                       String trackingNo, String billOfLading, List<Line> lines) {
+                                       String trackingNo, String billOfLading, List<Line> lines, String transferToSiteId) {
 
         public static final String TYPE = "ShipmentConfirmation";
-        public static final String VERSION = "4.0";
+        /** 4.1 (ADR-0023, additive): {@code transferToSiteId} on the shipment of a transfer started in the WMS. */
+        public static final String VERSION = "4.1";
+
+        public ShipmentConfirmation(String wmsTxnId, String erpDocNo, Instant shipDateTimeUtc, String carrierScac,
+                                    String trackingNo, String billOfLading, List<Line> lines) {
+            this(wmsTxnId, erpDocNo, shipDateTimeUtc, carrierScac, trackingNo, billOfLading, lines, null);
+        }
 
         /** {@code shortReason} is mandatory when less than requested was shipped (NO_STOCK, SHORT_PICK). */
         public record Line(String erpLineRef, String itemNo, BigDecimal qtyShipped, String uom,

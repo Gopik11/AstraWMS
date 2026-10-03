@@ -575,6 +575,45 @@ class OutboundIT {
                 .andExpect(jsonPath("$.recoveries.length()", is(2)));
     }
 
+    // ------------------------------------------------------------------ ADR-0023 transfers started in the WMS
+
+    @Test
+    void transferToAnotherSiteShipsAndBecomesItsExpectedReceipt() throws Exception {
+        call(post("/api/v1/sites/DC1/outbound/transfers"), """
+                {"toSiteId":"dc1","lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":3,"uom":"EA"}]}""")
+                .andExpect(jsonPath("$.code", is("OUT_TRANSFER_INVALID")));               // not to itself
+        String body = call(post("/api/v1/sites/DC1/outbound/transfers"), """
+                {"toSiteId":"st01","note":"Weekly store replenishment",
+                 "lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":3,"uom":"EA"},{"ownerId":"ACME","itemNo":"SKU-SER","qty":1,"uom":"EA"}]}""")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.order_type", is("TRANSFER")))
+                .andExpect(jsonPath("$.transfer_to_site", is("ST01")))
+                .andExpect(jsonPath("$.status", is("RELEASED")))
+                .andReturn().getResponse().getContentAsString();
+        doc = JsonPath.read(body, "$.erp_doc_no");
+        assertThat(doc).isEqualTo("TR-DC1-000001");
+        for (JsonNode pick : outbox(OutboundContracts.PickRequested.TYPE).stream().map(e -> e.get("payload")).toList()) {
+            completed(UUID.fromString(pick.get("allocationId").asString()), pick.get("orderLineRef").asString(),
+                    pick.get("qty").decimalValue(), BigDecimal.ZERO);
+        }
+        await(() -> "PICKED".equals(orderStatus()));
+        call(post("/api/v1/sites/DC1/outbound/orders/" + doc + "/ship"), "{}").andExpect(jsonPath("$.status", is("SHIPPED")));
+
+        JsonNode confirmation = outbox(OutboundContracts.ShipmentConfirmation.TYPE).getLast().get("payload");
+        assertThat(confirmation.get("transferToSiteId").asString()).isEqualTo("ST01");
+        JsonNode expectation = outbox(IntegrationContracts.ReceiptExpectation.TYPE).getLast();
+        assertThat(expectation.get("siteId").asString()).isEqualTo("ST01");             // the receiving site's ASN
+        JsonNode asn = expectation.get("payload");
+        assertThat(asn.get("erpDocNo").asString()).isEqualTo(doc);
+        assertThat(asn.get("erpDocType").asString()).isEqualTo("WMS_TRANSFER");
+        assertThat(asn.get("supplyingSiteId").asString()).isEqualTo("DC1");
+        assertThat(asn.get("lines")).hasSize(3);                                        // SKU-1 in lots L1 and L2, SKU-SER
+        assertThat(asn.get("lines").get(0).get("erpLineRef").asString()).isEqualTo("000010-1");
+        assertThat(asn.get("lines").get(0).get("lotNo").asString()).isEqualTo("L1");
+        call(get("/api/v1/sites/ST01/outbound/transfers?direction=IN"), "")
+                .andExpect(jsonPath("$[0].erp_doc_no", is(doc))).andExpect(jsonPath("$[0].from_site", is("DC1")));
+    }
+
     @Test
     void pooledOrderCancelsWithoutTouchingInventory() throws Exception {
         call(put("/api/v1/sites/DC1/outbound/config"), """

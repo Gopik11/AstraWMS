@@ -364,6 +364,27 @@ class InboundIT {
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(acme)).andExpect(status().isOk());
     }
 
+    // ------------------------------------------------------------------ ADR-0023 transfers started in the WMS
+
+    @Test
+    void receiptOfAWmsTransferNamesTheIssuingSite() throws Exception {
+        String tr = "TR-DC9-000001";
+        ReceiptExpectation e = new ReceiptExpectation(tr, "WMS_TRANSFER", "CREATE", 1, tr, null, null, "DC9", null,
+                Instant.now(), null, null, null, null,
+                List.of(new ReceiptExpectation.Line("000010", "ACME", "SKU-1", new BigDecimal("4"), "EA", "B1", null, null,
+                        "AVAILABLE", null, null)), List.of(), Instant.now());
+        EventEnvelope env = new EventEnvelope(UUID.randomUUID(), ReceiptExpectation.TYPE, "3.0", "ASTRAWMS", "ASTRAWMS",
+                tenant, "DC1", "ACME", "DC1:" + tr, "test", 1, Instant.now(), json.valueToTree(e));
+        kafka.send(IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS, tenant + ":DC1:" + tr, json.writeValueAsString(env)).get();
+        await(() -> expectationStatus(tr) != null);
+        call(post("/api/v1/sites/DC1/receipts/" + tr + "/lines/000010/receive").header("Idempotency-Key", "tr-1"), """
+                {"qty":4,"uom":"EA","lotNo":"B1","locationId":"DOCK-01"}""").andExpect(status().isCreated());
+        call(post("/api/v1/sites/DC1/receipts/" + tr + "/close"), "{}").andExpect(status().isOk());
+        JsonNode confirmation = outbox(IntegrationContracts.ReceiptConfirmation.TYPE).getLast().get("payload");
+        assertThat(confirmation.get("erpDocNo").asString()).isEqualTo(tr);
+        assertThat(confirmation.get("transferFromSiteId").asString()).isEqualTo("DC9");
+    }
+
     // ------------------------------------------------------------------ ADR-0021 RF-only floor work
 
     @Test

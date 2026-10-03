@@ -67,10 +67,19 @@ public final class IntegrationContracts {
     /** {@code ReceiptConfirmation} v3 (ISD IF-IB-002 §4). Business key {@code siteId:erpDocNo}. */
     public record ReceiptConfirmation(
             String wmsTxnId, String erpDocNo, boolean blindReceipt, String vendorId, Instant receiptCompletedUtc,
-            @JsonProperty("final") boolean finalConfirmation, List<Line> lines, List<HandlingUnit> handlingUnits) {
+            @JsonProperty("final") boolean finalConfirmation, List<Line> lines, List<HandlingUnit> handlingUnits,
+            String transferFromSiteId) {
 
         public static final String TYPE = "ReceiptConfirmation";
-        public static final String VERSION = "3.0";
+        /** 3.1 (ADR-0023, additive): {@code transferFromSiteId} on the receipt of a transfer started in the WMS. */
+        public static final String VERSION = "3.1";
+
+        public ReceiptConfirmation(String wmsTxnId, String erpDocNo, boolean blindReceipt, String vendorId,
+                                   Instant receiptCompletedUtc, boolean finalConfirmation, List<Line> lines,
+                                   List<HandlingUnit> handlingUnits) {
+            this(wmsTxnId, erpDocNo, blindReceipt, vendorId, receiptCompletedUtc, finalConfirmation, lines, handlingUnits,
+                    null);
+        }
 
         /** {@code serials}: mandatory for INBOUND/FULL serial-controlled items; count = qtyReceived (base UoM). */
         public record Line(String erpLineRef, String itemNo, BigDecimal qtyReceived, String uom,

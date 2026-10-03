@@ -23,6 +23,7 @@ const Billing = lazy(() => import('./pages/Billing'))
 const MaterialIssues = lazy(() => import('./pages/MaterialIssues'))
 const RfIssue = lazy(() => import('./pages/RfIssue'))
 const LabelsPage = lazy(() => import('./pages/Labels'))
+const Transfers = lazy(() => import('./pages/Transfers'))
 const Tasks = lazy(() => import('./pages/Tasks'))
 const MasterData = lazy(() => import('./pages/MasterData'))
 const ErpSimulator = lazy(() => import('./pages/ErpSimulator'))
@@ -60,6 +61,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
       { to: '/billing', label: 'Billing', roles: ['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR'] },
+      { to: '/transfers', label: 'Transfers', roles: ['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER'] },
       { to: '/labels', label: 'Labels', roles: ['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER'] },
       { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
@@ -129,6 +131,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/" element={<Home />} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
           <Route path="/rf/issue" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR']}><RfIssue /></Guard>} />
+          <Route path="/transfers" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER']}><Transfers /></Guard>} />
           <Route path="/labels" element={<Guard roles={['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER']}><LabelsPage /></Guard>} />
           <Route path="/material-issues" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN']}><MaterialIssues /></Guard>} />
           <Route path="/slotting" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST']}><Slotting /></Guard>} />

@@ -4,6 +4,7 @@ import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
 import com.astrawms.sapadapter.sap.Bapi;
+import java.math.BigDecimal;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -120,7 +121,7 @@ public final class BapiMapper {
                 i.itemNo(), plant, i.fromBucket(), i.lotNo(), sap.moveType(), SapCodes.stckType(i.stockType()),
                 i.qty(), SapCodes.uomToSap(i.uom()), i.toBucket(), truncate(i.text(), 50),
                 "COST_CENTER".equals(type) ? a.code() : null, "WBS".equals(type) ? a.code() : null,
-                "ORDER".equals(type) ? a.code() : null, a == null ? null : truncate(a.recipient(), 12))).toList();
+                "ORDER".equals(type) ? a.code() : null, a == null ? null : truncate(a.recipient(), 12), null)).toList();
         if (a != null && a.code() == null) {
             throw new MappingException("GM_ACCOUNT_MISSING", "Consumption posting " + m.wmsTxnId() + " has no cost object");
         }
@@ -135,6 +136,34 @@ public final class BapiMapper {
         return new Bapi.GoodsmvtCreate(
                 new Bapi.GoodsmvtHeader(date, date, m.wmsTxnId(), truncate("WMS " + m.movementType() + " " + nz(m.reasonCode()), 25)),
                 sap.gmCode(), items, serials);
+    }
+
+    /**
+     * ADR-0023, a transfer started in the WMS has no SAP delivery: it is posted as a two-step plant-to-plant stock
+     * transfer. Shipment: 303 at the issuing plant to the receiving plant (stock in transit). Receipt: 305 at the
+     * receiving plant. One item per line and lot; the WMS transaction ID is the reference.
+     */
+    public static Bapi.GoodsmvtCreate transferMovement(String wmsTxnId, String moveType, String plant, String movePlant,
+                                                      java.time.LocalDate date, String headerText, List<TransferLine> lines) {
+        String d = SAP_DATE.format(date);
+        List<Bapi.GoodsmvtItem> items = new ArrayList<>();
+        List<Bapi.GoodsmvtSerial> serials = new ArrayList<>();
+        for (TransferLine l : lines) {
+            items.add(new Bapi.GoodsmvtItem(l.itemNo(), plant, "0001", l.lotNo(), moveType, " ", l.qty(),
+                    SapCodes.uomToSap(l.uom()), null, truncate(headerText, 50), null, null, null, null, movePlant));
+            String position = String.format("%04d", items.size());
+            if (l.serials() != null) {
+                l.serials().forEach(sn -> serials.add(new Bapi.GoodsmvtSerial(position, sn)));
+            }
+        }
+        if (items.isEmpty()) {
+            throw new MappingException("TRANSFER_EMPTY", "Transfer posting " + wmsTxnId + " has nothing to post");
+        }
+        return new Bapi.GoodsmvtCreate(new Bapi.GoodsmvtHeader(d, d, wmsTxnId, truncate(headerText, 25)), "04", items,
+                serials);
+    }
+
+    public record TransferLine(String itemNo, String lotNo, BigDecimal qty, String uom, List<String> serials) {
     }
 
     private static String truncate(String v, int max) {

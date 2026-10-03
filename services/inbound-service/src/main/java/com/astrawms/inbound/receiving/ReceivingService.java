@@ -334,11 +334,15 @@ public class ReceivingService {
         List<ReceiptConfirmation.HandlingUnit> handlingUnits = hus.entrySet().stream()
                 .map(e -> new ReceiptConfirmation.HandlingUnit(e.getKey(), null, e.getValue())).toList();
 
+        // ADR-0023: a transfer started in the WMS names its issuing site; the adapter posts it as SAP 305.
+        String transferFrom = jdbc.sql("""
+                        select supplying_site_id from receipt_expectation where id = :id and erp_doc_type = 'WMS_TRANSFER'""")
+                .param("id", h.id()).query(String.class).optional().orElse(null);
         outbox.append(new OutboxWriter.Message(IntegrationContracts.TOPIC_RECEIPT_CONFIRMATIONS,
                 ReceiptConfirmation.TYPE, ReceiptConfirmation.VERSION, "ERP", h.siteId(), null,
                 h.siteId() + ":" + h.erpDocNo(),
                 new ReceiptConfirmation(txnId, h.erpDocNo(), false, h.vendorId(), completedAt, true,
-                        confirmationLines, handlingUnits)));
+                        confirmationLines, handlingUnits, transferFrom)));
     }
 
     // =====================================================================================================
