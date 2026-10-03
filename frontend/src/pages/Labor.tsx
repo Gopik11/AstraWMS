@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { get, put, type Row } from '../api'
+import { cutoffForecast } from '../forecast'
 import { Badge, Card, ErrorBox, Field, Page, Table, fmtDate, useAction, useLoad, useSite } from '../ui'
 
 interface Board {
@@ -12,6 +13,7 @@ interface Board {
     current?: { taskId: string; taskType: string; from?: string; to?: string; ageMinutes: number; expectedMinutes: number; overStandard: boolean }
   }[]
   backlog: { taskType: string; open: number; standardHours: number }[]
+  pickWorkByOrder: { orderRef: string; openPicks: number; standardMinutes: number }[]
 }
 
 interface Standard { taskType: string; baseSeconds: number; perUnitSeconds: number; requiredSkill?: string | null; isDefault: boolean }
@@ -26,6 +28,8 @@ export default function Labor() {
   const [hours, setHours] = useState(8)
   const board = useLoad(() => get<Board>(`${base}/labor?hours=${hours}`), [base, hours])
   const b = board.data
+  const orders = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/orders`), [site])
+  const forecast = b && orders.data ? cutoffForecast(orders.data, b.pickWorkByOrder ?? [], b.activeOperators) : undefined
   return (
     <Page title="Labor" actions={<button onClick={board.reload}>Refresh</button>}>
       <ErrorBox error={board.error} />
@@ -57,6 +61,19 @@ export default function Labor() {
           { header: 'Open tasks', cell: (r) => r.open, align: 'right' },
           { header: 'Standard hours', cell: (r) => r.standardHours, align: 'right' },
         ]} />
+      </Card>
+      <Card title="Cutoff forecast">
+        <Table rows={forecast} empty="No open pick work with a cutoff" columns={[
+          { header: 'Cutoff', cell: (c) => fmtDate(c.cutoff) },
+          { header: 'Orders', cell: (c) => c.orders.join(', ') },
+          { header: 'Picks', cell: (c) => c.picks, align: 'right' },
+          { header: 'Work (std min)', cell: (c) => Math.round(c.workMinutes), align: 'right' },
+          { header: 'Done by (now on)', cell: (c) => <span className={c.atRisk ? 'text-late' : ''}>{fmtDate(c.finishAt)}</span> },
+          { header: 'Slack', cell: (c) => <span className={c.atRisk ? 'text-late' : ''}>{c.slackMinutes} min</span>, align: 'right' },
+          { header: 'Operators needed', cell: (c) => (Number.isFinite(c.operatorsNeeded) ? c.operatorsNeeded : 'past'), align: 'right' },
+        ]} />
+        <p className="muted">Open pick work per order in standard minutes, earliest cutoff first, shared by the {b?.activeOperators ?? 0} operator(s)
+          active now (at least one). Red: not done before the cutoff with the people on the floor.</p>
       </Card>
       <Standards base={base} />
       <Equipment base={base} />

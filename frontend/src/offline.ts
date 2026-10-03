@@ -109,12 +109,29 @@ export async function sync(): Promise<{ sent: number; failed: number }> {
         const reason = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e)
         write(QUEUE, queue().map((x) => (x.id === c.id ? { ...x, status: 'FAILED' as const, error: reason } : x)))
         failed++
+        await flagConflict(c.path, `${c.label}: ${reason}`)
       }
     }
   } finally {
     syncing = false
   }
   return { sent, failed }
+}
+
+/**
+ * The server wins (ADR-0024): a task confirmation it refused on sync puts the task in exception (SYNC_CONFLICT), so a
+ * supervisor checks the location instead of the device silently disagreeing with the stock. Best effort.
+ */
+const TASK_COMMAND = /^(\/api\/v1\/sites\/[^/]+\/tasks\/[0-9a-f-]{36})\/(?!sync-conflict)[a-z/-]+$/
+
+export async function flagConflict(path: string, detail: string): Promise<void> {
+  const m = TASK_COMMAND.exec(path)
+  if (!m) return
+  try {
+    await api('POST', `${m[1]}/sync-conflict`, { body: { detail } })
+  } catch {
+    // the scan stays in "needs attention" on the device either way
+  }
 }
 
 export function retry(id: string): void {

@@ -60,6 +60,18 @@ public class MasterDataController {
         return items.list(ownerId, after, limit);
     }
 
+    /** The sites the user may work at, with their type (ADR-0024): drives the site selector and the network view. */
+    @GetMapping("/sites")
+    public java.util.List<MasterDataDtos.SiteView> sites() {
+        return locations.sites();
+    }
+
+    @GetMapping("/sites/{siteId}")
+    public MasterDataDtos.SiteView site(@PathVariable String siteId) {
+        return locations.site(siteId).orElseThrow(() -> com.astrawms.common.web.ApiException.notFound(
+                "MD_SITE_NOT_FOUND", "Unknown site " + siteId));
+    }
+
     @PreAuthorize("hasRole('SOLUTION_ADMIN')")
     @PutMapping("/sites/{siteId}")
     public ResponseEntity<Void> putSite(@PathVariable String siteId, @Valid @RequestBody SiteRequest body) {

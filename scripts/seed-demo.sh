@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Seeds a large, connected demo data set into one tenant for hands-on testing of every feature, through the public
 # APIs and the SAP IDoc port (nothing is written to databases directly):
-#   sites      main warehouse DC1 (plant 1000) + stores ST01..ST05 (plants 2001..2005), zones and ~150 locations
+#   sites      main warehouse DC1 (plant 1000, MAIN) + stores ST01..ST25 (plants 2001..2025, STORE supplied by DC1;
+#              STORE_COUNT=5 for fewer), zones and locations; ST01..ST05 get documents, every store some stock
 #   owners     ACME (own stock) and BETA (3PL client: ship complete, retail labels, lot affinity, billing rates)
 #   items      12 ACME materials from SAP (MATMAS05: GTINs, cartons, batch/serial, standard cost), 8 BETA items
 #              (frozen, hazardous, lot/shelf-life controlled)
@@ -23,7 +24,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GW="${GATEWAY_URL:-http://localhost:8080}"
 KC_URL="${KC_URL:-$([[ "$GW" == http://localhost* ]] && echo http://localhost:8180 || echo "$GW")}"
 REALM="$KC_URL/realms/astrawms"
-STORES=(ST01 ST02 ST03 ST04 ST05)
+STORE_COUNT="${STORE_COUNT:-25}"
+STORES=(); for i in $(seq 1 "$STORE_COUNT"); do STORES+=("$(printf 'ST%02d' "$i")"); done
+(( STORE_COUNT >= 5 )) || { echo "STORE_COUNT must be at least 5 (ST01..ST05 carry the documents)" >&2; exit 1; }
+store_no() { echo $((10#${1#ST})); }          # ST08 -> 8 (no octal surprise)
+plant_of() { printf '2%03d' "$(store_no "$1")"; }   # ST07 -> 2007
 
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
@@ -93,8 +98,8 @@ for svc in master-data-service inventory-service inbound-service task-service ou
 done
 
 # ----------------------------------------------------------------------------------------------- sites and locations
-step "Sites: DC1 main warehouse and stores ${STORES[*]}, zones, locations, SAP plants"
-put "/api/v1/sites/DC1" '{"name":"Main warehouse","timeZone":"America/Chicago","erpSite":"1000"}'
+step "Sites: DC1 main warehouse and ${#STORES[@]} stores (${STORES[0]}..${STORES[-1]}), zones, locations, SAP plants"
+put "/api/v1/sites/DC1" '{"name":"Main warehouse","timeZone":"America/Chicago","erpSite":"1000","siteType":"MAIN"}'
 put "/api/v1/sap/site-map/1000" '{"siteId":"DC1","timeZone":"America/Chicago","defaultOwner":"ACME"}'
 zones_dc='DOCK:DOCK RECV:RECEIVING STOR:RESERVE PICK:PICK SHIP:SHIPPING QC:QC RET:RETURNS'
 for z in $zones_dc; do put "/api/v1/sites/DC1/zones/${z%%:*}" "{\"zoneType\":\"${z##*:}\",\"erpBucket\":\"0001\"}"; done
@@ -113,10 +118,9 @@ for i in $(seq 1 24); do
 done
 for i in 1 2 3 4; do put "/api/v1/sites/DC1/locations/F-0$i" "{\"zoneId\":\"FRZ\",\"locationType\":\"RACK\",\"pickSeq\":$((60 + i))}"; done
 for i in 1 2; do put "/api/v1/sites/DC1/locations/H-0$i" "{\"zoneId\":\"HAZ\",\"locationType\":\"RACK\",\"pickSeq\":$((70 + i))}"; done
-n=0
 for s in "${STORES[@]}"; do
-  n=$((n + 1)); plant="200$n"
-  put "/api/v1/sites/$s" "{\"name\":\"Store $s\",\"timeZone\":\"America/Chicago\",\"erpSite\":\"$plant\"}"
+  plant="$(plant_of "$s")"
+  put "/api/v1/sites/$s" "{\"name\":\"Store $s\",\"timeZone\":\"America/Chicago\",\"erpSite\":\"$plant\",\"siteType\":\"STORE\",\"supplyingSite\":\"DC1\"}"
   put "/api/v1/sap/site-map/$plant" "{\"siteId\":\"$s\",\"timeZone\":\"America/Chicago\",\"defaultOwner\":\"ACME\"}"
   for z in DOCK:DOCK STOR:RESERVE PICK:PICK SHIP:SHIPPING RET:RETURNS; do
     put "/api/v1/sites/$s/zones/${z%%:*}" "{\"zoneType\":\"${z##*:}\",\"erpBucket\":\"0001\"}"
@@ -127,13 +131,18 @@ for s in "${STORES[@]}"; do
   for i in $(seq 1 8); do put "/api/v1/sites/$s/locations/$(printf 'S-%02d' "$i")" "{\"zoneId\":\"PICK\",\"locationType\":\"SHELF\",\"pickSeq\":$((10 + i))}"; done
   for i in 1 2 3 4; do put "/api/v1/sites/$s/locations/R-0$i" "{\"zoneId\":\"STOR\",\"locationType\":\"RACK\",\"pickSeq\":$((30 + i))}"; done
 done
-echo "DC1: $(curl -sf "$GW/api/v1/sites/DC1/locations?limit=200" -H "Authorization: Bearer $TOKEN" | json "['items'].__len__()") locations; 5 stores x 16"
+echo "DC1: $(curl -sf "$GW/api/v1/sites/DC1/locations?limit=200" -H "Authorization: Bearer $TOKEN" | json "['items'].__len__()") locations; ${#STORES[@]} stores x 16"
 
 # ----------------------------------------------------------------------------------------------- items
 step "Items: 12 ACME materials from SAP (MATMAS05), 8 BETA items"
-plants='[{"WERKS":"1000"},{"WERKS":"2001"},{"WERKS":"2002"},{"WERKS":"2003"},{"WERKS":"2004"},{"WERKS":"2005"}]'
-batch_plants='[{"WERKS":"1000","XCHPF":"X"},{"WERKS":"2001","XCHPF":"X"},{"WERKS":"2002","XCHPF":"X"},{"WERKS":"2003","XCHPF":"X"},{"WERKS":"2004","XCHPF":"X"},{"WERKS":"2005","XCHPF":"X"}]'
-serial_plants='[{"WERKS":"1000","SERNP":"Z001"},{"WERKS":"2001","SERNP":"Z001"},{"WERKS":"2002","SERNP":"Z001"},{"WERKS":"2003","SERNP":"Z001"},{"WERKS":"2004","SERNP":"Z001"},{"WERKS":"2005","SERNP":"Z001"}]'
+plant_list() { # plant_list <extra json fields> -> the E1MARCM segments of DC1 and every store
+  local out="{\"WERKS\":\"1000\"$1}"
+  for s in "${STORES[@]}"; do out+=",{\"WERKS\":\"$(plant_of "$s")\"$1}"; done
+  echo "[$out]"
+}
+plants="$(plant_list '')"
+batch_plants="$(plant_list ',"XCHPF":"X"')"
+serial_plants="$(plant_list ',"SERNP":"Z001"')"
 gtin() { python -c "
 b=sys_b='$1'
 s=sum(int(c)*(3 if i%2==0 else 1) for i,c in enumerate(reversed(b)))
@@ -166,8 +175,11 @@ for m in "${materials[@]}"; do
       \"E1MARCM\":$mplants,\"E1MBEWM\":[{\"VPRSV\":\"S\",\"STPRS\":$price,\"PEINH\":1}]}}"
   [[ "$(json "['status']" <<<"$BODY")" == 53 ]] || fail "MATMAS $no: $BODY"
 done
-all_sites='[{"siteId":"DC1","lotControlled":%s,"serialControl":"NONE"},{"siteId":"ST01","lotControlled":%s,"serialControl":"NONE"},{"siteId":"ST02","lotControlled":%s,"serialControl":"NONE"},{"siteId":"ST03","lotControlled":%s,"serialControl":"NONE"},{"siteId":"ST04","lotControlled":%s,"serialControl":"NONE"},{"siteId":"ST05","lotControlled":%s,"serialControl":"NONE"}]'
-sites_json() { printf "$all_sites" "$1" "$1" "$1" "$1" "$1" "$1"; }
+sites_json() { # sites_json <lotControlled> -> the item's site settings for DC1 and every store
+  local out="{\"siteId\":\"DC1\",\"lotControlled\":$1,\"serialControl\":\"NONE\"}"
+  for s in "${STORES[@]}"; do out+=",{\"siteId\":\"$s\",\"lotControlled\":$1,\"serialControl\":\"NONE\"}"; done
+  echo "[$out]"
+}
 beta=(
   "B-200|Frozen peas 1kg|FROZEN|false|true|180|1.80"
   "B-210|Ice cream 2l|FROZEN|false|true|270|4.20"
@@ -192,6 +204,8 @@ put "/api/v1/sites/DC1/outbound/config" '{"releaseMode":"WAVELESS","timezone":"A
 put "/api/v1/sites/ST05/outbound/config" '{"releaseMode":"WAVE","timezone":"America/Chicago"}'
 for c in UPSN:16:30 FDEG:17:45 DHLX:15:00; do put "/api/v1/sites/DC1/outbound/carrier-cutoffs/${c%%:*}" "{\"cutoffTime\":\"${c#*:}\"}"; done
 put "/api/v1/sites/DC1/outbound/owner-policies/BETA" '{"shipComplete":true,"packList":true,"labelTemplate":"RETAIL"}'
+# The site's allocation policy saved explicitly (ADR-0024: not left to the built-in default), then BETA's own.
+put "/api/v1/sites/DC1/inventory/allocation-policy" '{"lotRotation":"FEFO","otherRotation":"FIFO","pickFaceFirst":true,"fullLpn":"COVERED_ONLY"}'
 put "/api/v1/sites/DC1/inventory/allocation-policy" '{"ownerId":"BETA","lotRotation":"FEFO","lotAffinity":true}'
 for i in 100100 100110 100200 100500 100600; do put "/api/v1/sites/DC1/inventory/slotting/ACME/$i" '{"reserveZone":"STOR","unitsPerPallet":240,"velocityClass":"A"}'; done
 put "/api/v1/sites/DC1/inventory/slotting/ACME/100900" '{"reserveZone":"STOR","unitsPerPallet":16,"velocityClass":"C"}'
@@ -250,10 +264,12 @@ pallet DC1 BETA B-430 144 C-06-3
 receipt DC1 qc '{"ownerId":"ACME","itemNo":"100400","qty":12,"uom":"EA","locationId":"QC-01","status":"QI","lpnId":"SEEDQC1"}'
 for s in "${STORES[@]}"; do
   j=0
-  for i in 100100 100200 100300 100500 100600 101000; do
+  # ST01..ST05 get the full shelf; the other stores a smaller one (keeps the seed under a few minutes).
+  items=(100100 100200 100300 100500 100600 101000); (( $(store_no "$s") <= 5 )) || items=(100100 100300 100600)
+  for i in "${items[@]}"; do
     j=$((j + 1)); loose "$s" ACME "$i" $((10 + RANDOM % 30)) "$(printf 'S-%02d' "$j")"
   done
-  pallet "$s" ACME 100100 60 R-01
+  if (( $(store_no "$s") <= 5 )); then pallet "$s" ACME 100100 60 R-01; fi
 done
 echo "$lpn stock receipts"
 
@@ -342,4 +358,4 @@ step "Billing: capture what the ledger holds so far"
 post "/api/v1/sites/DC1/inventory/billing/capture" ''
 echo "Captured: $(json "['operationEvents']" <<<"$BODY") operation events"
 
-printf '\nSEED DONE: DC1 + %s, owners ACME and BETA, %s stock receipts, documents across every flow.\n' "${STORES[*]}" "$lpn"
+printf '\nSEED DONE: DC1 + %s stores, owners ACME and BETA, %s stock receipts, documents across every flow.\n' "${#STORES[@]}" "$lpn"

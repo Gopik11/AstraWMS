@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom'
 import { get, post, type ReceiptSummary, type Row, type Task } from '../api'
 import { useAuth } from '../auth'
 import { offlineTasks, useOffline } from '../offline'
-import { Card, ErrorBox, Page, Success, fmtQty, useAction, useLoad, useSite } from '../ui'
+import { AskBox } from './Ask'
+import { cutoffForecast } from '../forecast'
+import { Card, ErrorBox, Page, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
 
 function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string, number> {
   const out: Record<string, number> = {}
@@ -29,17 +31,36 @@ function Tiles({ counts, link }: { counts: Record<string, number>; link: string 
 }
 
 /** One number that needs attention; highlighted when not zero, red when its oldest item is past the threshold. */
-function Attention({ n, label, to, detail, oldest, limitMin }: {
-  n: number | undefined; label: string; to: string; detail?: string; oldest?: number; limitMin?: number
+function Attention({ n, label, one, to, detail, oldest, limitMin, action }: {
+  n: number | undefined; label: string; one?: string; to: string; detail?: string; oldest?: number; limitMin?: number
+  action?: TileAction
 }) {
   const late = oldest !== undefined && limitMin !== undefined && oldest > limitMin
   return (
-    <Link className={`tile ${late ? 'tile-late' : n ? 'tile-warn' : ''}`} to={to} title={detail}>
-      <span className="tile-n">{n ?? '…'}</span>
-      <span className="tile-l">{label}</span>
-      {oldest !== undefined && n ? <span className="tile-d">oldest {age(oldest)}{limitMin !== undefined ? ` (limit ${age(limitMin)})` : ''}</span> : null}
-      {detail && <span className="tile-d">{detail}</span>}
-    </Link>
+    <div className={`tile ${late ? 'tile-late' : n ? 'tile-warn' : ''}`} title={detail}>
+      <Link className="tile-link" to={to}>
+        <span className="tile-n">{n ?? '…'}</span>
+        <span className="tile-l">{n === 1 && one ? one : label}</span>
+        {oldest !== undefined && n ? <span className="tile-d">oldest {age(oldest)}{limitMin !== undefined ? ` (limit ${age(limitMin)})` : ''}</span> : null}
+        {detail && <span className="tile-d">{detail}</span>}
+      </Link>
+      {action && n ? <TileButton action={action} /> : null}
+    </div>
+  )
+}
+
+/** The supervisor's one-click fix for a tile (ADR-0024): runs on the tile, after a confirmation. */
+interface TileAction { label: string; confirm: string; run: () => Promise<string> }
+
+function TileButton({ action }: { action: TileAction }) {
+  const act = useAction(action.run)
+  return (
+    <div className="tile-action">
+      <button className="small" disabled={act.busy} onClick={() => { if (window.confirm(action.confirm)) void act.run() }}>
+        {action.label}</button>
+      {act.result && <span className="tile-d">{act.result}</span>}
+      {act.error ? <span className="tile-d text-late">{act.error instanceof Error ? act.error.message : String(act.error)}</span> : null}
+    </div>
   )
 }
 
@@ -51,6 +72,11 @@ function minutesSince(at: unknown): number {
 /** Minutes until a timestamp (negative when past). */
 function minutesUntil(at: unknown): number {
   return at ? (new Date(String(at)).getTime() - Date.now()) / 60000 : Number.POSITIVE_INFINITY
+}
+
+/** "1 pallet", "3 pallets" */
+function plural(n: number | undefined, one: string, many = `${one}s`): string {
+  return n === 1 ? one : many
 }
 
 function age(min: number): string {
@@ -68,7 +94,7 @@ function endOfToday(): number {
 }
 
 /** Control-tower thresholds (minutes): past them a tile turns red. */
-const LIMITS = { receiptNotStarted: 30, dockStock: 15, pickAssigned: 15, postingFailed: 30, trailerDwell: 120, cutoffSoon: 120 }
+const LIMITS = { receiptNotStarted: 30, dockStock: 15, taskAssigned: 30, postingFailed: 30, trailerDwell: 120, cutoffSoon: 120 }
 
 /** Task types each RF role works (same routing as the task service, ADR-0019). */
 const TYPES_BY_ROLE: Record<string, string[]> = {
@@ -93,11 +119,17 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
  * for administrators. A user with several roles sees each of their sections once.
  */
 export default function Home() {
-  const site = useSite()
+  const { site, isStore } = useSiteContext()
   const { session, hasRole } = useAuth()
   const supervisor = hasRole('SUPERVISOR')
   const rf = hasRole('RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR')
-  const sections = [
+  // ADR-0024: at a satellite store the overview is the store's work only; waves, yard, labor and billing are DC work.
+  const sections = isStore ? [
+    <StoreBanner key="banner" site={site} />,
+    rf && <MyWork key="me" site={site} />,
+    <StoreWork key="store" site={site} />,
+    hasRole('SOLUTION_ADMIN') && <Integration key="adm" site={site} />,
+  ].filter(Boolean) : [
     rf && <MyWork key="me" site={site} />,
     hasRole('RECEIVER') && !supervisor && <Receiving key="rcv" site={site} />,
     hasRole('PICKER') && !supervisor && <Picking key="pick" site={site} />,
@@ -112,6 +144,59 @@ export default function Home() {
       </p>
       {sections.length > 0 ? sections : <Documents site={site} />}
     </Page>
+  )
+}
+
+// ------------------------------------------------------------------ satellite store (ADR-0024)
+
+/** What the store client does without network, stated once on the store's overview (ADR-0023, ADR-0024). */
+function StoreBanner({ site }: { site: string }) {
+  const { online, pending, failed } = useOffline()
+  return (
+    <div className="store-banner" role="note">
+      <strong>{site} is a store.</strong> {online ? 'Online.' : 'Offline.'} RF receiving, material issue and counting
+      keep working without network: download tasks on RF work, scans wait on this device and are sent in order when the
+      network is back. The server wins on a stock conflict: a refused scan is listed under "needs attention" and its task
+      goes to the supervisor as a sync conflict. Everything else (lists, approvals, transfers) is online only.
+      {pending.length > 0 && <> · <strong>{pending.length}</strong> scan(s) waiting to sync</>}
+      {failed.length > 0 && <> · <strong className="text-late">{failed.length}</strong> need attention</>}
+    </div>
+  )
+}
+
+/** The store's work: transfers to receive, material issues, counts. */
+function StoreWork({ site }: { site: string }) {
+  const { hasRole } = useAuth()
+  const receipts = useLoad(() => get<ReceiptSummary[]>(`/api/v1/sites/${site}/receipts`), [site])
+  const incoming = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/transfers?direction=IN`), [site])
+  const issues = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/material-issues`), [site])
+  const counts = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/counts`), [site])
+  const toReceive = (receipts.data ?? []).filter((r) => r.status === 'NOT_STARTED' || r.status === 'IN_PROGRESS')
+  const shipped = (incoming.data ?? []).filter((t) => ['SHIPPED', 'CONFIRMED'].includes(String(t.status)))
+  const byStatus = countBy(issues.data, (r) => String(r.status))
+  const countsOpen = (counts.data ?? []).filter((c) => ['OPEN', 'RECOUNT'].includes(String(c.status))).length
+  return (
+    <Section title="Store work" hint="Receive what the DC sent, issue to cost centres, WBS elements and orders, count.">
+      <ErrorBox error={receipts.error ?? issues.error ?? counts.error} />
+      <div className="tiles">
+        <Attention n={receipts.data ? toReceive.length : undefined} label="Deliveries to receive" one="Delivery to receive" to="/receipts?status=NOT_STARTED"
+                   detail={incoming.data ? `${shipped.length} transfer(s) shipped to ${site}; receive on RF` : undefined}
+                   oldest={oldestOf(toReceive.map((r) => r.createdAt))} limitMin={24 * 60} />
+        <Attention n={issues.data ? (byStatus.APPROVED ?? 0) + (byStatus.PARTIALLY_ISSUED ?? 0) : undefined}
+                   label="Material issues to issue" one="Material issue to issue" to="/material-issues?status=APPROVED,PARTIALLY_ISSUED"
+                   detail="Scan out on RF material issue" />
+        {hasRole('SUPERVISOR', 'INV_MANAGER') && (
+          <Attention n={issues.data ? byStatus.REQUESTED ?? 0 : undefined} label="Material issues to approve" one="Material issue to approve"
+                     to="/material-issues?status=REQUESTED" />
+        )}
+        <Attention n={counts.data ? countsOpen : undefined} label="Counts open" one="Count open" to="/counts" detail="Blind count on RF" />
+      </div>
+      <div className="row">
+        <Link className="button" to="/rf">RF work</Link>
+        <Link className="button" to="/rf/issue">RF material issue</Link>
+        <Link className="button" to="/transfers">Transfers</Link>
+      </div>
+    </Section>
   )
 }
 
@@ -171,13 +256,13 @@ function Receiving({ site }: { site: string }) {
     <Section title="Receiving" hint="Deliveries, returns and the dock: receive on RF; pallets left on the dock get putaway tasks.">
       <ErrorBox error={receipts.error ?? returns.error ?? dock.error} />
       <div className="tiles">
-        <Attention n={receipts.data ? due.length : undefined} label="Receipts due today, not started" to="/receipts?status=NOT_STARTED"
+        <Attention n={receipts.data ? due.length : undefined} label="Receipts due today, not started" one="Receipt due today, not started" to="/receipts?status=NOT_STARTED"
                    oldest={oldestOf(due.map((r) => r.createdAt))} limitMin={LIMITS.receiptNotStarted} />
-        <Attention n={receipts.data ? inProgress.length : undefined} label="Receipts in progress" to="/receipts?status=IN_PROGRESS" />
-        <Attention n={returns.data ? rmas.length : undefined} label="Returns to receive" to="/returns" />
-        <Attention n={dockLpns} label="Pallets waiting on dock" to="/tasks?type=PUTAWAY"
+        <Attention n={receipts.data ? inProgress.length : undefined} label="Receipts in progress" one="Receipt in progress" to="/receipts?status=IN_PROGRESS" />
+        <Attention n={returns.data ? rmas.length : undefined} label="Returns to receive" one="Return to receive" to="/returns" />
+        <Attention n={dockLpns} label={`${plural(dockLpns, 'Pallet')} or loose stock waiting on dock`} to="/tasks?type=PUTAWAY"
                    oldest={oldestOf((dock.data ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} />
-        <Attention n={yard.data?.inYard.length} label="Trailers in the yard" to="/yard"
+        <Attention n={yard.data?.inYard.length} label="Trailers in the yard" one="Trailer in the yard" to="/yard"
                    detail={yard.data ? `${atDoors} at a door${nextAppts ? ` · ${nextAppts} due in 4 h` : ''}` : undefined}
                    oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell} />
       </div>
@@ -198,10 +283,10 @@ function Picking({ site }: { site: string }) {
     <Section title="Picking" hint="Replenishments feed the pick faces first; picks rise in priority as their carrier cutoff nears.">
       <ErrorBox error={tasks.error ?? orders.error} />
       <div className="tiles">
-        <Attention n={tasks.data ? picks.length : undefined} label="Picks waiting" to="/tasks?type=PICK&status=RELEASED"
+        <Attention n={tasks.data ? picks.length : undefined} label="Picks waiting" one="Pick waiting" to="/tasks?type=PICK&status=RELEASED"
                    detail={urgent.length ? `${urgent.length} urgent (cutoff near)` : undefined} />
-        <Attention n={tasks.data ? replens.length : undefined} label="Replenishments waiting" to="/tasks?type=REPLEN&status=RELEASED" />
-        <Attention n={orders.data ? dueSoon.length : undefined} label="Orders due within 2 h" to="/orders?status=RELEASED" />
+        <Attention n={tasks.data ? replens.length : undefined} label="Replenishments waiting" one="Replenishment waiting" to="/tasks?type=REPLEN&status=RELEASED" />
+        <Attention n={orders.data ? dueSoon.length : undefined} label="Orders due within 2 h" one="Order due within 2 h" to="/orders?status=RELEASED" />
       </div>
     </Section>
   )
@@ -228,17 +313,17 @@ function InventoryControl({ site }: { site: string }) {
     <Section title="Inventory control" hint="Counts and variances, replenishment, held stock, material issues and slotting.">
       <ErrorBox error={counts.error ?? replens.error ?? issues.error} />
       <div className="tiles">
-        <Attention n={counts.data ? (byStatus.PENDING_APPROVAL ?? 0) : undefined} label="Count variances to approve" to="/counts"
+        <Attention n={counts.data ? (byStatus.PENDING_APPROVAL ?? 0) : undefined} label="Count variances to approve" one="Count variance to approve" to="/counts"
                    detail={hasRole('INV_MANAGER', 'SUPERVISOR') ? undefined : 'an inventory manager or supervisor approves'} />
-        <Attention n={counts.data ? (byStatus.OPEN ?? 0) + (byStatus.RECOUNT ?? 0) : undefined} label="Counts and recounts open" to="/counts" />
+        <Attention n={counts.data ? (byStatus.OPEN ?? 0) + (byStatus.RECOUNT ?? 0) : undefined} label="Counts and recounts open" one="Count or recount open" to="/counts" />
         <Attention n={pis.data ? (openPi ? 1 : 0) : undefined} label={openPi ? `Physical inventory ${String(openPi.pi_no)} ${String(openPi.status).toLowerCase()}` : 'Physical inventories open'}
                    to="/counts" detail={openPi ? `${String(openPi.counted)} of ${String(openPi.locations)} counted` : undefined} />
-        <Attention n={replens.data?.length} label="Replenishments open" to="/replenishment" />
-        <Attention n={heldRows?.length} label="Balances in QC or blocked" to="/inventory"
-                   detail={heldRows ? `${fmtQty(heldRows.reduce((n, b) => n + Number(b.qty), 0))} units` : undefined} />
-        <Attention n={issues.data ? toApprove : undefined} label="Material issues to approve" to="/material-issues?status=REQUESTED" />
-        <Attention n={issues.data ? toIssue : undefined} label="Material issues to issue" to="/material-issues?status=APPROVED" />
-        <Attention n={slotting.data ? suggestions : undefined} label="Slotting suggestions" to="/slotting" />
+        <Attention n={replens.data?.length} label="Replenishments open" one="Replenishment open" to="/replenishment" />
+        <Attention n={heldRows?.length} label="Balances in QC or blocked" one="Balance in QC or blocked" to="/inventory"
+                   detail={heldRows ? (() => { const u = heldRows.reduce((n, b) => n + Number(b.qty), 0); return `${fmtQty(u)} ${plural(u, 'unit')}` })() : undefined} />
+        <Attention n={issues.data ? toApprove : undefined} label="Material issues to approve" one="Material issue to approve" to="/material-issues?status=REQUESTED" />
+        <Attention n={issues.data ? toIssue : undefined} label="Material issues to issue" one="Material issue to issue" to="/material-issues?status=APPROVED,PARTIALLY_ISSUED" />
+        <Attention n={slotting.data ? suggestions : undefined} label="Slotting suggestions" one="Slotting suggestion" to="/slotting" />
       </div>
     </Section>
   )
@@ -253,7 +338,8 @@ function ControlTower({ site }: { site: string }) {
   const returns = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns`), [site])
   const dock = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/inbound-staging`), [site])
   const yard = useLoad(() => get<{ inYard: Row[]; late: Row[] }>(`/api/v1/sites/${site}/yard/summary`), [site])
-  const labor = useLoad(() => get<{ activeOperators: number; operators: { current?: { overStandard: boolean } }[]; backlog: { standardHours: number }[] }>(`/api/v1/sites/${site}/tasks/labor?hours=8`), [site])
+  const labor = useLoad(() => get<{ activeOperators: number; operators: { current?: { overStandard: boolean } }[]; backlog: { standardHours: number }[]
+    pickWorkByOrder?: { orderRef: string; openPicks: number; standardMinutes: number }[] }>(`/api/v1/sites/${site}/tasks/labor?hours=8`), [site])
   const waves = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/waves`), [site])
   const counts = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/counts?status=PENDING_APPROVAL`), [site])
   const issues = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/material-issues?status=REQUESTED`), [site])
@@ -261,10 +347,14 @@ function ControlTower({ site }: { site: string }) {
   const notStartedRows = receipts.data?.filter((r) => r.status === 'NOT_STARTED') ?? []
   const failedTimes = [...(receipts.data ?? []).filter((r) => r.status === 'POSTING_FAILED').map((r) => r.updatedAt),
     ...(returns.data ?? []).filter((r) => r.status === 'POSTING_FAILED').map((r) => r.updated_at)]
-  const pickRows = (tasks.data ?? []).filter((t) => t.taskType === 'PICK' && t.status === 'ASSIGNED')
-  const pickStuck = tasks.data ? pickRows.filter((t) => minutesSince(t.assignedAt) > LIMITS.pickAssigned).length : undefined
+  const staleRows = (tasks.data ?? []).filter((t) => t.status === 'ASSIGNED' && minutesSince(t.assignedAt) > LIMITS.taskAssigned)
+  const stale = tasks.data ? staleRows.length : undefined
+  const staleDetail = Object.entries(countBy(staleRows, (t) => `${t.taskType.toLowerCase()} (${t.assignedTo ?? '?'})`))
+    .map(([k, n]) => (n > 1 ? `${n} × ${k}` : k)).join(', ')
   const openOrders = orders.data?.filter((o) => !['SHIPPED', 'CONFIRMED', 'CANCELLED', 'SHIP_ERROR'].includes(String(o.status)))
   const backorderedLines = openOrders?.reduce((n, o) => n + Number(o.lines_short ?? 0), 0)
+  const shortOrders = (openOrders ?? []).filter((o) => Number(o.lines_short ?? 0) > 0)
+  const lateAppts = yard.data?.late ?? []
   const dueSoon = openOrders?.filter((o) => ['RELEASED', 'POOLED', 'BACKORDERED'].includes(String(o.status))
     && minutesUntil(o.cutoff_at ?? o.planned_gi_utc) < LIMITS.cutoffSoon)
   const postingFailed = receipts.data && returns.data ? failedTimes.length : undefined
@@ -273,57 +363,99 @@ function ControlTower({ site }: { site: string }) {
   const dockQty = dockAvailable?.reduce((n, b) => n + Number(b.qty), 0)
   const dockLpns = dockAvailable ? new Set(dockAvailable.map((b) => `${String(b.location_id)}/${String(b.lpn_id)}`)).size : undefined
   const overStandard = labor.data?.operators.filter((o) => o.current?.overStandard).length
+  const atRisk = labor.data && orders.data
+    ? cutoffForecast(orders.data, labor.data.pickWorkByOrder ?? [], labor.data.activeOperators).filter((c) => c.atRisk) : undefined
   const backlogHours = labor.data?.backlog.reduce((n, b) => n + b.standardHours, 0)
   const openWaves = (waves.data ?? []).filter((w) => w.status === 'PLANNED' || w.status === 'HELD')
   const approvals = counts.data && issues.data ? counts.data.length + issues.data.length : undefined
-  // Dock sweep (ADR-0020): putaways for everything still at the dock; loose stock is put on an LPN first.
-  const sweep = useAction(() => post<{ putawaysCreated: number; lpnsCreated: number; failed: string[] }>(`/api/v1/sites/${site}/tasks/sweep-dock`))
+  const later = (...loads: { reload: () => void }[]) => setTimeout(() => loads.forEach((l) => l.reload()), 2500)
+
+  // One supervisor action per tile (ADR-0024); each confirms first and reports what it did.
+  const sweepDock: TileAction = {
+    label: 'Create putaways', confirm: 'Create a putaway task for every pallet and loose quantity at the dock?',
+    run: async () => {
+      // Dock sweep (ADR-0020): loose stock is put on an LPN first; its putaway follows.
+      const r = await post<{ putawaysCreated: number; lpnsCreated: number; failed: string[] }>(`/api/v1/sites/${site}/tasks/sweep-dock`)
+      later(dock, tasks)
+      return `${r.putawaysCreated} ${plural(r.putawaysCreated, 'putaway')} created, ${r.lpnsCreated} loose ${plural(r.lpnsCreated, 'quantity', 'quantities')} put on an LPN`
+        + (r.failed.length ? `; not done: ${r.failed.join(', ')}` : '')
+    },
+  }
+  const unassignStale: TileAction = {
+    label: 'Unassign', confirm: `Put the ${plural(stale ?? 0, 'task')} assigned over ${LIMITS.taskAssigned} min back in the queue (${staleDetail})?`,
+    run: async () => {
+      const r = await post<Task[]>(`/api/v1/sites/${site}/tasks/unassign-stale?minutes=${LIMITS.taskAssigned}`)
+      tasks.reload()
+      return `${r.length} ${plural(r.length, 'task')} back in the queue`
+    },
+  }
+  const reallocate: TileAction = {
+    label: 'Reallocate', confirm: `Try again now to allocate the short lines of ${shortOrders.length} ${plural(shortOrders.length, 'order')}?`,
+    run: async () => {
+      let qty = 0
+      const failed: string[] = []
+      for (const o of shortOrders) {
+        try {
+          qty += Number((await post<Row>(`/api/v1/sites/${site}/outbound/orders/${String(o.erp_doc_no)}/reallocate`)).recoveredQty ?? 0)
+        } catch (e) {
+          failed.push(`${String(o.erp_doc_no)}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      orders.reload()
+      return `${fmtQty(qty)} ${plural(qty, 'unit')} allocated` + (failed.length ? `; not done: ${failed.join('; ')}` : '')
+    },
+  }
+  const noShow: TileAction = {
+    label: 'Mark no-show', confirm: `Close ${lateAppts.map((a) => String(a.appt_no)).join(', ')} as no-show and free their doors?`,
+    run: async () => {
+      for (const a of lateAppts) await post(`/api/v1/sites/${site}/yard/appointments/${String(a.appt_no)}/no-show`)
+      yard.reload()
+      return `${lateAppts.length} ${plural(lateAppts.length, 'appointment')} closed as no-show`
+    },
+  }
 
   return (
     <>
       <Section title="Control tower" hint="What needs attention now; a tile turns red when its oldest item is past its limit.">
+        <AskBox site={site} />
         <ErrorBox error={receipts.error ?? orders.error ?? returns.error ?? dock.error} />
         <div className="tiles">
-          <Attention n={receipts.data ? notStartedRows.length : undefined} label="Receipts not started" to="/receipts?status=NOT_STARTED"
+          <Attention n={receipts.data ? notStartedRows.length : undefined} label="Receipts not started" one="Receipt not started" to="/receipts?status=NOT_STARTED"
                      oldest={oldestOf(notStartedRows.map((r) => r.createdAt))} limitMin={LIMITS.receiptNotStarted} />
-          <Attention n={backorderedLines} label="Order lines short" to="/orders?status=BACKORDERED"
-                     detail="Unallocated quantity on open orders; recovered when stock is put away" />
-          <Attention n={dueSoon?.length} label="Orders due within 2 h" to="/orders?status=RELEASED"
+          <Attention n={backorderedLines} label="Order lines short" one="Order line short" to="/orders?status=BACKORDERED"
+                     detail="Unallocated quantity on open orders; recovered when stock is put away" action={reallocate} />
+          <Attention n={dueSoon?.length} label="Orders due within 2 h" one="Order due within 2 h" to="/orders?status=RELEASED"
                      detail="Carrier cutoff or planned goods issue" />
-          <Attention n={postingFailed} label="ERP posting failed" to="/receipts?status=POSTING_FAILED"
+          <Attention n={postingFailed} label="ERP posting failed" one="ERP posting failed" to="/receipts?status=POSTING_FAILED"
                      detail="Receipts and returns the ERP rejected; repost after the fix"
                      oldest={oldestOf(failedTimes)} limitMin={LIMITS.postingFailed} />
           <Attention n={shipErrors} label="Goods issue failed" to="/orders?status=SHIP_ERROR"
                      oldest={oldestOf((orders.data ?? []).filter((o) => o.status === 'SHIP_ERROR').map((o) => o.updated_at))}
                      limitMin={LIMITS.postingFailed} />
-          <Attention n={pickStuck} label={`Picks assigned > ${LIMITS.pickAssigned} min`} to="/tasks?type=PICK&status=ASSIGNED"
-                     detail="Assigned to an operator but not confirmed"
-                     oldest={oldestOf(pickRows.map((t) => t.assignedAt))} limitMin={LIMITS.pickAssigned} />
-          <Attention n={dockLpns} label="Pallets waiting on dock" to="/tasks?type=PUTAWAY"
-                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} units available at dock / receiving, not yet allocable`}
-                     oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} />
-          <Attention n={yard.data?.inYard.length} label="Trailers in the yard" to="/yard"
-                     detail={yard.data?.late.length ? `${yard.data.late.length} appointment(s) late` : 'Dwell since gate check-in'}
+          <Attention n={stale} label={`Tasks assigned > ${LIMITS.taskAssigned} min`} one={`Task assigned > ${LIMITS.taskAssigned} min`} to="/tasks?status=ASSIGNED"
+                     detail={staleDetail || 'Assigned to an operator but not confirmed'}
+                     oldest={oldestOf(staleRows.map((t) => t.assignedAt))} limitMin={LIMITS.taskAssigned} action={unassignStale} />
+          <Attention n={dockLpns} label={`${plural(dockLpns, 'Pallet')} or loose stock waiting on dock`} to="/tasks?type=PUTAWAY"
+                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} ${plural(dockQty, 'unit')} at dock / receiving, not yet allocable`}
+                     oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} action={sweepDock} />
+          <Attention n={yard.data?.inYard.length} label="Trailers in the yard" one="Trailer in the yard" to="/yard"
+                     detail="Dwell since gate check-in"
                      oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell} />
+          <Attention n={yard.data ? lateAppts.length : undefined} label="Appointments late" one="Appointment late" to="/yard"
+                     detail={lateAppts.length ? lateAppts.map((a) => String(a.appt_no)).join(', ') : 'Scheduled, not arrived 15 min after the start'}
+                     oldest={oldestOf(lateAppts.map((a) => a.scheduled_start))} limitMin={15} action={noShow} />
         </div>
-        {(dockLpns ?? 0) > 0 && (
-          <div className="row">
-            <button disabled={sweep.busy} onClick={async () => { if (await sweep.run()) setTimeout(() => dock.reload(), 3000) }}>
-              Create putaways for dock stock
-            </button>
-          </div>
-        )}
-        <ErrorBox error={sweep.error} />
-        <Success>{sweep.result && `${sweep.result.putawaysCreated} putaway task(s) created, ${sweep.result.lpnsCreated} loose quantity(ies) put on an LPN (their putaway follows)${sweep.result.failed.length ? `; not done: ${sweep.result.failed.join(', ')}` : ''}`}</Success>
       </Section>
       <Section title="People, waves and approvals">
         <div className="tiles">
-          <Attention n={labor.data?.activeOperators} label="Operators active" to="/labor"
+          <Attention n={labor.data?.activeOperators} label="Operators active" one="Operator active" to="/labor"
                      detail={backlogHours === undefined ? undefined : `${backlogHours.toFixed(1)} h of work waiting (standard)`} />
-          <Attention n={overStandard} label="Tasks over their standard" to="/labor" />
-          <Attention n={waves.data ? openWaves.length : undefined} label="Waves planned or held" to="/waves"
+          <Attention n={overStandard} label="Tasks over their standard" one="Task over its standard" to="/labor" />
+          <Attention n={atRisk?.length} label="Cutoffs at risk" one="Cutoff at risk" to="/labor"
+                     detail={atRisk?.length ? `${atRisk[0].orders.join(', ')}: needs ${Number.isFinite(atRisk[0].operatorsNeeded) ? atRisk[0].operatorsNeeded : 'more'} operator(s)` : 'Open pick work vs. the people on the floor'} />
+          <Attention n={waves.data ? openWaves.length : undefined} label="Waves planned or held" one="Wave planned or held" to="/waves"
                      detail={openWaves.some((w) => w.status === 'HELD') ? `${openWaves.filter((w) => w.status === 'HELD').length} held` : undefined} />
-          <Attention n={approvals} label="Approvals waiting" to="/counts"
+          <Attention n={approvals} label="Approvals waiting" one="Approval waiting" to="/counts"
                      detail={counts.data && issues.data ? `${counts.data.length} count variance(s), ${issues.data.length} material issue(s)` : undefined} />
         </div>
       </Section>
@@ -356,6 +488,10 @@ function Integration({ site }: { site: string }) {
   const receipts = useLoad(() => get<ReceiptSummary[]>(`/api/v1/sites/${site}/receipts?status=POSTING_FAILED`), [site])
   const orders = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/orders?status=SHIP_ERROR`), [site])
   const returns = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns`), [site])
+  // ADR-0024: billing events without a rate this month are shown as unrated, never as a silent 0.00.
+  const month = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1)).toISOString()
+  const billing = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/billing/summary?from=${month}&to=${new Date(Date.now() + 86_400_000).toISOString()}`), [site])
+  const unrated = billing.data?.reduce((n, r) => n + Number(r.unpriced ?? 0), 0)
   const down = ops.data?.filter((s) => s.health !== 'UP')
   const dead = ops.data?.reduce((n, s) => n + (s.dlq?.messages.length ?? 0), 0)
   const backlog = ops.data?.reduce((n, s) => n + (s.outbox?.pending ?? 0), 0)
@@ -365,12 +501,14 @@ function Integration({ site }: { site: string }) {
   return (
     <Section title="Integration and platform" hint="Service health, messages not delivered, and ERP postings that failed.">
       <div className="tiles">
-        <Attention n={down?.length} label="Services not healthy" to="/operations"
+        <Attention n={down?.length} label="Services not healthy" one="Service not healthy" to="/operations"
                    detail={down?.length ? down.map((s) => s.svc).join(', ') : 'all six up'} />
-        <Attention n={dead} label="Dead letters" to="/operations" detail="Messages a service could not process; replay after the fix" />
+        <Attention n={dead} label="Dead letters" one="Dead letter" to="/operations" detail="Messages a service could not process; replay after the fix" />
         <Attention n={backlog} label="Outbox backlog" to="/operations" oldest={backlog ? oldest : undefined} limitMin={5} />
-        <Attention n={erpFailed} label="ERP postings failed" to="/receipts?status=POSTING_FAILED"
+        <Attention n={erpFailed} label="ERP postings failed" one="ERP posting failed" to="/receipts?status=POSTING_FAILED"
                    detail="Receipts, returns and goods issues the ERP rejected" />
+        <Attention n={unrated} label="Billing events unrated" one="Billing event unrated" to="/billing"
+                   detail="This month, no rate for their owner and type: not in the totals until a rate is set" />
       </div>
     </Section>
   )

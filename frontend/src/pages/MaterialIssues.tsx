@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { get, post, put, type Row } from '../api'
+import { get, post, put, query, type Row } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Card, ErrorBox, Field, Page, SearchBox, Success, Table, fmtDate, fmtQty, useAction, useLoad, useParamSetter, useSite } from '../ui'
 
 const TYPES = [['COST_CENTER', 'Cost centre'], ['WBS', 'WBS element'], ['ORDER', 'Internal order']]
-const STATUSES = ['', 'REQUESTED', 'APPROVED', 'PARTIALLY_ISSUED', 'ISSUED', 'REJECTED', 'CANCELLED', 'CLOSED']
+const STATUSES = ['', 'REQUESTED', 'APPROVED,PARTIALLY_ISSUED', 'APPROVED', 'PARTIALLY_ISSUED', 'ISSUED', 'REJECTED', 'CANCELLED', 'CLOSED']
+const STATUS_LABEL: Record<string, string> = { '': 'All statuses', 'APPROVED,PARTIALLY_ISSUED': 'To issue (approved or part issued)' }
 const typeLabel = (t: unknown) => TYPES.find(([v]) => v === t)?.[1] ?? String(t)
 
 /**
@@ -21,14 +22,15 @@ export default function MaterialIssues() {
   const setParam = useParamSetter(params, setParams)
   const status = params.get('status') ?? ''
   const q = params.get('q') ?? ''
-  const list = useLoad(() => get<Row[]>(`${base}/material-issues?status=${status}&q=${encodeURIComponent(q)}`), [base, status, q])
+  // Same query as the overview tiles: blank filters are left out (an empty status would match nothing).
+  const list = useLoad(() => get<Row[]>(`${base}/material-issues${query({ status, q })}`), [base, status, q])
   const [selected, setSelected] = useState<string>()
   return (
     <Page title="Material issues" actions={<Link to="/rf/issue">Issue on RF</Link>}>
       <Card title="Requests" actions={
         <div className="row">
           <select value={status} onChange={(e) => setParam('status', e.target.value)}>
-            {STATUSES.map((s) => <option key={s} value={s}>{s || 'All'}</option>)}
+            {STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABEL[s] ?? s}</option>)}
           </select>
           <SearchBox value={q} onSearch={(v) => setParam('q', v)} placeholder="Issue, cost object, recipient, item" />
         </div>

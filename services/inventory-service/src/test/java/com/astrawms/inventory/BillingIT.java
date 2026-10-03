@@ -88,6 +88,7 @@ class BillingIT extends IntegrationTest {
         assertThat(((Number) byType.get("PICK").get("amount")).doubleValue()).isEqualTo(1.0);         // 4 units × 0.25
         assertThat(((Number) byType.get("STORAGE").get("amount")).doubleValue()).isEqualTo(4.5);      // 3 LPN-days × 1.5
         assertThat(((Number) byType.get("RETURN").get("unpriced")).intValue()).isEqualTo(1);          // no return rate
+        assertThat(byType.get("RETURN").get("amount")).isNull();                                       // unrated, not 0.00
         assertThat(((Number) byType.get("VAS").get("amount")).doubleValue()).isEqualTo(1.0);
 
         mvc.perform(MockMvcRequestBuilders.get("/api/v1/sites/" + SITE + "/inventory/billing/events")

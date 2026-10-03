@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { explainStrategy, whyNext } from '../explain'
 import { api, get, type Row, type Task } from '../api'
 import { parseGs1 } from '../gs1'
 import { dropOfflineTask, isNetworkError, offlineTasks, queue, rfPost, saveOfflineTasks, sync } from '../offline'
@@ -82,6 +83,11 @@ function TaskHead({ task }: { task: Task }) {
       <span className="task-type">{task.taskType}</span>
       <Badge value={task.status} />
       {task.orderRef && task.taskType !== 'RECEIVE' && <span className="muted">Order {task.orderRef} / {task.orderLineRef}</span>}
+      <details className="why"><summary>Why this task?</summary>
+        <p className="muted">Next because: {whyNext(task)}.</p>
+        {explainStrategy(task.strategy) && <p className="muted">{task.taskType === 'PICK' ? 'From' : 'To'} here because: {explainStrategy(task.strategy)}.</p>}
+        {task.suggestedLocation && task.suggestedLocation !== task.targetLocation && <p className="muted">Suggested was {task.suggestedLocation}.</p>}
+      </details>
     </div>
   )
 }
@@ -115,7 +121,7 @@ function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m:
         <dt>LPN</dt><dd>{task.lpnId}</dd>
         <dt>From</dt><dd>{task.fromLocation}</dd>
         <dt>To</dt><dd className="target">{task.targetLocation}</dd>
-        {task.strategy && <><dt>Why</dt><dd className="muted">{task.strategy.replace('_', ' ').toLowerCase()}</dd></>}
+        {task.strategy && <><dt>Why</dt><dd className="muted">{explainStrategy(task.strategy)}</dd></>}
       </dl>
       {task.contents && task.contents.length > 0 && (
         <p className="muted">{task.contents.map((c) => `${fmtQty(c.qty)} × ${c.itemNo}${c.lotNo ? ` (${c.lotNo})` : ''}`).join(', ')}</p>
@@ -300,11 +306,11 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
           </>
         )}
         <div className="actions">
-          <button type="button" className="primary big" disabled={finish.busy} aria-label={`Close ${task.docNo} and confirm to ERP`}
+          <button type="button" className="primary big" disabled={finish.busy}
                   onClick={async () => { if (await finish.run()) onDone(`${task.docNo} closed and confirmed to the ERP`) }}>
             Close and confirm to ERP
           </button>
-          <button type="button" className="big" disabled={handBack.busy} aria-label={`Stop receiving ${task.docNo} for now`}
+          <button type="button" className="big" disabled={handBack.busy}
                   onClick={async () => { if (await handBack.run()) onDone(`${task.docNo} handed back to the queue`) }}>
             Stop for now
           </button>

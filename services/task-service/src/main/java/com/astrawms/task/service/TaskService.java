@@ -17,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -320,6 +321,61 @@ public class TaskService {
                 .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
         event(taskId, "RELEASED", "handed back by " + user);
         return view(siteId, taskId);
+    }
+
+    /**
+     * Supervisor unassign (ADR-0024): a task left assigned to an operator who walked away goes back to the queue,
+     * with the reason on the task history. Nothing has moved yet for an assigned task, so this is always safe.
+     */
+    @Transactional
+    public TaskView unassign(String siteId, UUID taskId, String reason) {
+        Task t = lockTask(siteId, taskId);
+        boolean conflict = "EXCEPTION".equals(t.status()) && SYNC_CONFLICT.equals(jdbc.sql(
+                "select exception_reason from task where id = :id").param("id", taskId).query(String.class).single());
+        if (!"ASSIGNED".equals(t.status()) && !conflict) {
+            throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + t.status() + ", not assigned");
+        }
+        jdbc.sql("""
+                        update task set status = 'RELEASED', assigned_to = null, assigned_at = null, exception_reason = null,
+                                        updated_at = :now where id = :id""")
+                .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        event(taskId, "UNASSIGNED", "taken from " + t.assignedTo() + " by " + TenantContext.require().userId()
+                + (reason == null || reason.isBlank() ? "" : ": " + reason.trim()));
+        return view(siteId, taskId);
+    }
+
+    static final String SYNC_CONFLICT = "SYNC_CONFLICT";
+
+    /**
+     * Offline replay refused (ADR-0024): a confirmation made on a device without network was refused when it was sent
+     * (the stock or the task changed meanwhile). The server's state stands; the task, if still open, becomes an
+     * exception for the supervisor, who checks the location and puts it back in the queue (unassign).
+     */
+    @Transactional
+    public TaskView syncConflict(String siteId, UUID taskId, String detail) {
+        Task t = lockTask(siteId, taskId);
+        String text = detail == null || detail.isBlank() ? "refused when sent from the device" : detail.trim();
+        if (OPEN.contains(t.status())) {
+            jdbc.sql("""
+                            update task set status = 'EXCEPTION', exception_reason = :r, assigned_to = null, assigned_at = null,
+                                            updated_at = :now where id = :id""")
+                    .param("r", SYNC_CONFLICT).param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
+        }
+        event(taskId, SYNC_CONFLICT, text.length() > 500 ? text.substring(0, 500) : text);
+        return view(siteId, taskId);
+    }
+
+    /** Unassigns every task of {@code type} (all types when null) assigned longer than {@code minutes} ago. */
+    @Transactional
+    public List<TaskView> unassignStale(String siteId, String type, int minutes) {
+        List<UUID> ids = jdbc.sql("""
+                        select id from task where site_id = :site and status = 'ASSIGNED'
+                          and (cast(:type as text) is null or task_type = :type) and assigned_at < :before
+                        order by assigned_at""")
+                .param("site", siteId).param("type", type == null || type.isBlank() ? null : type.trim().toUpperCase())
+                .param("before", Timestamp.from(clock.instant().minus(Duration.ofMinutes(minutes))))
+                .query(UUID.class).list();
+        return ids.stream().map(id -> unassign(siteId, id, "assigned over " + minutes + " min")).toList();
     }
 
     // =====================================================================================================

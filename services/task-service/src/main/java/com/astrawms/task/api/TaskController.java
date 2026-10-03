@@ -138,6 +138,30 @@ public class TaskController {
         return tasks.release(siteId, taskId);
     }
 
+    /** Supervisor unassign (ADR-0024): back to the queue whoever holds it; the reason goes on the task history. */
+    @PreAuthorize("hasRole('SUPERVISOR')")
+    @PostMapping("/{taskId}/unassign")
+    public TaskView unassign(@PathVariable String siteId, @PathVariable UUID taskId,
+                             @RequestBody(required = false) java.util.Map<String, String> body) {
+        return tasks.unassign(siteId, taskId, body == null ? null : body.get("reason"));
+    }
+
+    /** A confirmation sent from an offline device was refused: the server wins and the task becomes an exception. */
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/{taskId}/sync-conflict")
+    public TaskView syncConflict(@PathVariable String siteId, @PathVariable UUID taskId,
+                                 @RequestBody(required = false) java.util.Map<String, String> body) {
+        return tasks.syncConflict(siteId, taskId, body == null ? null : body.get("detail"));
+    }
+
+    /** The "stale assigned" tile's action: unassigns tasks assigned longer than {@code minutes} ago. */
+    @PreAuthorize("hasRole('SUPERVISOR')")
+    @PostMapping("/unassign-stale")
+    public List<TaskView> unassignStale(@PathVariable String siteId, @RequestParam(required = false) String type,
+                                        @RequestParam(defaultValue = "30") int minutes) {
+        return tasks.unassignStale(siteId, type, Math.max(1, minutes));
+    }
+
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
     @PostMapping("/{taskId}/move")
     public TaskView move(@PathVariable String siteId, @PathVariable UUID taskId,

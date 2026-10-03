@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /** Barcode labels for locations, items and LPNs, and the site's label printers (ADR-0022). */
@@ -47,6 +48,37 @@ public class LabelController {
     @PostMapping("/lpns")
     public LabelService.Labels lpns(@PathVariable String siteId, @RequestBody LpnLabelRequest body) {
         return labels.lpns(siteId, body.count() == null ? 1 : body.count(), body.printer());
+    }
+
+    // ------------------------------------------------------------------ label lifecycle (ADR-0024)
+
+    /** Labels printed (or previewed) at the site, newest first; {@code q} matches the barcode or the label text. */
+    @GetMapping("/printed")
+    public List<Map<String, Object>> printed(@PathVariable String siteId, @RequestParam(required = false) String type,
+                                             @RequestParam(required = false) String status,
+                                             @RequestParam(required = false) String q) {
+        return labels.printed(siteId, type, status, q);
+    }
+
+    /** Verification scan of a label after it is applied. */
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','SUPERVISOR','INV_MANAGER','INV_ANALYST','RECEIVER','PICKER')")
+    @PostMapping("/printed/verify")
+    public Map<String, Object> verify(@PathVariable String siteId, @RequestBody Map<String, String> body) {
+        return labels.verify(siteId, body.get("scan"));
+    }
+
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','SUPERVISOR','INV_MANAGER','INV_ANALYST','RECEIVER')")
+    @PostMapping("/printed/{id}/reprint")
+    public Map<String, Object> reprint(@PathVariable String siteId, @PathVariable java.util.UUID id,
+                                       @RequestBody(required = false) Map<String, String> body) {
+        return labels.reprint(siteId, id, body == null ? null : body.get("printer"));
+    }
+
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','SUPERVISOR','INV_MANAGER')")
+    @PostMapping("/printed/{id}/void")
+    public Map<String, Object> voidLabel(@PathVariable String siteId, @PathVariable java.util.UUID id,
+                                         @RequestBody Map<String, String> body) {
+        return labels.voidLabel(siteId, id, body.get("reason"));
     }
 
     @GetMapping("/printers")

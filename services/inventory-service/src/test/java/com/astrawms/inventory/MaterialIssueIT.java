@@ -71,6 +71,10 @@ class MaterialIssueIT extends IntegrationTest {
         call("POST", "/material-issues/MI000001/lines/10/issue", rita, "k2", scan.formatted("(01)04012345678901", "3"))
                 .andExpect(jsonPath("$.lines[0].qty_issued", is(3)));                        // a retried scan counts once
         assertThat(onHand("SKU-EA", "A-01-01", "AVAILABLE")).isEqualByComparingTo("17");
+        // ADR-0024: the overview's "to issue" tile and the list use the same status set; an empty status is "all".
+        call("GET", "/material-issues?status=APPROVED,PARTIALLY_ISSUED", rita, null, null).andExpect(jsonPath("$.length()", is(1)));
+        call("GET", "/material-issues?status=approved", rita, null, null).andExpect(jsonPath("$.length()", is(0)));
+        call("GET", "/material-issues?status=", rita, null, null).andExpect(jsonPath("$.length()", is(1)));
         call("POST", "/material-issues/MI000001/lines/10/issue", rita, "k3", scan.formatted("SKU-EA", "2"))
                 .andExpect(jsonPath("$.status", is("ISSUED")));
 
@@ -87,5 +91,18 @@ class MaterialIssueIT extends IntegrationTest {
                 "\"code\":\"CC100\"", "\"issueNo\":\"MI000001\"");
         assertThat(movements.getLast()).contains("\"movementType\":\"RETURN_COST_CENTER\"");
         call("GET", "/material-issues?q=cc100", rita, null, null).andExpect(jsonPath("$[0].status", is("ISSUED")));
+
+        // A WBS issue by an allowed requester is approved, scanned out on RF and posted as an issue to the WBS element.
+        var eve = as("eve", Roles.RECEIVER);
+        call("POST", "/material-issues", eve, null, """
+                {"ownerId":"ACME","objectType":"WBS","objectCode":"P-1","recipient":"Site crew","lines":[{"itemNo":"SKU-EA","qty":2,"uom":"EA"}]}""")
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.issue_no", is("MI000002")));
+        call("POST", "/material-issues/MI000002/approve", as("sue", Roles.SUPERVISOR), null, "{}")
+                .andExpect(jsonPath("$.status", is("APPROVED")));
+        call("POST", "/material-issues/MI000002/lines/10/issue", eve, "w1", scan.formatted("SKU-EA", "2"))
+                .andExpect(jsonPath("$.status", is("ISSUED")));
+        assertThat(outboxEnvelopes("GoodsMovement").getLast()).contains("\"movementType\":\"ISSUE_WBS\"", "\"code\":\"P-1\"",
+                "\"issueNo\":\"MI000002\"");
+        assertThat(onHand("SKU-EA", "A-01-01", "AVAILABLE")).isEqualByComparingTo("14");
     }
 }

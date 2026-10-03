@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { del, get, post, put, query, type Page as ApiPage, type Row } from '../api'
-import { Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSite } from '../ui'
+import { Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSite, useSiteContext } from '../ui'
 
 const LOCATION_TYPES = ['RACK', 'SHELF', 'FLOOR', 'BULK', 'DOOR', 'DOCK', 'STAGING_IN', 'STAGING_OUT', 'STAGING']
 const ZONE_TYPES = ['RESERVE', 'PICK', 'DOCK', 'RECEIVING', 'RETURNS', 'SHIPPING', 'QC', 'FREEZER', 'CHILLED', 'HAZMAT']
@@ -23,6 +23,7 @@ function FormCard({ title, onSubmit, action, children, busy, error, ok }: {
 /** Master data administration (UX-015): site, zones, locations, items, ERP plant mapping, release mode. */
 export default function MasterData() {
   const site = useSite()
+  const { sites: known } = useSiteContext()
   // Sends every location of the site to the other services again, e.g. after an upgrade added zone types (ADR-0019).
   const republish = useAction(() => post<{ locationsRepublished: number }>(`/api/v1/sites/${site}/locations/republish`))
   return (
@@ -33,7 +34,7 @@ export default function MasterData() {
       <ErrorBox error={republish.error} />
       <Success>{republish.result && `${republish.result.locationsRepublished} location(s) republished; the other services update within seconds`}</Success>
       <div className="grid">
-        <SiteForm site={site} />
+        <SiteForm key={`${site}-${known.length}`} site={site} />
         <ZoneForm site={site} />
         <LocationForm site={site} />
         <GenerateForm site={site} />
@@ -50,15 +51,35 @@ export default function MasterData() {
 }
 
 function SiteForm({ site }: { site: string }) {
-  const [f, setF] = useState({ name: '', timeZone: 'UTC', erpSite: '' })
-  const save = useAction(() => put(`/api/v1/sites/${site}`, f))
+  const { sites } = useSiteContext()
+  const known = sites.find((x) => x.siteId === site)
+  // Prefilled from the site master, so saving a name change keeps the type and supplier (ADR-0024).
+  const [f, setF] = useState({ name: known?.name ?? '', timeZone: known?.timeZone ?? 'UTC', erpSite: known?.erpSite ?? '',
+    siteType: known?.siteType ?? 'MAIN', supplyingSite: known?.supplyingSite ?? '' })
+  const save = useAction(() => put(`/api/v1/sites/${site}`, { ...f, supplyingSite: f.siteType === 'STORE' ? f.supplyingSite || null : null }))
+  const mains = sites.filter((x) => x.siteType === 'MAIN' && x.siteId !== site)
   return (
     <FormCard title={`Site ${site}`} action="Save site" onSubmit={() => void save.run()} busy={save.busy} error={save.error}
-              ok={save.done && `Site ${site} saved`}>
+              ok={save.done && `Site ${site} saved (reload to see it in the site selector)`}>
       <Field label="Name"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required /></Field>
       <div className="row">
         <Field label="Time zone"><input value={f.timeZone} onChange={(e) => setF({ ...f, timeZone: e.target.value })} required /></Field>
         <Field label="ERP plant"><input value={f.erpSite} onChange={(e) => setF({ ...f, erpSite: e.target.value })} required size={6} /></Field>
+      </div>
+      <div className="row">
+        <Field label="Type" hint="A store sees only store work: receive, issue, count">
+          <select value={f.siteType} onChange={(e) => setF({ ...f, siteType: e.target.value as 'MAIN' | 'STORE' })}>
+            <option value="MAIN">Main warehouse</option><option value="STORE">Satellite store</option>
+          </select>
+        </Field>
+        {f.siteType === 'STORE' && (
+          <Field label="Supplied by">
+            <select value={f.supplyingSite} onChange={(e) => setF({ ...f, supplyingSite: e.target.value })}>
+              <option value="">—</option>
+              {mains.map((m) => <option key={m.siteId} value={m.siteId}>{m.siteId} {m.name}</option>)}
+            </select>
+          </Field>
+        )}
       </div>
     </FormCard>
   )

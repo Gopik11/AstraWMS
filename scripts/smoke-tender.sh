@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end smoke test of the tender gaps (ADR-0022) through the gateway with Keycloak tokens:
 #   SAP material master (MATMAS05) -> item with GTIN; location, item and LPN labels;
+#   label lifecycle: verify scan (GS1 without parentheses), void, a voided label refused (ADR-0024);
 #   material issue to a cost centre: request -> approval -> RF issue by GS1 scan -> SAP 201 in the simulated SAP;
+#   material issue to a WBS element scanned on RF -> SAP 221 with the WBS element (ADR-0024);
 #   full physical inventory of a zone: freeze -> RF counts -> post differences by a non-counter.
 set -euo pipefail
 
@@ -71,6 +73,14 @@ expect 200 -X POST "$GW/api/v1/sites/DC1/labels/items" "${ADM[@]}" -d '{"ownerId
 [[ "$(json "['labels'][0]['barcode']" <<<"$BODY")" == "(01)04012345678901" ]] || fail "item label: $BODY"
 expect 200 -X POST "$GW/api/v1/sites/DC1/labels/lpns" "${ADM[@]}" -d '{"count":2}'
 echo "LPN labels $(json "['labels'][0]['barcode']" <<<"$BODY") .. $(json "['labels'][1]['barcode']" <<<"$BODY")"
+LPN2="$(json "['labels'][1]['barcode']" <<<"$BODY")"
+expect 200 -X POST "$GW/api/v1/sites/DC1/labels/printed/verify" "${ADM[@]}" -d '{"scan":"]C10104012345678901"}'
+[[ "$(json "['status']" <<<"$BODY")" == VERIFIED ]] || fail "item label not verified: $BODY"
+expect 200 "$GW/api/v1/sites/DC1/labels/printed?q=$LPN2" "${ADM[@]}"
+LABEL_ID="$(json "[0]['id']" <<<"$BODY")"
+expect 200 -X POST "$GW/api/v1/sites/DC1/labels/printed/$LABEL_ID/void" "${ADM[@]}" -d '{"reason":"torn"}'
+expect 409 -X POST "$GW/api/v1/sites/DC1/labels/printed/verify" "${ADM[@]}" -d "{\"scan\":\"$LPN2\"}"
+echo "Item label verified by scan; $LPN2 voided and its scan refused"
 
 step "Stock: 20 at M-01, 3 at M-02"
 for _ in $(seq 1 30); do
@@ -99,6 +109,20 @@ TXN="$(json "['moves'][0]['wms_txn_id']" <<<"$BODY")"
 wait_for "SAP 201 to CC100" sh -c "curl -sf '$GW/mock-sap/documents?xblnr=$TXN' -H '${ADM[1]}' | grep -q 'MOVE_TYPE[^0-9]*201'"
 echo "Issue $ISSUE: 5 issued to CC100, SAP goods issue 201 for $TXN"
 
+step "Material issue to WBS element P-100: request, approval, RF issue -> SAP 221"
+expect 200 -X PUT "$GW/api/v1/sites/DC1/inventory/cost-objects/WBS/P-100" "${ADM[@]}" -d '{"description":"Line 3 refit"}'
+expect 201 -X POST "$GW/api/v1/sites/DC1/inventory/material-issues" "${KEEPER[@]}" \
+  -d '{"ownerId":"ACME","objectType":"WBS","objectCode":"P-100","recipient":"Project crew","lines":[{"itemNo":"100300","qty":2,"uom":"EA"}]}'
+WBS_ISSUE="$(json "['issue_no']" <<<"$BODY")"
+expect 200 -X POST "$GW/api/v1/sites/DC1/inventory/material-issues/$WBS_ISSUE/approve" "${BOSS[@]}" -d '{}'
+expect 200 -X POST "$GW/api/v1/sites/DC1/inventory/material-issues/$WBS_ISSUE/lines/10/issue" "${KEEPER[@]}" -H "Idempotency-Key: w1" \
+  -d '{"locationId":"M-01","itemScan":"100300","qty":2}'
+[[ "$(json "['status']" <<<"$BODY")" == "ISSUED" ]] || fail "WBS issue not issued: $BODY"
+WTXN="$(json "['moves'][0]['wms_txn_id']" <<<"$BODY")"
+wait_for "SAP 221 to P-100" sh -c "curl -sf '$GW/mock-sap/documents?xblnr=$WTXN' -H '${ADM[1]}' | grep -q 'MOVE_TYPE[^0-9]*221'"
+curl -sf "$GW/mock-sap/documents?xblnr=$WTXN" -H "${ADM[1]}" | grep -q 'P-100' || fail "SAP 221 without the WBS element"
+echo "Issue $WBS_ISSUE: 2 issued to WBS P-100, SAP goods issue 221 for $WTXN"
+
 step "Physical inventory of zone STOR: frozen, counted on RF, posted by the supervisor"
 expect 201 -X POST "$GW/api/v1/sites/DC1/inventory/physical-inventories" "${BOSS[@]}" -d '{"zones":["STOR"],"freeze":true}'
 PI="$(json "['pi_no']" <<<"$BODY")"
@@ -110,7 +134,7 @@ grep -q INV_LOCATION_FROZEN <<<"$BODY" || fail "frozen location accepted stock: 
 for _ in 1 2; do
   task="$(next_count CATHY)" || fail "no count task"
   loc="$(curl -sf "$GW/api/v1/sites/DC1/tasks/$task" "${CATHY[@]}" | json "['fromLocation']")"
-  qty=15; [[ "$loc" == "M-02" ]] && qty=2
+  qty=13; [[ "$loc" == "M-02" ]] && qty=2   # M-01: 20 - 5 (CC100) - 2 (P-100)
   expect 200 -X POST "$GW/api/v1/sites/DC1/tasks/$task/count" "${CATHY[@]}" \
     -d "{\"checkDigit\":\"$(check_digit "$loc")\",\"lines\":[{\"ownerId\":\"ACME\",\"itemNo\":\"100300\",\"qty\":$qty}]}"
 done
