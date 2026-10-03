@@ -15,5 +15,7 @@ public enum TxnType {
     RETURN_OUT,
     RETURN_IN,
     REPLEN_OUT,
-    REPLEN_IN
+    REPLEN_IN,
+    MATERIAL_ISSUE,
+    MATERIAL_RETURN
 }

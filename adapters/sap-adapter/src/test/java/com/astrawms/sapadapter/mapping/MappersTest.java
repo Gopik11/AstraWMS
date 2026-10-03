@@ -222,6 +222,27 @@ class MappersTest {
         }
 
         @Test
+        void materialIssuePostsToTheCostObject_ADR0022() {
+            GoodsMovement issue = new GoodsMovement("W1M3S5G87458N695", "ISSUE_WBS", "ISSUE", NOW, null,
+                    List.of(new GoodsMovement.Item("SKU-1", new BigDecimal("3"), "EA", "0001", null, null, null, null,
+                            "UNRESTRICTED", "ISSUE MI000001")),
+                    new GoodsMovement.AccountAssignment("WBS", "P-1000-01", "Site crew North", "MI000001"));
+            Bapi.GoodsmvtCreate call = BapiMapper.goodsMovement(issue, "1000", ZoneId.of("UTC"));
+            assertThat(call.gmCode()).isEqualTo("03");
+            assertThat(call.items().getFirst()).satisfies(i -> {
+                assertThat(i.moveType()).isEqualTo("221");
+                assertThat(i.wbsElem()).isEqualTo("P-1000-01");
+                assertThat(i.costCenter()).isNull();
+                assertThat(i.grRcpt()).isEqualTo("Site crew No");                 // GR_RCPT is 12 characters
+            });
+            GoodsMovement back = new GoodsMovement("W1M3S5G87458N696", "RETURN_COST_CENTER", "ISSUE_RETURN", NOW, null,
+                    issue.items(), new GoodsMovement.AccountAssignment("COST_CENTER", "CC100", "J. Doe", "MI000002"));
+            Bapi.GoodsmvtItem i = BapiMapper.goodsMovement(back, "1000", ZoneId.of("UTC")).items().getFirst();
+            assertThat(i.moveType()).isEqualTo("202");
+            assertThat(i.costCenter()).isEqualTo("CC100");
+        }
+
+        @Test
         void unknownMovementTypeIsRejected() {
             GoodsMovement m = new GoodsMovement("W1", "TELEPORT", null, NOW, null, List.of());
             assertThatThrownBy(() -> BapiMapper.goodsMovement(m, "1000", ZoneId.of("UTC")))

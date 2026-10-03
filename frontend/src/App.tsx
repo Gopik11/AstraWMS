@@ -20,6 +20,8 @@ import Slotting from './pages/Slotting'
 import Labor from './pages/Labor'
 import Yard from './pages/Yard'
 import Billing from './pages/Billing'
+import MaterialIssues from './pages/MaterialIssues'
+import RfIssue from './pages/RfIssue'
 import Tasks from './pages/Tasks'
 import MasterData from './pages/MasterData'
 import ErpSimulator from './pages/ErpSimulator'
@@ -32,7 +34,8 @@ interface NavItem {
 }
 
 const NAV: { group: string; items: NavItem[] }[] = [
-  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'] }] },
+  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'] },
+    { to: '/rf/issue', label: 'RF material issue', roles: ['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR'] }] },
   {
     group: 'Operations',
     items: [
@@ -56,6 +59,8 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
       { to: '/billing', label: 'Billing', roles: ['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR'] },
+      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
+      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'] },
     ],
   },
@@ -120,6 +125,8 @@ export default function App({ environment }: { environment?: string }) {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
+          <Route path="/rf/issue" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR']}><RfIssue /></Guard>} />
+          <Route path="/material-issues" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN']}><MaterialIssues /></Guard>} />
           <Route path="/slotting" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST']}><Slotting /></Guard>} />
           <Route path="/yard" element={<Guard roles={['SUPERVISOR', 'RECEIVER']}><Yard /></Guard>} />
           <Route path="/billing" element={<Guard roles={['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR']}><Billing /></Guard>} />

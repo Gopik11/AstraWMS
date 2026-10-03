@@ -17,7 +17,32 @@ public enum ErpMovementType {
     STATUS_BLK_TO_AVL,
     STATUS_QI_TO_BLK,
     STATUS_BLK_TO_QI,
-    BUCKET_TRANSFER;
+    BUCKET_TRANSFER,
+    /** ADR-0022: consumption to a cost centre, WBS element or internal order, and the reversal for returns. */
+    ISSUE_COST_CENTER,
+    ISSUE_WBS,
+    ISSUE_ORDER,
+    RETURN_COST_CENTER,
+    RETURN_WBS,
+    RETURN_ORDER;
+
+    public static ErpMovementType issueTo(String objectType) {
+        return switch (objectType) {
+            case "COST_CENTER" -> ISSUE_COST_CENTER;
+            case "WBS" -> ISSUE_WBS;
+            case "ORDER" -> ISSUE_ORDER;
+            default -> throw new IllegalArgumentException(objectType);
+        };
+    }
+
+    public static ErpMovementType returnFrom(String objectType) {
+        return switch (objectType) {
+            case "COST_CENTER" -> RETURN_COST_CENTER;
+            case "WBS" -> RETURN_WBS;
+            case "ORDER" -> RETURN_ORDER;
+            default -> throw new IllegalArgumentException(objectType);
+        };
+    }
 
     /**
      * Returns the ERP movement for a WMS status change, or empty when both statuses map to the same ERP stock type
