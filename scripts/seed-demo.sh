@@ -18,6 +18,7 @@
 # Another environment: your own user (needs SOLUTION_ADMIN, ERP_INTEGRATION, SUPERVISOR, INV_MANAGER, RECEIVER);
 # the password is asked for and never stored. Approvals are skipped unless APPROVER_USER is given.
 #   GATEWAY_URL=https://astrawms.cloud SEED_USER=me@example.com scripts/seed-demo.sh
+# A tenant seeded before the site network (ADR-0024): add NETWORK_ONLY=1 (safe to re-run; no documents again).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -197,6 +198,27 @@ for b in "${beta[@]}"; do
     \"uoms\":[{\"uom\":\"CS\",\"numerator\":12,\"denominator\":1}]}"
 done
 echo "20 items: 12 from SAP with GTINs, 8 BETA"
+
+# NETWORK_ONLY=1: for a tenant seeded before the site network (ADR-0024). Sites, locations and items above are
+# upserts, so this marks DC1 as MAIN and every store as STORE, adds the new stores and extends the items to them; then
+# it saves DC1's allocation policy and puts a starter shelf in stores ST06 and up. Documents are not created again.
+if [[ "${NETWORK_ONLY:-}" == 1 ]]; then
+  step "Network only: DC1 allocation policy, starter stock in the new stores"
+  put "/api/v1/sites/DC1/inventory/allocation-policy" '{"lotRotation":"FEFO","otherRotation":"FIFO","pickFaceFirst":true,"fullLpn":"COVERED_ONLY"}'
+  added=0
+  for s in "${STORES[@]}"; do
+    (( $(store_no "$s") > 5 )) || continue
+    j=0
+    for i in 100100 100300 100600; do
+      j=$((j + 1)); added=$((added + 1))
+      receipt "$s" "net-$s-$i" "{\"ownerId\":\"ACME\",\"itemNo\":\"$i\",\"qty\":$((10 + RANDOM % 30)),\"uom\":\"EA\",\"locationId\":\"$(printf 'S-%02d' "$j")\"}"
+    done
+  done
+  printf '
+SEED DONE (network only): DC1 + %s stores typed and supplied by DC1, %s stock receipts in new stores.
+' "${#STORES[@]}" "$added"
+  exit 0
+fi
 
 # ----------------------------------------------------------------------------------------------- policies
 step "Policies: release, cutoffs, owner rules, allocation, slotting, labor standards, billing rates, cost objects"
