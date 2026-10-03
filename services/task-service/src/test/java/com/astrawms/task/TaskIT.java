@@ -665,6 +665,35 @@ class TaskIT {
                 item == null ? "" : ",\"item\":\"" + item + "\"", extra));
     }
 
+    // ------------------------------------------------------------------ ADR-0023 offline work
+
+    @Test
+    void aBatchOfTasksIsClaimedForOfflineWorkAndConfirmationsReplaySafely() throws Exception {
+        received("LPN-O1", "SKU-1");
+        received("LPN-O2", "SKU-1");
+        awaitTask("LPN-O1", "RELEASED");
+        awaitTask("LPN-O2", "RELEASED");
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        mvc.perform(post("/api/v1/sites/DC1/tasks/claim-batch?count=1").with(rita))
+                .andExpect(jsonPath("$.length()", is(1)))
+                .andExpect(jsonPath("$[0].status", is("ASSIGNED"))).andExpect(jsonPath("$[0].assignedTo", is("rita")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/claim-batch?count=5").with(rita))
+                .andExpect(jsonPath("$.length()", is(2)));                            // the one held + the other
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "otto", Roles.RECEIVER)))
+                .andExpect(status().isNoContent());                                   // all on rita's device
+        // A confirmation sent again after reconnecting (same task, same scans) is answered, not redone.
+        String id = awaitTask("LPN-O1", "ASSIGNED");
+        String target = JsonPath.read(mvc.perform(get("/api/v1/sites/DC1/tasks/" + id).with(rita))
+                .andReturn().getResponse().getContentAsString(), "$.targetLocation");
+        String digit = target.equals("A-02") ? "22" : "33";
+        String body = "{\"lpnId\":\"LPN-O1\",\"locationId\":\"" + target + "\",\"checkDigit\":\"" + digit + "\"}";
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/confirm").with(rita).contentType(MediaType.APPLICATION_JSON)
+                .content(body)).andExpect(jsonPath("$.status", is("COMPLETED")));
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/confirm").with(rita).contentType(MediaType.APPLICATION_JSON)
+                .content(body)).andExpect(jsonPath("$.status", is("COMPLETED")));
+        assertThat(inventory.moves.stream().filter(m -> m.key().equals("TSK-" + id)).count()).isEqualTo(1);
+    }
+
     // ------------------------------------------------------------------ ADR-0022 GS1-128 scans
 
     @Test

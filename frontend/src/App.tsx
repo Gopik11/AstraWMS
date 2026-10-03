@@ -21,7 +21,8 @@ const Labor = lazy(() => import('./pages/Labor'))
 const Yard = lazy(() => import('./pages/Yard'))
 const Billing = lazy(() => import('./pages/Billing'))
 const MaterialIssues = lazy(() => import('./pages/MaterialIssues'))
-const RfIssue = lazy(() => import('./pages/RfIssue'))
+// RF screens are in the main bundle, so they are cached for offline work (ADR-0023).
+import RfIssue from './pages/RfIssue'
 const LabelsPage = lazy(() => import('./pages/Labels'))
 const Transfers = lazy(() => import('./pages/Transfers'))
 const Tasks = lazy(() => import('./pages/Tasks'))

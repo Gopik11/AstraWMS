@@ -41,6 +41,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - `smoke-counts.sh` covers cycle counting: tolerance auto-adjustment, an independent recount, blind views for counters, and manager approval posted to simulated SAP.
 - `smoke-replenishment.sh` covers min/max replenishment: an order picks a forward location below its minimum, then reserve stock is reserved and moved by an RF replenishment task.
 - `smoke-packing.sh` covers packing and loading: ship refused while unpacked, an SSCC carton with a carrier label, cross-loading refused, and a trailer closed with a seal that posts the goods issue.
+- `smoke-transfer.sh` covers ADR-0023: a transfer from DC1 to store ST01 picked and shipped on RF (SAP 303), then received on RF at the store (SAP 305).
 - `smoke-tender.sh` covers ADR-0022: SAP material master, labels, material issue to a cost centre with the SAP 201 posting, and a frozen physical inventory posted by a non-counter.
 - `smoke-flow.sh` replays the SAP flow test of ADR-0019: an order backordered before stock, an ASN received on an RF RECEIVE task, putaway to storage with an override, the backorder recovered automatically, a second order picked, packed and loaded by the picker onto the supervisor's load, and an RMA restocked with a putaway task for the returned unit.
 - `smoke-returns.sh` covers customer returns: a SAP returns delivery becomes an RMA, units graded A (restocked) and D (RTV, blocked), over-RMA refused, then close posts the 651 receipt and 453 restock in simulated SAP; plus a blind return.

@@ -90,7 +90,15 @@ export function AuthProvider({ config, manager, initial, children }: {
 
   useEffect(() => {
     const loaded = (u: User) => setUser(u)
-    const expired = () => void manager.signinRedirect({ state: window.location.pathname })
+    // ADR-0023: offline, an expired token must not navigate away (the sign-in page cannot load); renew once back.
+    const renew = () => void manager.signinSilent().catch(() => manager.signinRedirect({ state: window.location.pathname }))
+    const expired = () => {
+      if (navigator.onLine === false) {
+        window.addEventListener('online', renew, { once: true })
+      } else {
+        void manager.signinRedirect({ state: window.location.pathname })
+      }
+    }
     manager.events.addUserLoaded(loaded)
     manager.events.addAccessTokenExpired(expired)
     return () => {
