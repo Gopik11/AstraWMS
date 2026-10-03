@@ -33,8 +33,12 @@ create index stock_count_pi_idx on stock_count (pi_id) where pi_id is not null;
 alter table stock_count drop constraint stock_count_trigger_check;
 alter table stock_count add constraint stock_count_trigger_check check (trigger in ('ADHOC', 'SHORT_PICK', 'PHYSICAL'));
 
+-- A global default reason (tenant_id null) passes no tenant policy: the migration (table owner) inserts it with the
+-- forced row-level security lifted for this statement only.
+alter table reason_code no force row level security;
 insert into reason_code (tenant_id, code, description, applies_to, requires_approval, erp_relevant) values
     (null, 'PI_DIFF', 'Physical inventory difference', 'ADJUSTMENT', true, true);
+alter table reason_code force row level security;
 
 do $$
 declare t text;
