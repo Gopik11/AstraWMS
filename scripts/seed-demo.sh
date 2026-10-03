@@ -28,10 +28,19 @@ STORES=(ST01 ST02 ST03 ST04 ST05)
 step() { printf '\n== %s\n' "$*"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
 json() { python -c "import json,sys; d=json.load(sys.stdin); print(eval('d'+sys.argv[1]))" "$1"; }
-signin() { # signin <user> <password> -> prints the access token
-  curl -sf -X POST "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=astra-dev-cli \
-    -d scope=openid --data-urlencode "username=$1" --data-urlencode "password=$2" \
-    | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' || fail "sign-in of $1"; }
+signin() { # signin <user> <password> -> prints the access token; on failure says what Keycloak answered
+  local out
+  out="$(curl -s -X POST "$REALM/protocol/openid-connect/token" -d grant_type=password -d client_id=astra-dev-cli \
+    -d scope=openid --data-urlencode "username=$1" --data-urlencode "password=$2")"
+  python -c 'import json,sys; print(json.loads(sys.argv[1])["access_token"])' "$out" 2>/dev/null && return 0
+  echo "FAILED: sign-in of $1 at $REALM: $(python -c 'import json,sys
+try:
+    d = json.loads(sys.argv[1]); print(d.get("error_description") or d.get("error"))
+except Exception:
+    print(sys.argv[1][:200])' "$out")" >&2
+  echo "        Use the Keycloak username (not the e-mail address) and the account password; a passkey-only account cannot be used here." >&2
+  exit 1
+}
 # call <expected codes regex> <method> <path> [json] [extra curl args...]; body in $BODY
 call() {
   local want="$1" method="$2" path="$3" data="${4:-}"; shift 4 2>/dev/null || shift $#
