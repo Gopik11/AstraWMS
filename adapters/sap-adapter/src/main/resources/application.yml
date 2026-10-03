@@ -50,6 +50,10 @@ astra:
       audience: astrawms-api
   outbox:
     relay-interval-ms: 500
+  master-data:
+    # Item master API for MATMAS (ADR-0022); the middleware's token is relayed.
+    base-url: ${MASTER_DATA_URL:http://localhost:8081}
+    timeout-ms: 5000
   sap:
     # SAP logical system (<SID>_<client>) used as sourceSystem on messages the adapter translates (ISD-00 §2)
     logical-system: ${SAP_LOGICAL_SYSTEM:SAP_S4_DEV_100}
