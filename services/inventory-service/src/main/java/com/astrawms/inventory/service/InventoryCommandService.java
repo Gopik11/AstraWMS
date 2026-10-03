@@ -782,6 +782,25 @@ public class InventoryCommandService {
     }
 
     private Map<String, LocationRef> lockLocations(String siteId, List<String> ids) {
+        return lockLocations(siteId, ids, false);
+    }
+
+    /**
+     * Locks the locations of a stock movement. A location frozen by a physical inventory in progress (ADR-0022) takes
+     * no movement, except the count postings themselves ({@code countPosting}).
+     */
+    private Map<String, LocationRef> lockLocations(String siteId, List<String> ids, boolean countPosting) {
+        if (!countPosting) {
+            List<String> frozen = jdbc.sql("""
+                            select f.location_id || ' (' || p.pi_no || ')' from location_freeze f
+                            join physical_inventory p on p.id = f.pi_id
+                            where f.site_id = :site and f.location_id in (:ids)""")
+                    .param("site", siteId).param("ids", ids).query(String.class).list();
+            if (!frozen.isEmpty()) {
+                throw ApiException.unprocessable("INV_LOCATION_FROZEN",
+                        "Frozen for physical inventory: " + String.join(", ", frozen));
+            }
+        }
         Map<String, LocationRef> found = new LinkedHashMap<>();
         refs.lockLocations(siteId, ids).forEach(l -> found.put(l.locationId(), l));
         for (String id : ids) {
@@ -904,7 +923,7 @@ public class InventoryCommandService {
             ctx.reasonCode = reason.code();
             ctx.approvedBy = approvedBy;
             ctx.sourceDoc = "COUNT " + countId;
-            LocationRef location = lockLocations(siteId, List.of(locationId)).get(locationId);
+            LocationRef location = lockLocations(siteId, List.of(locationId), true).get(locationId);
             for (CountAdjustment a : adjustments) {
                 ItemRef item = requireItem(a.ownerId(), a.itemNo(), siteId);
                 if (item.serialTracked()) {

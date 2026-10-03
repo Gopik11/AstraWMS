@@ -88,6 +88,8 @@ public class AllocationRepository {
                           and l.status = 'ACTIVE' and l.location_type not in (:staging)
                           and coalesce(l.zone_type, '') not in (:zones)
                           and b.location_id not in (:excluded)
+                          and not exists (select 1 from location_freeze f where f.site_id = b.site_id
+                                          and f.location_id = b.location_id)
                           and (cast(:lot as text) is null or b.lot_no = :lot)
                           and (cast(:minExpiry as date) is null or b.expiry_date >= :minExpiry)
                         order by\s""" + order + " for update of b")

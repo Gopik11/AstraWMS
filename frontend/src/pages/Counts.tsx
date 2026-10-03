@@ -59,6 +59,7 @@ export default function Counts() {
         ]} />
       </Card>
       {selected && <Detail id={selected} site={site} canDecide={hasRole('INV_MANAGER', 'SUPERVISOR')} onChange={list.reload} />}
+      <PhysicalInventory site={site} canRun={hasRole('INV_MANAGER', 'SUPERVISOR')} onChange={list.reload} />
     </Page>
   )
 }
@@ -108,6 +109,73 @@ function Detail({ id, site, canDecide, onChange }: { id: string; site: string; c
             </div>
           )}
           <ErrorBox error={approve.error ?? reject.error} />
+        </>
+      )}
+    </Card>
+  )
+}
+
+/**
+ * Full physical inventory (ADR-0022): a count of every location of the site or of chosen zones, optionally frozen
+ * (no movement, no allocation) while counting; differences are reviewed and posted together by someone who did not
+ * count (to SAP as 701/702).
+ */
+function PhysicalInventory({ site, canRun, onChange }: { site: string; canRun: boolean; onChange: () => void }) {
+  const base = `/api/v1/sites/${site}/inventory/physical-inventories`
+  const list = useLoad(() => get<Row[]>(base), [base])
+  const [selected, setSelected] = useState<string>()
+  const [f, setF] = useState({ zones: '', freeze: true, note: '' })
+  const create = useAction(() => post<Row>(base, {
+    zones: f.zones.split(/[\s,]+/).map((z) => z.trim().toUpperCase()).filter(Boolean), freeze: f.freeze, note: f.note || null }))
+  const detail = useLoad(() => (selected ? get<Row>(`${base}/${selected}`) : Promise.resolve(undefined)), [base, selected])
+  const act = useAction((step: string) => post<Row>(`${base}/${selected}/${step}`))
+  const run = async (step: string) => { if (await act.run(step)) { detail.reload(); list.reload(); onChange() } }
+  const d = detail.data
+  return (
+    <Card title="Physical inventory">
+      <Table rows={list.data} empty="No physical inventories" onRow={(r) => setSelected(String(r.pi_no))} columns={[
+        { header: 'PI', cell: (r) => String(r.pi_no) },
+        { header: 'Scope', cell: (r) => String(r.zones || 'whole site') },
+        { header: 'Status', cell: (r) => <Badge value={String(r.status)} /> },
+        { header: 'Counted', cell: (r) => `${String(r.counted)} / ${String(r.locations)}`, align: 'right' },
+        { header: 'Freeze', cell: (r) => (r.freeze ? 'yes' : 'no') },
+        { header: 'Created', cell: (r) => `${fmtDate(r.created_at)} · ${String(r.created_by)}` },
+        { header: 'Posted', cell: (r) => (r.posted_at ? `${fmtDate(r.posted_at)} · ${String(r.posted_by)}` : '') },
+      ]} />
+      {canRun && (
+        <div className="row">
+          <Field label="Zones" hint="Blank = whole site"><input value={f.zones} onChange={(e) => setF({ ...f, zones: e.target.value.toUpperCase() })} size={16} /></Field>
+          <label className="check"><input type="checkbox" checked={f.freeze} onChange={(e) => setF({ ...f, freeze: e.target.checked })} /> Freeze stock while counting</label>
+          <Field label="Note"><input value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} size={20} /></Field>
+          <button disabled={create.busy} onClick={async () => { const r = await create.run(); if (r) { list.reload(); setSelected(String(r.pi_no)) } }}>Plan physical inventory</button>
+        </div>
+      )}
+      <ErrorBox error={list.error ?? create.error ?? detail.error ?? act.error} />
+      {d && (
+        <>
+          <h3>{String(d.pi_no)} · <Badge value={String(d.status)} /></h3>
+          <div className="facts">
+            <span>Scope {String(d.zones || 'whole site')}</span>
+            <span>Frozen locations {String(d.frozenLocations)}</span>
+            {Object.entries((d.progress as Record<string, number>) ?? {}).map(([k, v]) => <span key={k}>{k.toLowerCase().replace('_', ' ')} {v}</span>)}
+            <span>Net difference value {String(d.netValue)}</span>
+          </div>
+          <Table rows={d.differences as Row[]} empty="No differences" columns={[
+            { header: 'Location', cell: (v) => String(v.location_id) },
+            { header: 'Item', cell: (v) => `${String(v.owner_id)} / ${String(v.item_no)}${v.lot_no ? ` · ${String(v.lot_no)}` : ''}${v.lpn_id ? ` · ${String(v.lpn_id)}` : ''}` },
+            { header: 'System', cell: (v) => fmtQty(v.system_qty), align: 'right' },
+            { header: 'Counted', cell: (v) => fmtQty(v.counted_qty), align: 'right' },
+            { header: 'Difference', cell: (v) => fmtQty(v.difference), align: 'right' },
+            { header: 'Value', cell: (v) => String(v.value ?? ''), align: 'right' },
+            { header: 'Count', cell: (v) => <Badge value={String(v.status)} /> },
+          ]} />
+          {canRun && (
+            <div className="actions">
+              {d.status === 'PLANNED' && <button className="primary" disabled={act.busy} onClick={() => void run('start')}>Start counting (create RF count tasks)</button>}
+              {d.status === 'COUNTING' && <button className="primary" disabled={act.busy} onClick={() => void run('post')}>Post differences</button>}
+              {['PLANNED', 'COUNTING'].includes(String(d.status)) && <button disabled={act.busy} onClick={() => void run('cancel')}>Cancel</button>}
+            </div>
+          )}
         </>
       )}
     </Card>
