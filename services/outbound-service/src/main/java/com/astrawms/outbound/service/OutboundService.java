@@ -114,6 +114,12 @@ public class OutboundService {
             ack(ack, null, null);
             return;
         }
+        create(site, o, envelope.sourceSystem(), null, null);
+        ack(ack, null, null);
+    }
+
+    /** Stores a new order and, in waveless mode, releases it (allocation and picks). */
+    private UUID create(String site, OutboundOrder o, String sourceSystem, String transferTo, String note) {
         boolean pooled = "WAVE".equals(releaseMode(site));
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(clock.instant());
@@ -123,12 +129,13 @@ public class OutboundService {
         jdbc.sql("""
                         insert into outbound_order (id, tenant_id, site_id, erp_doc_no, order_type, revision, source_system,
                             ship_to, carrier_scac, planned_gi_utc, status, staging_location, pick_lpn, created_at, updated_at,
-                            cutoff_at, ship_complete)
+                            cutoff_at, ship_complete, transfer_to_site, note)
                         values (:id, :t, :site, :doc, :type, :rev, :src, cast(:shipTo as jsonb), :scac, :gi, :status,
-                                :staging, :pickLpn, :now, :now, :cutoff, :sc)""")
+                                :staging, :pickLpn, :now, :now, :cutoff, :sc, :transferTo, :note)""")
+                .param("transferTo", transferTo).param("note", note)
                 .param("cutoff", cutoff == null ? null : Timestamp.from(cutoff)).param("sc", shipComplete)
                 .param("id", id).param("t", TenantContext.tenantId()).param("site", site).param("doc", o.erpDocNo())
-                .param("type", o.orderType()).param("rev", o.revision()).param("src", envelope.sourceSystem())
+                .param("type", o.orderType()).param("rev", o.revision()).param("src", sourceSystem)
                 .param("shipTo", o.shipTo() == null ? null : json.writeValueAsString(o.shipTo()))
                 .param("scac", o.carrierScac())
                 .param("gi", o.plannedGoodsIssueUtc() == null ? null : Timestamp.from(o.plannedGoodsIssueUtc()))
@@ -138,7 +145,109 @@ public class OutboundService {
         if (!pooled) {
             allocateAndRelease(lockOrder(id), null);
         }
-        ack(ack, null, null);
+        return id;
+    }
+
+    // =====================================================================================================
+    // Transfers between sites started in the WMS (ADR-0023)
+    // =====================================================================================================
+
+    public record TransferLine(String ownerId, String itemNo, java.math.BigDecimal qty, String uom, String lotNo) {
+    }
+
+    public record TransferRequest(String toSiteId, String carrierScac, Instant plannedShipUtc, String note,
+                                  List<TransferLine> lines) {
+    }
+
+    /**
+     * A transfer to another site (main warehouse to a store, store to store) without an SAP stock transport order:
+     * an outbound order of type TRANSFER, released, picked, packed and shipped like any other. At shipment the
+     * receiving site gets an expected receipt (WMS_TRANSFER) with what left, lot by lot, and SAP gets a 303 stock
+     * transfer to the receiving plant; the receipt there posts 305.
+     */
+    @Transactional
+    public Map<String, Object> createTransfer(String siteId, TransferRequest r) {
+        String to = r.toSiteId() == null ? null : r.toSiteId().trim().toUpperCase();
+        if (to == null || to.isEmpty() || to.equals(siteId)) {
+            throw ApiException.badRequest("OUT_TRANSFER_INVALID", "toSiteId must be another site");
+        }
+        if (r.lines() == null || r.lines().isEmpty()) {
+            throw ApiException.badRequest("OUT_TRANSFER_INVALID", "A transfer needs lines");
+        }
+        long seq = jdbc.sql("select count(*) + 1 from outbound_order where site_id = :site and transfer_to_site is not null")
+                .param("site", siteId).query(Long.class).single();
+        String no = "TR-" + siteId + "-" + "%06d".formatted(seq);
+        List<OutboundOrder.Line> lines = new ArrayList<>();
+        int n = 0;
+        for (TransferLine l : r.lines()) {
+            if (l.ownerId() == null || l.itemNo() == null || l.qty() == null || l.qty().signum() <= 0 || l.uom() == null) {
+                throw ApiException.badRequest("OUT_TRANSFER_INVALID", "Each line needs ownerId, itemNo, a positive qty and uom");
+            }
+            com.astrawms.common.security.AccessScope.current().requireOwner(l.ownerId().trim().toUpperCase());
+            n += 10;
+            lines.add(new OutboundOrder.Line("%06d".formatted(n), l.ownerId().trim().toUpperCase(), l.itemNo().trim(),
+                    l.qty(), l.uom().trim().toUpperCase(), l.lotNo() == null || l.lotNo().isBlank() ? null : l.lotNo().trim()));
+        }
+        OutboundOrder order = new OutboundOrder(no, "TRANSFER", "CREATE", 1, no,
+                new OutboundOrder.ShipTo(to, "Site " + to, null, null),
+                r.carrierScac() == null || r.carrierScac().isBlank() ? null : r.carrierScac().trim().toUpperCase(),
+                r.plannedShipUtc(), lines, clock.instant());
+        create(siteId, order, "ASTRAWMS", to, r.note());
+        return detail(siteId, no);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> transfers(String siteId, String direction) {
+        boolean incoming = "IN".equalsIgnoreCase(direction);
+        return jdbc.sql("""
+                        select o.erp_doc_no, o.site_id as from_site, o.transfer_to_site as to_site, o.status, o.carrier_scac,
+                               o.planned_gi_utc, o.shipped_at, o.erp_document, o.created_at, o.note,
+                               (select count(*) from outbound_line l where l.order_id = o.id) as lines,
+                               (select coalesce(sum(l.qty_picked), 0) from outbound_line l where l.order_id = o.id) as qty_picked
+                        from outbound_order o
+                        where o.transfer_to_site is not null
+                          and (case when :incoming then o.transfer_to_site = :site else o.site_id = :site end)
+                        order by o.created_at desc limit 300""")
+                .param("incoming", incoming).param("site", siteId).query().listOfRows();
+    }
+
+    /** The receiving site's expected receipt for a shipped transfer: what left, per line and lot. */
+    private void publishTransferExpectation(String siteId, UUID orderId, String erpDocNo, Instant shippedAt,
+                                            List<InventoryClient.IssuedLine> issued) {
+        record T(String to, String scac) {
+        }
+        T t = jdbc.sql("select transfer_to_site, carrier_scac from outbound_order where id = :id").param("id", orderId)
+                .query((rs, n) -> new T(rs.getString(1), rs.getString(2))).single();
+        if (t.to() == null) {
+            return;
+        }
+        Map<String, String> owners = new HashMap<>();
+        jdbc.sql("select erp_line_ref, owner_id from outbound_line where order_id = :o").param("o", orderId)
+                .query((rs, n) -> owners.put(rs.getString(1), rs.getString(2))).list();
+        List<IntegrationContracts.ReceiptExpectation.Line> lines = new ArrayList<>();
+        for (InventoryClient.IssuedLine l : issued) {
+            if (l.qty().signum() <= 0) {
+                continue;
+            }
+            List<InventoryClient.LotQty> lots = l.lots() == null || l.lots().isEmpty()
+                    ? List.of(new InventoryClient.LotQty(null, l.qty())) : l.lots();
+            int k = 0;
+            for (InventoryClient.LotQty lot : lots) {
+                String ref = lots.size() == 1 ? l.orderLineRef() : l.orderLineRef() + "-" + (++k);
+                lines.add(new IntegrationContracts.ReceiptExpectation.Line(ref, owners.get(l.orderLineRef()), l.itemNo(),
+                        strip(lot.qty()), l.uom(), lot.lotNo() == null || lot.lotNo().isEmpty() ? null : lot.lotNo(), null,
+                        null, "AVAILABLE", null, null));
+            }
+        }
+        if (lines.isEmpty()) {
+            return;
+        }
+        String owner = lines.getFirst().ownerId();
+        outbox.append(new OutboxWriter.Message(IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS,
+                IntegrationContracts.ReceiptExpectation.TYPE, IntegrationContracts.ReceiptExpectation.VERSION, "ASTRAWMS",
+                t.to(), owner, t.to() + ":" + erpDocNo,
+                new IntegrationContracts.ReceiptExpectation(erpDocNo, "WMS_TRANSFER", "CREATE", 1, erpDocNo, null, null,
+                        siteId, t.scac(), shippedAt, null, null, null, null, lines, List.of(), shippedAt)));
     }
 
     private void replacePooled(EventEnvelope envelope, OutboundOrder o, Order cur) {
@@ -666,6 +775,7 @@ public class OutboundService {
                 .param("tracking", r == null ? null : r.trackingNo()).param("bol", r == null ? null : r.billOfLading())
                 .param("id", o.id()).update();
         publishConfirmation(siteId, o.id(), erpDocNo, txn, now, issued);
+        publishTransferExpectation(siteId, o.id(), erpDocNo, now, issued);
         return detail(siteId, erpDocNo);
     }
 
@@ -712,13 +822,14 @@ public class OutboundService {
                             .map(x -> new ShipmentConfirmation.LotSplit(x.lotNo(), x.qty())).toList(),
                     shipped == null || shipped.serials().isEmpty() ? null : shipped.serials(), shortReason));
         }
-        record Header(String scac, String tracking, String bol) {
+        record Header(String scac, String tracking, String bol, String transferTo) {
         }
-        Header h = jdbc.sql("select carrier_scac, tracking_no, bill_of_lading from outbound_order where id = :id")
-                .param("id", orderId).query((rs, n) -> new Header(rs.getString(1), rs.getString(2), rs.getString(3))).single();
+        Header h = jdbc.sql("select carrier_scac, tracking_no, bill_of_lading, transfer_to_site from outbound_order where id = :id")
+                .param("id", orderId).query((rs, n) -> new Header(rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getString(4))).single();
         outbox.append(new OutboxWriter.Message(OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS, ShipmentConfirmation.TYPE,
                 ShipmentConfirmation.VERSION, "ERP", siteId, null, siteId + ":" + erpDocNo,
-                new ShipmentConfirmation(txn, erpDocNo, shippedAt, h.scac(), h.tracking(), h.bol(), out)));
+                new ShipmentConfirmation(txn, erpDocNo, shippedAt, h.scac(), h.tracking(), h.bol(), out, h.transferTo())));
     }
 
     /** Terminal ERP result (INT-011). A failed goods issue leaves the order physically shipped (SHP-005). */
@@ -861,7 +972,7 @@ public class OutboundService {
                         select o.id, o.erp_doc_no, o.order_type, o.revision, o.status, o.carrier_scac, o.staging_location,
                                o.pick_lpn, o.shipment_txn_id, o.tracking_no, o.erp_document, o.erp_error_class,
                                o.erp_error_text, w.wave_no, o.priority, o.planned_gi_utc, o.ship_to ->> 'name' as ship_to_name,
-                               o.load_id is not null as loaded, o.cutoff_at, o.ship_complete
+                               o.load_id is not null as loaded, o.cutoff_at, o.ship_complete, o.transfer_to_site, o.note
                         from outbound_order o left join outbound_wave w on w.id = o.wave_id
                         where o.site_id = :site and o.erp_doc_no = :doc""")
                 .param("site", siteId).param("doc", erpDocNo).query().listOfRows().stream().findFirst()

@@ -842,14 +842,50 @@ public class TaskService {
         // Only work in the operator's owner and zone scope (§G.5.1); a task's zones are those of its from/to location.
         // Only the task types of the operator's roles (ADR-0019). Within a priority, work follows the travel path,
         // so replenishments and picks of the same area interleave.
+        Optional<UUID> next = claimable(siteId, user, 1).stream().findFirst();
+        next.ifPresent(id -> assign(id, user));
+        return next.map(id -> view(siteId, id));
+    }
+
+    /**
+     * Offline work (ADR-0023): the operator's assigned tasks plus up to {@code count} more, chosen exactly as
+     * {@link #next} would, all assigned to them, so a handheld can work through them without network and send the
+     * confirmations when it is back online.
+     */
+    @Transactional
+    public List<TaskView> claimBatch(String siteId, int count) {
+        String user = TenantContext.require().userId();
+        int wanted = Math.max(1, Math.min(count, 25));
+        List<UUID> held = jdbc.sql("""
+                        select id from task where site_id = :site and status = 'ASSIGNED' and assigned_to = :user
+                        order by assigned_at""")
+                .param("site", siteId).param("user", user).query(UUID.class).list();
+        List<UUID> all = new ArrayList<>(held);
+        if (held.size() < wanted) {
+            for (UUID id : claimable(siteId, user, wanted - held.size())) {
+                assign(id, user);
+                all.add(id);
+            }
+        }
+        return all.stream().map(id -> view(siteId, id)).toList();
+    }
+
+    private void assign(UUID id, String user) {
+        jdbc.sql("update task set status = 'ASSIGNED', assigned_to = :user, assigned_at = :now, updated_at = :now where id = :id")
+                .param("user", user).param("now", Timestamp.from(clock.instant())).param("id", id).update();
+        event(id, "ASSIGNED", null);
+    }
+
+    /** Released tasks this operator may take, best first; locked so concurrent claims never share one. */
+    private List<UUID> claimable(String siteId, String user, int limit) {
         List<String> types = taskTypesOfCurrentUser();
         if (types.isEmpty()) {
-            return Optional.empty();
+            return List.of();
         }
         AccessScope scope = AccessScope.current();
         // ADR-0021: the skill a task type requires and the equipment its zones require (labor policy).
         String[] profile = labor.profileOfCurrentUser();
-        Optional<UUID> next = jdbc.sql("""
+        return jdbc.sql("""
                         select t.id from task t
                         left join ref_location f on f.site_id = t.site_id and f.location_id = t.from_location
                         where t.site_id = :site and t.status = 'RELEASED' and t.task_type in (:types)
@@ -868,18 +904,12 @@ public class TaskService {
                                  on a.site_id = l.site_id and a.zone_id = l.zone_id and a.enabled
                                  where l.site_id = t.site_id and l.location_id = t.from_location))
                         order by t.priority desc, f.pick_seq nulls last, t.from_location, t.created_at
-                        limit 1 for update of t skip locked""")
-                .param("equipment", profile[0]).param("skills", profile[1])
+                        limit :limit for update of t skip locked""")
+                .param("equipment", profile[0]).param("skills", profile[1]).param("limit", limit)
                 .param("site", siteId).param("user", user).param("types", types)
                 .param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("zonesAll", scope.zonesAll()).param("zones", scope.zoneList())
-                .query(UUID.class).optional();
-        next.ifPresent(id -> {
-            jdbc.sql("update task set status = 'ASSIGNED', assigned_to = :user, assigned_at = :now, updated_at = :now where id = :id")
-                    .param("user", user).param("now", Timestamp.from(clock.instant())).param("id", id).update();
-            event(id, "ASSIGNED", null);
-        });
-        return next.map(id -> view(siteId, id));
+                .query(UUID.class).list();
     }
 
     /**

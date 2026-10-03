@@ -32,7 +32,10 @@ async function start() {
     window.history.replaceState(null, '', typeof user.state === 'string' ? user.state : '/')
   } else {
     user = await manager.getUser()
-    if (!user || user.expired) {
+    if (user && user.expired && navigator.onLine === false) {
+      // ADR-0023: offline with an expired sign-in: work goes on (commands wait on the device); sign-in is renewed
+      // when the network is back.
+    } else if (!user || user.expired) {
       await manager.signinRedirect({ state: window.location.pathname + window.location.search })
       return
     }
@@ -62,6 +65,11 @@ async function start() {
       </AuthProvider>
     </StrictMode>,
   )
+}
+
+// ADR-0023: the app shell stays on the device, so the RF screens open without network (production builds only).
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  navigator.serviceWorker.register('/sw.js').catch(() => undefined)
 }
 
 start().catch((e: unknown) => fatal(e instanceof Error ? e.message : String(e)))

@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { get, newIdempotencyKey, post, type Row } from '../api'
+import { get, newIdempotencyKey, type Row } from '../api'
 import { parseGs1 } from '../gs1'
+import { isNetworkError, isQueued, rfPost } from '../offline'
+import { OfflineBar } from './OfflineBar'
 import { Badge, ErrorBox, Field, Success, fmtQty, useAction, useSite } from '../ui'
 
 /**
@@ -18,20 +20,42 @@ export default function RfIssue() {
   const [mode, setMode] = useState<'issue' | 'return'>('issue')
   const [f, setF] = useState({ location: '', lpn: '', item: '', lot: '', qty: '' })
   const [key, setKey] = useState(() => newIdempotencyKey('mi'))
+  // ADR-0023: issue documents opened online are kept on the device, so issuing can go on without network.
+  const cacheKey = (no: string) => `astra.offline.issue.${site}.${no}`
   const load = useAction(async (no: string) => {
-    const d = await get<Row>(`${base}/${encodeURIComponent(no.trim().toUpperCase())}`)
+    const id = no.trim().toUpperCase()
+    let d: Row
+    try {
+      d = await get<Row>(`${base}/${encodeURIComponent(id)}`)
+      try { window.localStorage.setItem(cacheKey(id), JSON.stringify(d)) } catch { /* storage unavailable */ }
+    } catch (e) {
+      const cached = (() => { try { return window.localStorage.getItem(cacheKey(id)) } catch { return null } })()
+      if (!isNetworkError(e) || !cached) throw e
+      d = JSON.parse(cached) as Row
+    }
     setIssue(d)
     setLine(undefined)
     return d
   })
-  const confirm = useAction(() => post<Row>(`${base}/${String(issue?.issue_no)}/lines/${String(line?.line_no)}/${mode}`, {
+  const confirm = useAction(() => rfPost<Row>(`${base}/${String(issue?.issue_no)}/lines/${String(line?.line_no)}/${mode}`, {
     locationId: f.location.trim().toUpperCase(), lpnId: f.lpn.trim() || null, itemScan: f.item.trim(),
     lotNo: f.lot.trim() || null, qty: Number(f.qty),
-  }, { idempotencyKey: key }))
+  }, `${mode} ${String(issue?.issue_no)}/${String(line?.line_no)}`, key))
   const open = (l: Row) => Number(mode === 'issue' ? Number(l.qty_requested) - Number(l.qty_issued) : Number(l.qty_issued) - Number(l.qty_returned))
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     const d = await confirm.run()
+    if (d && isQueued(d) && issue && line) {
+      // Kept on the device: count it locally so the screen shows what is left.
+      const qty = Number(f.qty)
+      const field = mode === 'issue' ? 'qty_issued' : 'qty_returned'
+      const lines = (issue.lines as Row[]).map((l) => (l.line_no === line.line_no ? { ...l, [field]: Number(l[field]) + qty } : l))
+      setIssue({ ...issue, lines })
+      setKey(newIdempotencyKey('mi'))
+      setF({ ...f, item: '', lot: '', qty: '', lpn: '' })
+      setLine(undefined)
+      return
+    }
     if (d) {
       setIssue(d)
       setKey(newIdempotencyKey('mi'))
@@ -53,6 +77,7 @@ export default function RfIssue() {
         <h1>Material issue · {site}</h1>
         <Link to="/rf">Tasks</Link>
       </header>
+      <OfflineBar site={site} />
       <form className="card task" onSubmit={async (e) => { e.preventDefault(); await load.run(docInput) }}>
         <Field label="Scan issue document"><input autoFocus value={docInput} onChange={(e) => setDocInput(e.target.value)} required /></Field>
         <ErrorBox error={load.error} />
@@ -100,7 +125,8 @@ export default function RfIssue() {
             <Field label={`Qty (${String(line.uom)})`}><input type="number" min={0} step="any" inputMode="decimal" value={f.qty} onChange={(e) => setF({ ...f, qty: e.target.value })} required size={5} /></Field>
           </div>
           <ErrorBox error={confirm.error} />
-          <Success>{confirm.result && `${mode === 'issue' ? 'Issued' : 'Returned'}; posted to SAP`}</Success>
+          <Success>{confirm.result && (isQueued(confirm.result) ? 'Saved on this device; it is sent when the network is back'
+            : `${mode === 'issue' ? 'Issued' : 'Returned'}; posted to SAP`)}</Success>
           <div className="actions"><button className="primary big" disabled={confirm.busy}>Confirm {mode}</button></div>
         </form>
       )}

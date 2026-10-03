@@ -169,3 +169,9 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
   .label-sheet { position: absolute; left: 0; top: 0; display: block; }
   .print-label { border: none; break-after: page; }
 }
+
+/* Offline work on RF (ADR-0023) */
+.offline-bar { border: 1px solid var(--warn, #b54708); background: #fffaeb; color: #7a2e0e; padding: 8px 12px;
+  border-radius: 6px; margin: 8px 0; }
+.offline-bar.offline { background: #fef3f2; border-color: var(--danger, #b42318); color: #7a271a; }
+.offline-bar ul { margin: 6px 0 0 18px; padding: 0; }

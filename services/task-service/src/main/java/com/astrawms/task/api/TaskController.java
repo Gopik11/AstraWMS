@@ -125,6 +125,13 @@ public class TaskController {
         return tasks.closeReceive(siteId, taskId, b == null ? null : b.shortReasons());
     }
 
+    /** Offline work (ADR-0023): the operator's tasks plus up to {@code count} more, assigned to them for the device. */
+    @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
+    @PostMapping("/claim-batch")
+    public List<TaskView> claimBatch(@PathVariable String siteId, @RequestParam(defaultValue = "10") int count) {
+        return tasks.claimBatch(siteId, count);
+    }
+
     @PreAuthorize("hasAnyRole('RECEIVER','PICKER','INV_ANALYST','SUPERVISOR')")
     @PostMapping("/{taskId}/release")
     public TaskView release(@PathVariable String siteId, @PathVariable UUID taskId) {

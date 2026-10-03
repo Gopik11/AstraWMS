@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react'
-import { api, get, post, type Row, type Task } from '../api'
+import { api, get, type Row, type Task } from '../api'
 import { parseGs1 } from '../gs1'
+import { dropOfflineTask, isNetworkError, offlineTasks, queue, rfPost, saveOfflineTasks, sync } from '../offline'
+import { OfflineBar } from './OfflineBar'
 import { Badge, ErrorBox, Field, Success, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 /**
@@ -13,13 +15,34 @@ export default function RfWork() {
   const site = useSite()
   const [task, setTask] = useState<Task | null>()
   const [done, setDone] = useState<string>()
-  const next = useAction(async () => {
-    const t = await api<Task | undefined>('POST', `/api/v1/sites/${site}/tasks/next`)
+  // ADR-0023: without network (or while scans still wait to be sent) work continues on the downloaded tasks.
+  const fromDevice = () => {
+    const t = offlineTasks(site)[0]
     setTask(t ?? null)
     return t
+  }
+  const next = useAction(async () => {
+    if (queue().some((c) => c.status === 'PENDING')) {
+      await sync()
+      if (queue().some((c) => c.status === 'PENDING')) return fromDevice()
+    }
+    try {
+      const t = await api<Task | undefined>('POST', `/api/v1/sites/${site}/tasks/next`)
+      setTask(t ?? null)
+      return t
+    } catch (e) {
+      if (isNetworkError(e)) return fromDevice()
+      throw e
+    }
+  })
+  const download = useAction(async () => {
+    const tasks = await api<Task[]>('POST', `/api/v1/sites/${site}/tasks/claim-batch?count=10`)
+    saveOfflineTasks(site, tasks)
+    return tasks
   })
 
   const finished = (message: string) => {
+    if (task) dropOfflineTask(site, task.id)
     setDone(message)
     setTask(undefined)
     void next.run()
@@ -33,8 +56,14 @@ export default function RfWork() {
           {task ? 'Refresh' : 'Next task'}
         </button>
       </header>
+      <OfflineBar site={site} />
       <Success>{done}</Success>
-      <ErrorBox error={next.error} />
+      <ErrorBox error={next.error ?? download.error} />
+      <div className="row no-print">
+        <button disabled={download.busy} onClick={() => void download.run()}
+                title="Takes up to 10 tasks onto this device, to go on working without network">Download my work</button>
+        {download.result && <span className="muted">{download.result.length} task(s) on this device</span>}
+      </div>
       {task === null && <div className="card muted">No work for you right now.</div>}
       {task && task.taskType === 'RECEIVE' && <Receive task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'PUTAWAY' && <Putaway task={task} site={site} onDone={finished} />}
@@ -68,10 +97,10 @@ function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m:
   const [reason, setReason] = useState('LOCATION_BLOCKED')
   const [overrideReason, setOverrideReason] = useState('')
   const overriding = location.trim().toUpperCase() !== (task.targetLocation ?? '').toUpperCase()
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/confirm`,
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/confirm`,
     { lpnId: lpn.trim(), locationId: location.trim().toUpperCase(), checkDigit: checkDigit.trim(),
       overrideReason: overriding ? overrideReason : null }))
-  const exception = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/exception`, { reason }))
+  const exception = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/exception`, { reason }))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -172,7 +201,7 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
       + `${d.count !== undefined ? ` · qty ${d.count}` : ''}${d.sscc ? ` · SSCC ${d.sscc}` : ''}`)
     return true
   }
-  const scan = useAction(() => post<{ result: Row }>(`/api/v1/sites/${site}/tasks/${task.id}/receive`, {
+  const scan = useAction(() => tpost<{ result: Row }>(`/api/v1/sites/${site}/tasks/${task.id}/receive`, {
     scanId, docNo: f.doc.trim(), itemNo: parseGs1(f.item) ? f.item.trim() : f.item.trim().toUpperCase(), ownerId: f.owner.trim() || null, qty: Number(f.qty),
     uom: f.uom.trim().toUpperCase(), lotNo: f.lot.trim() || null, expiryDate: f.expiry || null,
     serials: f.serials.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean), lpnId: f.lpn.trim() || null,
@@ -181,9 +210,9 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
     returnReason: rma && f.reason ? f.reason : null,
   }))
   const short = lines.filter((l) => l.qtyReceived < l.qtyExpected)
-  const finish = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/receive/close`,
+  const finish = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/receive/close`,
     { shortReasons: rma ? {} : reasons }))
-  const handBack = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/release`))
+  const handBack = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/release`))
   const [scansDone, setScansDone] = useState(task.scans ?? 0)
 
   const submit = async (e: FormEvent) => {
@@ -303,7 +332,7 @@ function Pick({ task, site, onDone }: { task: Task; site: string; onDone: (m: st
   const [shortReason, setShortReason] = useState('')
   const [shortAction, setShortAction] = useState('REALLOCATE')
   const short = qty !== '' && Number(qty) < Number(task.qty)
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/pick`, {
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/pick`, {
     checkDigit: checkDigit.trim(),
     item: item.trim(),
     qty: Number(qty),
@@ -363,7 +392,7 @@ function Pick({ task, site, onDone }: { task: Task; site: string; onDone: (m: st
 
 function Return({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [checkDigit, setCheckDigit] = useState('')
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/return`, { checkDigit: checkDigit.trim() }))
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/return`, { checkDigit: checkDigit.trim() }))
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (await confirm.run()) {
@@ -395,7 +424,7 @@ function Count({ task, site, onDone }: { task: Task; site: string; onDone: (m: s
   const [checkDigit, setCheckDigit] = useState('')
   const [lines, setLines] = useState<CountedLine[]>([{ ownerId: '', itemNo: '', lotNo: '', lpnId: '', qty: '' }])
   const filled = lines.filter((l) => l.itemNo.trim() && l.qty !== '')
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/count`, {
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/count`, {
     checkDigit: checkDigit.trim(),
     lines: filled.map((l) => ({ ownerId: l.ownerId.trim(), itemNo: l.itemNo.trim(), lotNo: l.lotNo.trim() || null,
       lpnId: l.lpnId.trim() || null, qty: Number(l.qty) })),
@@ -440,7 +469,7 @@ function Count({ task, site, onDone }: { task: Task; site: string; onDone: (m: s
 /** Move (ADR-0021, e.g. a reslot): take the stock at the source and drop it at the target location. */
 function Move({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [checkDigit, setCheckDigit] = useState('')
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/move`, { checkDigit: checkDigit.trim() }))
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/move`, { checkDigit: checkDigit.trim() }))
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (await confirm.run()) {
@@ -468,7 +497,7 @@ function Move({ task, site, onDone }: { task: Task; site: string; onDone: (m: st
 /** Replenishment (§7): take the reserved stock from reserve and drop it at the forward pick location. */
 function Replen({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [checkDigit, setCheckDigit] = useState('')
-  const confirm = useAction(() => post(`/api/v1/sites/${site}/tasks/${task.id}/replenish`, { checkDigit: checkDigit.trim() }))
+  const confirm = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/replenish`, { checkDigit: checkDigit.trim() }))
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (await confirm.run()) {
@@ -490,4 +519,10 @@ function Replen({ task, site, onDone }: { task: Task; site: string; onDone: (m: 
       <div className="actions"><button className="primary big" disabled={confirm.busy}>Confirm replenishment</button></div>
     </form>
   )
+}
+
+/** RF commands go through the offline queue (ADR-0023): sent at once, or kept on the device until the network is back. */
+function tpost<T>(path: string, body?: unknown): Promise<T> {
+  const parts = path.split('/')
+  return rfPost<T>(path, body ?? {}, `${parts[parts.length - 1]} ${parts[parts.length - 2].slice(0, 8)}`)
 }

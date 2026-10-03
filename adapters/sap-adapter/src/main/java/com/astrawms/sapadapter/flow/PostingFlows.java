@@ -54,6 +54,28 @@ public class PostingFlows {
     public void confirmReceipt(EventEnvelope envelope, ReceiptConfirmation confirmation) {
         ErpPostingResult result;
         try {
+            if (confirmation.transferFromSiteId() != null) {   // ADR-0023: 305 at the receiving plant
+                DelvryMapper.Plant to = plant(envelope.siteId());
+                DelvryMapper.Plant from = plant(confirmation.transferFromSiteId());
+                List<BapiMapper.TransferLine> lines = new ArrayList<>();
+                for (ReceiptConfirmation.Line l : confirmation.lines()) {
+                    if (l.lotSplits() == null || l.lotSplits().isEmpty()) {
+                        if (l.qtyReceived().signum() > 0) {
+                            lines.add(new BapiMapper.TransferLine(l.itemNo(), null, l.qtyReceived(), l.uom(), l.serials()));
+                        }
+                    } else {
+                        l.lotSplits().forEach(s -> lines.add(new BapiMapper.TransferLine(l.itemNo(), s.lotNo(), s.qty(),
+                                l.uom(), null)));
+                    }
+                }
+                Bapi.GoodsmvtCreate call = BapiMapper.transferMovement(confirmation.wmsTxnId(), "305", to.werks(),
+                        from.werks(), confirmation.receiptCompletedUtc().atZone(to.timeZone()).toLocalDate(),
+                        "WMS TRANSFER " + confirmation.erpDocNo(), lines);
+                result = toResult(confirmation.wmsTxnId(), ReceiptConfirmation.TYPE, confirmation.erpDocNo(),
+                        gateway.createGoodsMovement(call));
+                publish(envelope, result);
+                return;
+            }
             Bapi.InbDeliveryConfirmDec call = BapiMapper.confirmInbound(confirmation);
             result = toResult(confirmation.wmsTxnId(), ReceiptConfirmation.TYPE, confirmation.erpDocNo(),
                     gateway.confirmInboundDelivery(call));
@@ -67,6 +89,28 @@ public class PostingFlows {
     public void confirmShipment(EventEnvelope envelope, OutboundContracts.ShipmentConfirmation confirmation) {
         ErpPostingResult result;
         try {
+            if (confirmation.transferToSiteId() != null) {      // ADR-0023: 303 from the issuing plant
+                DelvryMapper.Plant from = plant(envelope.siteId());
+                DelvryMapper.Plant to = plant(confirmation.transferToSiteId());
+                List<BapiMapper.TransferLine> lines = new ArrayList<>();
+                for (OutboundContracts.ShipmentConfirmation.Line l : confirmation.lines()) {
+                    if (l.lotSplits() == null || l.lotSplits().isEmpty()) {
+                        if (l.qtyShipped().signum() > 0) {
+                            lines.add(new BapiMapper.TransferLine(l.itemNo(), null, l.qtyShipped(), l.uom(), l.serials()));
+                        }
+                    } else {
+                        l.lotSplits().forEach(s -> lines.add(new BapiMapper.TransferLine(l.itemNo(), s.lotNo(), s.qty(),
+                                l.uom(), null)));
+                    }
+                }
+                Bapi.GoodsmvtCreate call = BapiMapper.transferMovement(confirmation.wmsTxnId(), "303", from.werks(),
+                        to.werks(), confirmation.shipDateTimeUtc().atZone(from.timeZone()).toLocalDate(),
+                        "WMS TRANSFER " + confirmation.erpDocNo(), lines);
+                result = toResult(confirmation.wmsTxnId(), OutboundContracts.ShipmentConfirmation.TYPE,
+                        confirmation.erpDocNo(), gateway.createGoodsMovement(call));
+                publish(envelope, result);
+                return;
+            }
             Bapi.OutbDeliveryConfirmDec call = BapiMapper.confirmOutbound(confirmation);
             result = toResult(confirmation.wmsTxnId(), OutboundContracts.ShipmentConfirmation.TYPE, confirmation.erpDocNo(),
                     gateway.confirmOutboundDelivery(call));
@@ -75,6 +119,11 @@ public class PostingFlows {
                     confirmation.erpDocNo(), e);
         }
         publish(envelope, result);
+    }
+
+    private DelvryMapper.Plant plant(String siteId) {
+        return sites.bySite(siteId).orElseThrow(() -> new MappingException("SITE_NOT_MAPPED",
+                "Site " + siteId + " has no SAP plant"));
     }
 
     @Transactional

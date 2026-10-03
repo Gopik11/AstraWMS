@@ -112,12 +112,13 @@ public final class Bapi {
                                @JsonProperty("ENTRY_QNT") BigDecimal entryQnt, @JsonProperty("ENTRY_UOM") String entryUom,
                                @JsonProperty("MOVE_STLOC") String moveStloc, @JsonProperty("ITEM_TEXT") String itemText,
                                @JsonProperty("COSTCENTER") String costCenter, @JsonProperty("WBS_ELEM") String wbsElem,
-                               @JsonProperty("ORDERID") String orderId, @JsonProperty("GR_RCPT") String grRcpt) {
+                               @JsonProperty("ORDERID") String orderId, @JsonProperty("GR_RCPT") String grRcpt,
+                               @JsonProperty("MOVE_PLANT") String movePlant) {
 
         public GoodsmvtItem(String material, String plant, String stgeLoc, String batch, String moveType, String stckType,
                             BigDecimal entryQnt, String entryUom, String moveStloc, String itemText) {
             this(material, plant, stgeLoc, batch, moveType, stckType, entryQnt, entryUom, moveStloc, itemText, null, null,
-                    null, null);
+                    null, null, null);
         }
     }
 

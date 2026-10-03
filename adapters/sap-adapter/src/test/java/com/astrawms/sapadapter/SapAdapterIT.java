@@ -19,6 +19,7 @@ import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.test.AstraContainers;
 import com.astrawms.test.AstraMockMvc;
 import com.astrawms.test.TestTokens;
+import com.astrawms.common.contracts.OutboundContracts;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -130,6 +131,30 @@ class SapAdapterIT {
         assertThat(second.get("duplicate").asBoolean()).isTrue();
         assertThat(second.get("erpDocument").asString()).isEqualTo(document);
         assertThat(documents(txn)).isEqualTo(1);
+    }
+
+    @Test
+    void wmsTransferPostsTwoStepStockTransfer303Then305_ADR0023() throws Exception {
+        call(put("/api/v1/sap/site-map/2000"), """
+                {"siteId":"ST01","timeZone":"America/Chicago","defaultOwner":"ACME"}""").andExpect(status().isNoContent());
+        String out = "W1M3S5G8745800T1";
+        send(OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS, OutboundContracts.ShipmentConfirmation.TYPE, "DC1:TR-DC1-000001",
+                "ASTRAWMS", new OutboundContracts.ShipmentConfirmation(out, "TR-DC1-000001", Instant.now(), null, null, null,
+                        List.of(new OutboundContracts.ShipmentConfirmation.Line("000010", "SKU-1", new BigDecimal("3"), "EA",
+                                List.of(new OutboundContracts.ShipmentConfirmation.LotSplit("L1", new BigDecimal("2")),
+                                        new OutboundContracts.ShipmentConfirmation.LotSplit("L2", BigDecimal.ONE)),
+                                null, null)), "ST01"));
+        assertThat(awaitResult(out, 1).getFirst().get("success").asBoolean()).isTrue();
+        assertThat(movement(out)).isEqualTo("04:303:2");                     // one item per lot
+        String in = "W1M3S5G8745800T2";
+        ReceiptConfirmation received = new ReceiptConfirmation(in, "TR-DC1-000001", false, null, Instant.now(), true,
+                List.of(new ReceiptConfirmation.Line("000010", "SKU-1", new BigDecimal("3"), "EA", List.of(), null,
+                        "AVAILABLE", null)), List.of(), "DC1");
+        send(IntegrationContracts.TOPIC_RECEIPT_CONFIRMATIONS, ReceiptConfirmation.TYPE, "ST01:TR-DC1-000001", "ASTRAWMS",
+                received);
+        // The receiving site's envelope says DC1 in this helper; the 305 is posted at the envelope's plant.
+        assertThat(awaitResult(in, 1).getFirst().get("success").asBoolean()).isTrue();
+        assertThat(movement(in)).isEqualTo("04:305:1");
     }
 
     @Test
