@@ -1,6 +1,7 @@
 package com.astrawms.masterdata;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -31,6 +32,7 @@ import org.springframework.web.context.WebApplicationContext;
 import com.astrawms.test.AstraContainers;
 import com.astrawms.test.AstraMockMvc;
 import com.astrawms.test.TestTokens;
+import com.jayway.jsonpath.JsonPath;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -203,6 +205,61 @@ class MasterDataIT {
                 .andExpect(jsonPath("$.code", is("FORBIDDEN")));
         mvc.perform(get("/api/v1/items/ACME").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
                 .andExpect(status().isOk());
+    }
+
+    // ------------------------------------------------------------------ ADR-0022 labels
+
+    @Test
+    void locationItemAndLpnLabelsAreZplAndGoToTheSitePrinter() throws Exception {
+        call(post("/api/v1/sites/DC1/zones/STOR/locations/generate"), """
+                {"aisles":["A"],"bayFrom":1,"bayTo":2,"levels":["1"],"positionFrom":1,"positionTo":1,
+                 "pattern":"{aisle}-{bay}-{level}{position}","locationType":"RACK"}""").andExpect(status().isOk());
+        String checkDigit = JsonPath.read(mvc.perform(get("/api/v1/sites/DC1/locations/A-01-101")
+                .with(TestTokens.as(tenant, "md-admin", TestTokens.ALL_ROLES))).andReturn().getResponse().getContentAsString(),
+                "$.checkDigit");
+        call(post("/api/v1/sites/DC1/labels/locations"), "{\"zoneId\":\"STOR\"}")
+                .andExpect(jsonPath("$.count", is(2)))
+                .andExpect(jsonPath("$.labels[0].barcode", is("A-01-101")))
+                .andExpect(jsonPath("$.labels[0].lines[1]", is("Check " + checkDigit)))
+                .andExpect(jsonPath("$.zpl", containsString("^BCN,150,N,N,N^FDA-01-101^FS")));
+
+        call(put("/api/v1/items/ACME/SKU-1"), ITEM.formatted("10614141000415")).andExpect(status().isOk());
+        call(post("/api/v1/sites/DC1/labels/items"), """
+                {"ownerId":"ACME","itemNos":["SKU-1"],"uom":"CS","copies":2}""")
+                .andExpect(jsonPath("$.count", is(2)))
+                .andExpect(jsonPath("$.labels[0].symbology", is("GS1-128")))
+                .andExpect(jsonPath("$.labels[0].barcode", is("(01)10614141000415")));
+        call(post("/api/v1/sites/DC1/labels/items"), """
+                {"ownerId":"ACME","itemNos":["SKU-1"]}""")
+                .andExpect(jsonPath("$.labels[0].symbology", is("CODE128")))          // the base unit has no GTIN
+                .andExpect(jsonPath("$.labels[0].barcode", is("SKU-1")));
+
+        call(post("/api/v1/sites/DC1/labels/lpns"), "{\"count\":2}")
+                .andExpect(jsonPath("$.labels[0].barcode", is("LDC1000000001")))
+                .andExpect(jsonPath("$.labels[1].barcode", is("LDC1000000002")));
+        call(post("/api/v1/sites/DC1/labels/lpns"), "{\"count\":1}")
+                .andExpect(jsonPath("$.labels[0].barcode", is("LDC1000000003")));       // never reused
+
+        // A network printer on its raw port receives the ZPL.
+        call(put("/api/v1/sites/DC1/labels/printers/p1"), "{\"host\":\"127.0.0.1\",\"port\":5432}")
+                .andExpect(jsonPath("$.code", is("MD_PRINTER_INVALID")));               // not a print port
+        try (java.net.ServerSocket printer = new java.net.ServerSocket(9107)) {
+            java.util.concurrent.CompletableFuture<String> received = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try (java.net.Socket c = printer.accept()) {
+                    return new String(c.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            });
+            call(put("/api/v1/sites/DC1/labels/printers/dock-zebra"), """
+                    {"host":"127.0.0.1","port":9107,"purpose":"LPN"}""").andExpect(jsonPath("$[0].name", is("DOCK-ZEBRA")));
+            call(post("/api/v1/sites/DC1/labels/lpns"), "{\"count\":1,\"printer\":\"DEFAULT\"}")
+                    .andExpect(jsonPath("$.printedOn", is("DOCK-ZEBRA")));
+            assertThat(received.get(5, java.util.concurrent.TimeUnit.SECONDS)).contains("^XA", "LDC1000000004", "^XZ");
+        }
+        mvc.perform(post("/api/v1/sites/DC1/labels/lpns").with(TestTokens.as(tenant, "pete", Roles.PICKER))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isForbidden());
     }
 
     private ResultActions call(MockHttpServletRequestBuilder request, String body) throws Exception {

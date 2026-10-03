@@ -152,3 +152,20 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
 .tile-late .tile-n { color: var(--danger, #b42318); }
 .text-late { color: var(--danger, #b42318); font-weight: 600; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+
+/* Labels (ADR-0022): 4 x 2 in labels, one per page when printed from the browser */
+.label-sheet { display: flex; flex-wrap: wrap; gap: 8px; }
+.print-label { width: 4in; height: 2in; box-sizing: border-box; padding: 0.08in 0.12in; border: 1px dashed #999;
+  background: #fff; color: #000; display: flex; flex-direction: column; overflow: hidden; break-inside: avoid; }
+.print-label-title { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.print-label-bars { height: 0.7in; margin: 4px 0 2px; }
+.print-label-bars svg { width: 100%; height: 100%; }
+.print-label-code { font-family: monospace; font-size: 13px; }
+.print-label-line { font-size: 14px; }
+@media print {
+  @page { size: 4in 2in; margin: 0; }
+  body * { visibility: hidden; }
+  .label-sheet, .label-sheet * { visibility: visible; }
+  .label-sheet { position: absolute; left: 0; top: 0; display: block; }
+  .print-label { border: none; break-after: page; }
+}

@@ -1,31 +1,32 @@
-import { useState, type ReactNode } from 'react'
+import { Suspense, lazy, useState, type ReactNode } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth, type Role } from './auth'
 import { useSiteContext } from './ui'
 import Home from './pages/Home'
 import RfWork from './pages/RfWork'
-import Receipts from './pages/Receipts'
-import ReceiptDetail from './pages/ReceiptDetail'
-import Returns from './pages/Returns'
-import Orders from './pages/Orders'
-import OrderDetail from './pages/OrderDetail'
-import Waves from './pages/Waves'
-import PackStation from './pages/PackStation'
-import Loads from './pages/Loads'
-import Inventory from './pages/Inventory'
-import Adjust from './pages/Adjust'
-import Counts from './pages/Counts'
-import Replenishment from './pages/Replenishment'
-import Slotting from './pages/Slotting'
-import Labor from './pages/Labor'
-import Yard from './pages/Yard'
-import Billing from './pages/Billing'
-import MaterialIssues from './pages/MaterialIssues'
-import RfIssue from './pages/RfIssue'
-import Tasks from './pages/Tasks'
-import MasterData from './pages/MasterData'
-import ErpSimulator from './pages/ErpSimulator'
-import Operations from './pages/Operations'
+const Receipts = lazy(() => import('./pages/Receipts'))
+const ReceiptDetail = lazy(() => import('./pages/ReceiptDetail'))
+const Returns = lazy(() => import('./pages/Returns'))
+const Orders = lazy(() => import('./pages/Orders'))
+const OrderDetail = lazy(() => import('./pages/OrderDetail'))
+const Waves = lazy(() => import('./pages/Waves'))
+const PackStation = lazy(() => import('./pages/PackStation'))
+const Loads = lazy(() => import('./pages/Loads'))
+const Inventory = lazy(() => import('./pages/Inventory'))
+const Adjust = lazy(() => import('./pages/Adjust'))
+const Counts = lazy(() => import('./pages/Counts'))
+const Replenishment = lazy(() => import('./pages/Replenishment'))
+const Slotting = lazy(() => import('./pages/Slotting'))
+const Labor = lazy(() => import('./pages/Labor'))
+const Yard = lazy(() => import('./pages/Yard'))
+const Billing = lazy(() => import('./pages/Billing'))
+const MaterialIssues = lazy(() => import('./pages/MaterialIssues'))
+const RfIssue = lazy(() => import('./pages/RfIssue'))
+const LabelsPage = lazy(() => import('./pages/Labels'))
+const Tasks = lazy(() => import('./pages/Tasks'))
+const MasterData = lazy(() => import('./pages/MasterData'))
+const ErpSimulator = lazy(() => import('./pages/ErpSimulator'))
+const Operations = lazy(() => import('./pages/Operations'))
 
 interface NavItem {
   to: string
@@ -59,6 +60,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
       { to: '/billing', label: 'Billing', roles: ['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR'] },
+      { to: '/labels', label: 'Labels', roles: ['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER'] },
       { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'] },
@@ -122,10 +124,12 @@ export default function App({ environment }: { environment?: string }) {
         })}
       </nav>
       <main className="content">
+        <Suspense fallback={<p className="muted">Loading…</p>}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
           <Route path="/rf/issue" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR']}><RfIssue /></Guard>} />
+          <Route path="/labels" element={<Guard roles={['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER']}><LabelsPage /></Guard>} />
           <Route path="/material-issues" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN']}><MaterialIssues /></Guard>} />
           <Route path="/slotting" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST']}><Slotting /></Guard>} />
           <Route path="/yard" element={<Guard roles={['SUPERVISOR', 'RECEIVER']}><Yard /></Guard>} />
@@ -150,6 +154,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/auth/callback" element={<Navigate to="/" replace />} />
           <Route path="*" element={<div className="alert error">Page not found</div>} />
         </Routes>
+        </Suspense>
       </main>
     </div>
   )
