@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { api, get, post, type Row, type Task } from '../api'
+import { parseGs1 } from '../gs1'
 import { Badge, ErrorBox, Field, Success, fmtQty, useAction, useLoad, useSite } from '../ui'
 
 /**
@@ -154,8 +155,25 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
     const l = expected.find((x) => x.itemNo === item)
     setF({ ...f, item, uom: l?.uom ?? f.uom })
   }
+  // ADR-0022: one GS1-128 scan fills item (its GTIN), lot, expiry, serial, quantity and the pallet SSCC as the LPN;
+  // what the operator already typed is kept.
+  const [gs1Note, setGs1Note] = useState('')
+  const scanItem = (raw: string): boolean => {
+    const d = parseGs1(raw)
+    if (!d || !(d.gtin ?? d.contentGtin)) {
+      return false
+    }
+    setF({
+      ...f, item: (d.gtin ?? d.contentGtin)!, lot: f.lot || d.lot || '', expiry: f.expiry || d.expiry || '',
+      qty: f.qty || (d.count === undefined ? '' : String(d.count)), lpn: f.lpn || d.sscc || '',
+      serials: f.serials || d.serial || '',
+    })
+    setGs1Note(`GS1: GTIN ${d.gtin ?? d.contentGtin}${d.lot ? ` · lot ${d.lot}` : ''}${d.expiry ? ` · exp ${d.expiry}` : ''}`
+      + `${d.count !== undefined ? ` · qty ${d.count}` : ''}${d.sscc ? ` · SSCC ${d.sscc}` : ''}`)
+    return true
+  }
   const scan = useAction(() => post<{ result: Row }>(`/api/v1/sites/${site}/tasks/${task.id}/receive`, {
-    scanId, docNo: f.doc.trim(), itemNo: f.item.trim().toUpperCase(), ownerId: f.owner.trim() || null, qty: Number(f.qty),
+    scanId, docNo: f.doc.trim(), itemNo: parseGs1(f.item) ? f.item.trim() : f.item.trim().toUpperCase(), ownerId: f.owner.trim() || null, qty: Number(f.qty),
     uom: f.uom.trim().toUpperCase(), lotNo: f.lot.trim() || null, expiryDate: f.expiry || null,
     serials: f.serials.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean), lpnId: f.lpn.trim() || null,
     locationId: f.location.trim().toUpperCase(), checkDigit: f.checkDigit.trim(),
@@ -202,7 +220,10 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
       </table>
       <Field label={rma ? 'Scan return / RMA no.' : 'Scan delivery no.'}><input autoFocus value={f.doc} onChange={set('doc')} required /></Field>
       <div className="row">
-        <Field label="Item"><input value={f.item} onChange={(e) => pickItem(e.target.value.toUpperCase())} required size={10} /></Field>
+        <Field label="Item" hint={gs1Note || 'Item no., GTIN or GS1 label'}><input value={f.item} required size={10}
+          onChange={(e) => { setGs1Note(''); pickItem(e.target.value) }}
+          onBlur={(e) => { scanItem(e.target.value) }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && scanItem(e.currentTarget.value)) e.preventDefault() }} /></Field>
         <Field label="Qty"><input type="number" min={0} step="any" inputMode="decimal" value={f.qty} onChange={set('qty')} required size={4} /></Field>
         <Field label="UoM"><input value={f.uom} onChange={set('uom')} required size={3} /></Field>
       </div>
