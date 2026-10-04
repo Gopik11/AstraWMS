@@ -49,6 +49,7 @@ public class StoreReplenishment {
 
     static final int HISTORY_DAYS = 28;
     static final int DEFAULT_TRANSIT_DAYS = 1;
+    static final int DEFAULT_COVER_DAYS = 7;
 
     private final JdbcClient jdbc;
     private final Clock clock;
@@ -71,7 +72,7 @@ public class StoreReplenishment {
         AccessScope scope = AccessScope.current();
         return jdbc.sql("""
                         select p.site_id, p.owner_id, p.item_no, p.min_qty, p.max_qty, p.safety_qty, p.transit_days,
-                               s.transit_days as site_transit_days, p.updated_by, p.updated_at
+                               s.transit_days as site_transit_days, s.cover_days as site_cover_days, p.updated_by, p.updated_at
                         from store_stock_policy p left join store_site_setting s on s.site_id = p.site_id
                         where (cast(:site as text) is null or p.site_id = :site)
                           and (:sitesAll or p.site_id in (:sites)) and (:ownersAll or p.owner_id in (:owners))
@@ -106,22 +107,29 @@ public class StoreReplenishment {
 
     @Transactional(readOnly = true)
     public Map<String, Object> storeSetting(String siteId) {
-        return jdbc.sql("select site_id, transit_days, updated_by, updated_at from store_site_setting where site_id = :site")
+        return jdbc.sql("select site_id, transit_days, cover_days, updated_by, updated_at from store_site_setting where site_id = :site")
                 .param("site", siteId).query().listOfRows().stream().findFirst()
-                .orElse(Map.of("site_id", siteId, "transit_days", DEFAULT_TRANSIT_DAYS, "default", true));
+                .orElse(Map.of("site_id", siteId, "transit_days", DEFAULT_TRANSIT_DAYS, "cover_days", DEFAULT_COVER_DAYS,
+                        "default", true));
     }
 
-    @Transactional
     public Map<String, Object> putStoreSetting(String siteId, Integer transitDays) {
-        if (transitDays == null || transitDays < 0 || transitDays > 60) {
-            throw ApiException.badRequest("INV_STORE_SETTING_INVALID", "transitDays 0–60 is required");
+        return putStoreSetting(siteId, transitDays, null);
+    }
+
+    /** {@code coverDays} (ADR-0026, optional): days of demand a replenishment covers beyond transit; kept when null. */
+    @Transactional
+    public Map<String, Object> putStoreSetting(String siteId, Integer transitDays, Integer coverDays) {
+        if (transitDays == null || transitDays < 0 || transitDays > 60 || (coverDays != null && (coverDays < 1 || coverDays > 90))) {
+            throw ApiException.badRequest("INV_STORE_SETTING_INVALID", "transitDays 0–60 is required; coverDays (optional) 1–90");
         }
         jdbc.sql("""
-                        insert into store_site_setting (tenant_id, site_id, transit_days, updated_by, updated_at)
-                        values (:t, :site, :days, :user, :now)
+                        insert into store_site_setting (tenant_id, site_id, transit_days, cover_days, updated_by, updated_at)
+                        values (:t, :site, :days, coalesce(cast(:cover as integer), 7), :user, :now)
                         on conflict (tenant_id, site_id) do update set transit_days = excluded.transit_days,
+                            cover_days = coalesce(cast(:cover as integer), store_site_setting.cover_days),
                             updated_by = excluded.updated_by, updated_at = excluded.updated_at""")
-                .param("t", TenantContext.tenantId()).param("site", siteId).param("days", transitDays)
+                .param("t", TenantContext.tenantId()).param("site", siteId).param("days", transitDays).param("cover", coverDays)
                 .param("user", TenantContext.require().userId()).param("now", Timestamp.from(clock.instant())).update();
         return storeSetting(siteId);
     }
@@ -266,17 +274,37 @@ public class StoreReplenishment {
             r.put("transitDays", transitDays);
             r.put("transitDaysFrom", transitFrom);
             r.put("commitmentsKnown", commitments.available());
-            // No usage history is not demand: the risk is unknown, not zero.
-            String risk = days == 0 ? (here.available().signum() == 0 ? "EMPTY" : "NO_HISTORY")
-                    : here.available().add(pipeline).compareTo(daily.multiply(BigDecimal.valueOf(transitDays + 1L))) < 0 ? "HIGH" : "LOW";
-            r.put("stockoutRisk", risk.equals("HIGH") || risk.equals("EMPTY"));
+            // ADR-0026 predictive shortage. No usage history is not demand: the risk is unknown, not zero.
+            Integer siteCover = (Integer) p.get("site_cover_days");
+            int coverDays = siteCover != null ? siteCover : DEFAULT_COVER_DAYS;
+            BigDecimal reach = here.available().add(pipeline);              // what the store will have, before demand
+            String risk;
+            LocalDate stockoutDate = null;
+            if (daily.signum() == 0) {
+                risk = "NO_HISTORY";
+            } else {
+                BigDecimal cover = reach.divide(daily, 1, RoundingMode.HALF_DOWN);   // days until it runs out
+                stockoutDate = today.plusDays(cover.setScale(0, RoundingMode.FLOOR).longValue());
+                BigDecimal safetyDays = safety.divide(daily, 1, RoundingMode.HALF_UP);
+                risk = here.available().signum() == 0 || cover.compareTo(BigDecimal.valueOf(transitDays)) < 0 ? "CRITICAL"
+                        : cover.compareTo(BigDecimal.valueOf(transitDays).add(safetyDays)) < 0 ? "HIGH"
+                        : cover.compareTo(BigDecimal.valueOf(transitDays + coverDays)) < 0 ? "MED" : "NONE";
+                r.put("coverWithPipeline", cover);
+            }
+            r.put("coverDays", coverDays);
+            r.put("stockoutDate", stockoutDate == null ? null : stockoutDate.toString());
+            r.put("risk", risk);
+            boolean belowTrigger = projected.compareTo(trigger) < 0;
+            r.put("shortage", risk.equals("CRITICAL") || risk.equals("HIGH") || (risk.equals("NO_HISTORY") && belowTrigger));
+            r.put("stockoutRisk", risk.equals("CRITICAL") || risk.equals("HIGH"));
             r.put("stockoutRiskText", switch (risk) {
-                case "EMPTY" -> "empty";
                 case "NO_HISTORY" -> "no history";
-                case "HIGH" -> "runs out before a transfer arrives";
-                default -> "low";
+                case "CRITICAL" -> here.available().signum() == 0 ? "critical: empty" : "critical: runs out before a transfer arrives";
+                case "HIGH" -> "high: into safety stock before a transfer arrives";
+                case "MED" -> "medium: under " + coverDays + " day(s) of cover after transit";
+                default -> "none";
             });
-            if (projected.compareTo(trigger) >= 0) {
+            if (!belowTrigger && !risk.equals("CRITICAL") && !risk.equals("HIGH")) {
                 r.put("recommended", false);
                 r.put("reason", "Projected " + strip(projected) + " (available " + strip(here.available()) + " + pipeline "
                         + strip(pipeline) + (daily.signum() > 0 ? " − usage over " + transitDays + " day(s)" : "")
@@ -284,7 +312,23 @@ public class StoreReplenishment {
                 out.add(r);
                 continue;
             }
-            BigDecimal qty = max.subtract(projected).setScale(0, RoundingMode.CEILING);
+            // Sizing: refill to max without history; with history, demand over transit + cover target + safety, at
+            // least back to min + safety, never above max − available − pipeline.
+            BigDecimal room = max.subtract(reach).max(BigDecimal.ZERO);
+            BigDecimal sized;
+            String basis;
+            if (daily.signum() == 0) {
+                sized = max.subtract(projected);
+                basis = "refill to max (no usage history)";
+            } else {
+                BigDecimal demand = daily.multiply(BigDecimal.valueOf(transitDays + coverDays)).add(safety).subtract(reach);
+                sized = demand.max(trigger.subtract(projected)).min(room);
+                basis = "usage " + strip(daily) + "/day × (" + transitDays + " transit + " + coverDays + " cover) day(s) + safety "
+                        + strip(safety) + " − available and pipeline " + strip(reach) + ", capped at max − available − pipeline "
+                        + strip(room);
+            }
+            BigDecimal qty = sized.max(BigDecimal.ZERO).setScale(0, RoundingMode.CEILING);
+            r.put("qtyBasis", basis);
             List<Source> sources = new ArrayList<>();
             for (String s : sites) {
                 if (s.equals(site)) {

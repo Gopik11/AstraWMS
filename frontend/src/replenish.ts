@@ -29,6 +29,13 @@ export interface Recommendation {
   alternatives?: SourceView[]
   whySource?: string
   commitmentsKnown: boolean
+  /** ADR-0026 predictive shortage. */
+  risk: 'CRITICAL' | 'HIGH' | 'MED' | 'NONE' | 'NO_HISTORY'
+  shortage: boolean
+  stockoutDate?: string | null
+  coverDays: number
+  coverWithPipeline?: number
+  qtyBasis?: string
   dailyUsage: number
   daysOfCover: number | null
   projected: number

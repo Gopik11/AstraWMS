@@ -2,6 +2,7 @@ import { Suspense, lazy, useState, type ReactNode } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth, type Role } from './auth'
 import { useSiteContext } from './ui'
+import { visibleNav } from './nav'
 import Home from './pages/Home'
 import RfWork from './pages/RfWork'
 const Receipts = lazy(() => import('./pages/Receipts'))
@@ -35,62 +36,6 @@ const StoreReplenishment = lazy(() => import('./pages/StoreReplenishment'))
 const Recall = lazy(() => import('./pages/Recall'))
 const Management = lazy(() => import('./pages/Management'))
 const Integration = lazy(() => import('./pages/Integration'))
-
-interface NavItem {
-  to: string
-  label: string
-  roles?: Role[]          // undefined = every signed-in user (reads)
-  /** Shown at a satellite store too (ADR-0024: a store works transfers in, issues, counts and its sync state). */
-  store?: boolean
-}
-
-const NAV: { group: string; items: NavItem[] }[] = [
-  { group: 'Floor', items: [{ to: '/rf', label: 'RF work', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR'], store: true },
-    { to: '/rf/issue', label: 'RF material issue', roles: ['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR'], store: true }] },
-  {
-    group: 'Operations',
-    items: [
-      { to: '/', label: 'Overview', store: true },
-      { to: '/network', label: 'Site network', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
-      { to: '/management', label: 'Management', roles: ['INV_MANAGER', 'SOLUTION_ADMIN'] },
-      { to: '/receipts', label: 'Receipts', store: true },
-      { to: '/returns', label: 'Customer returns' },
-      { to: '/orders', label: 'Outbound orders' },
-      { to: '/waves', label: 'Waves', roles: ['SUPERVISOR'] },
-      { to: '/pack', label: 'Pack station', roles: ['PICKER', 'SUPERVISOR'] },
-      { to: '/loads', label: 'Loads', roles: ['PICKER', 'SUPERVISOR'] },
-      { to: '/tasks', label: 'Tasks', store: true },
-    ],
-  },
-  {
-    group: 'Inventory',
-    items: [
-      { to: '/inventory', label: 'Stock inquiry', store: true },
-      { to: '/items', label: 'Items across sites', store: true },
-      { to: '/store-replenishment', label: 'Store replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'], store: true },
-      { to: '/recall', label: 'Recall', roles: ['QA_MANAGER', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
-      { to: '/counts', label: 'Cycle counts', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR'], store: true },
-      { to: '/replenishment', label: 'Replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
-      { to: '/slotting', label: 'Slotting', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST'] },
-      { to: '/labor', label: 'Labor', roles: ['SUPERVISOR', 'SOLUTION_ADMIN'] },
-      { to: '/yard', label: 'Yard', roles: ['SUPERVISOR', 'RECEIVER'] },
-      { to: '/billing', label: 'Billing', roles: ['SOLUTION_ADMIN', 'INV_MANAGER', 'SUPERVISOR'] },
-      { to: '/transfers', label: 'Transfers', roles: ['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER'], store: true },
-      { to: '/labels', label: 'Labels', roles: ['SOLUTION_ADMIN', 'SUPERVISOR', 'INV_MANAGER', 'INV_ANALYST', 'RECEIVER'], store: true },
-      { to: '/material-issues', label: 'Material issues', roles: ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'], store: true },
-      { to: '/adjust', label: 'Adjust / status', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER'], store: true },
-    ],
-  },
-  {
-    group: 'Setup',
-    items: [
-      { to: '/master-data', label: 'Master data', roles: ['SOLUTION_ADMIN'], store: true },
-      { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'], store: true },
-      { to: '/integration', label: 'Integration', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
-      { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'], store: true },
-    ],
-  },
-]
 
 function Guard({ roles, children }: { roles?: Role[]; children: ReactNode }) {
   const { hasRole } = useAuth()
@@ -136,15 +81,12 @@ export default function App({ environment }: { environment?: string }) {
         <button className="link" onClick={logout}>Sign out</button>
       </header>
       <nav className="sidebar" onClick={() => setMenuOpen(false)}>
-        {NAV.map((g) => {
-          const items = g.items.filter((i) => (!i.roles || hasRole(...i.roles)) && (!isStore || i.store))
-          return items.length === 0 ? null : (
-            <div key={g.group} className="nav-group">
-              <div className="nav-title">{g.group}</div>
-              {items.map((i) => <NavLink key={i.to} to={i.to} end={i.to === '/'}>{i.label}</NavLink>)}
-            </div>
-          )
-        })}
+        {visibleNav(hasRole, isStore).map((g) => (
+          <div key={g.group} className="nav-group">
+            <div className="nav-title">{g.group}</div>
+            {g.items.map((i) => <NavLink key={i.to} to={i.to} end={i.to === '/'}>{i.label}</NavLink>)}
+          </div>
+        ))}
       </nav>
       <main className="content">
         <Suspense fallback={<p className="muted">Loading…</p>}>

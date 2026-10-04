@@ -17,16 +17,28 @@ export default function StoreReplenishment() {
   // The tower tile opens this page with ?source=DC1: the same recommendations it counts.
   const [params, setParams] = useSearchParams()
   const source = params.get('source') ?? ''
+  const shortageOnly = params.get('shortage') === '1'
+  // The refusal of an Accept stays on its row (ADR-0026), e.g. a pick face with nothing free and no pallet to split.
+  const [refused, setRefused] = useState<Record<string, string>>({})
+  const rowKey = (r: Recommendation) => `${r.siteId}/${r.ownerId}/${r.itemNo}`
   const recs = useLoad(() => get<Recommendation[]>(`/api/v1/network/replenishment${query({ siteId: scope === 'site' ? site : undefined })}`), [site, scope])
   const [done, setDone] = useState<string>()
   const accept = useAction(async (r: Recommendation) => {
-    const no = await acceptRecommendation(r)
+    let no: string
+    try {
+      no = await acceptRecommendation(r)
+    } catch (e) {
+      setRefused((m) => ({ ...m, [rowKey(r)]: e instanceof Error ? e.message : String(e) }))
+      throw e
+    }
+    setRefused((m) => { const n = { ...m }; delete n[rowKey(r)]; return n })
     setDone(`${no} created: ${fmtQty(r.qty)} ${r.itemNo} from ${String(r.sourceSite)} to ${r.siteId}, needed by ${String(r.requiredDate)}`)
     recs.reload()
     return no
   })
   const canAccept = hasRole('SUPERVISOR', 'INV_MANAGER')
-  const recommended = (recs.data ?? []).filter((r) => r.recommended && (!source || r.sourceSite === source))
+  const recommended = (recs.data ?? []).filter((r) => (shortageOnly ? r.shortage || r.recommended : r.recommended)
+    && (!source || r.sourceSite === source) && (!shortageOnly || r.shortage))
   const unknown = recs.data?.some((r) => !r.commitmentsKnown)
   return (
     <Page title="Store replenishment" actions={
@@ -38,6 +50,8 @@ export default function StoreReplenishment() {
       {unknown && <div className="alert error">Open orders and transfers could not be read from outbound: source availability is
         on hand minus allocated only, and every recommendation is LOW confidence until it answers.</div>}
       {source && <p className="muted">Recommendations sent from {source} <button className="link" onClick={() => setParams({})}>show all</button></p>}
+      {shortageOnly && <p className="muted">Store shortages: CRITICAL or HIGH stockout risk, or below min + safety without usage history
+        <button className="link" onClick={() => setParams({})}>show all</button></p>}
       <Success>{done}</Success>
       <Card title={`${recommended.length} transfer(s) recommended`}>
         <Table rows={recs.data ? recommended : undefined} empty="Every store item is covered" columns={[
@@ -53,10 +67,13 @@ export default function StoreReplenishment() {
               <div className="muted small">{r.whySource}{r.alternatives?.length ? `; also: ${r.alternatives.map((a) => `${a.site} (${fmtQty(a.transferable)})`).join(', ')}` : ''}</div>
             </span>) : '—') },
           { header: 'Needed by', cell: (r) => r.requiredDate },
-          { header: 'Confidence', cell: (r) => <Badge value={r.confidence} /> },
+          { header: 'Stockout', cell: (r) => r.stockoutDate ?? <span className="muted">no history</span> },
+          { header: 'Confidence', cell: (r) => <Badge value={r.confidence === 'MEDIUM' ? 'MED' : r.confidence} /> },
           { header: 'Stockout risk', cell: (r) => <span className={r.stockoutRisk ? 'text-late' : 'muted'}>{r.stockoutRiskText}</span> },
           { header: 'Transit', cell: (r) => <span title={`from the ${r.transitDaysFrom}`}>{r.transitDays} d</span> },
-          { header: 'Why', cell: (r) => <span className="muted small">{r.reason}</span> },
+          { header: 'Why', cell: (r) => (
+            <span className="muted small">{r.reason}{r.qtyBasis ? <><br />Quantity: {r.qtyBasis}</> : null}
+              {refused[rowKey(r)] && <span className="text-late"><br />Accept refused: {refused[rowKey(r)]}</span>}</span>) },
           { header: '', cell: (r) => (canAccept ? (
             <button className="small primary" disabled={accept.busy || !r.source || Number(r.source.free) < Number(r.qty)}
                     title={r.source && Number(r.source.free) < Number(r.qty) ? `${r.source.site} has only ${fmtQty(r.source.free)} free` : undefined}
@@ -73,6 +90,9 @@ export default function StoreReplenishment() {
           { header: 'In transit + open transfers', cell: (r) => <span title={r.openTransfers ?? ''}>{fmtQty(r.inTransit)} + {fmtQty(r.openTransferQty)}</span>, align: 'right' },
           { header: 'Use / day', cell: (r) => (r.history === 'NONE' ? <span className="muted">no history</span> : fmtQty(r.dailyUsage)), align: 'right' },
           { header: 'Days of cover', cell: (r) => (r.daysOfCover == null ? '—' : String(r.daysOfCover)), align: 'right' },
+          { header: 'Stockout', cell: (r) => r.stockoutDate ?? <span className="muted">no history</span> },
+          { header: 'Risk', cell: (r) => <span className={r.stockoutRisk ? 'text-late' : 'muted'}>{r.risk === 'NO_HISTORY' ? 'no history' : r.risk === 'NONE' ? 'none' : r.risk}</span> },
+          { header: 'Confidence', cell: (r) => (r.recommended ? <Badge value={r.confidence === 'MEDIUM' ? 'MED' : r.confidence} /> : '') },
           { header: 'Min / max / safety', cell: (r) => `${fmtQty(r.min)} / ${fmtQty(r.max)} / ${fmtQty(r.safety)}` },
           { header: 'Status', cell: (r) => (r.recommended ? <Badge value="REPLENISH" /> : <span className="muted">covered</span>) },
         ]} />
