@@ -259,9 +259,11 @@ public class ReturnsService {
         jdbc.sql("""
                         insert into return_unit (id, tenant_id, return_id, idempotency_key, erp_line_ref, owner_id, item_no, qty,
                             uom, lot_no, serials, condition_grade, return_reason_actual, disposition, stock_status, wrong_item,
-                            serial_flag, over_rma, location_id, lpn_id, inventory_operation_id, received_by, received_at)
+                            serial_flag, over_rma, location_id, lpn_id, inventory_operation_id, received_by, received_at,
+                            repair_status)
                         values (:id, :t, :r, :k, :ref, :owner, :item, :qty, :uom, :lot, cast(:serials as text[]), :grade, :reason,
-                                :disp, :status, :wrong, :sflag, :over, :loc, :lpn, :op, :user, :now)""")
+                                :disp, :status, :wrong, :sflag, :over, :loc, :lpn, :op, :user, :now,
+                                case when :disp = 'REFURBISH' then 'AWAITING_REPAIR' end)""")
                 .param("id", unitId).param("t", TenantContext.tenantId()).param("r", h.id()).param("k", idempotencyKey)
                 .param("ref", line == null || wrongItem ? null : line.ref()).param("owner", owner).param("item", r.itemNo().trim())
                 .param("qty", r.qty()).param("uom", r.uom()).param("lot", blankToNull(r.lotNo())).param("serials", pgArray(serials))

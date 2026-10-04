@@ -65,7 +65,9 @@ public class TaskService {
 
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
                        OutboxWriter outbox, Clock clock, com.astrawms.task.inbound.InboundClient inbound,
-                       tools.jackson.databind.json.JsonMapper json, Labor labor) {
+                       tools.jackson.databind.json.JsonMapper json, Labor labor,
+                       com.astrawms.task.labels.LabelClient labels) {
+        this.labels = labels;
         this.labor = labor;
         this.inbound = inbound;
         this.json = json;
@@ -75,6 +77,27 @@ public class TaskService {
         this.inventory = inventory;
         this.outbox = outbox;
         this.clock = clock;
+    }
+
+    private final com.astrawms.task.labels.LabelClient labels;
+
+    /**
+     * A label printed by AstraWMS is active only after its verification scan (ADR-0025): a PRINTED label is refused
+     * until verified, a VOID one always. Barcodes AstraWMS never printed (vendor SSCCs) pass.
+     */
+    private void requireActiveLabel(String siteId, String type, String barcode) {
+        if (barcode == null || barcode.isBlank()) {
+            return;
+        }
+        String status = labels.status(siteId, type, barcode.trim()).orElse("VERIFIED");
+        if ("VOID".equals(status)) {
+            throw ApiException.unprocessable("TSK_LABEL_VOID", type.toLowerCase() + " label " + barcode
+                    + " is void: take it off and use another one");
+        }
+        if ("PRINTED".equals(status)) {
+            throw ApiException.unprocessable("TSK_LABEL_NOT_VERIFIED", type.toLowerCase() + " label " + barcode
+                    + " is printed but not verified: scan it once in Verify label, then go on");
+        }
     }
 
     // =====================================================================================================
@@ -170,7 +193,15 @@ public class TaskService {
     public record ReceiveScan(String scanId, String docNo, String itemNo, String ownerId, java.math.BigDecimal qty,
                               String uom, String lotNo, java.time.LocalDate expiryDate, List<String> serials,
                               String lpnId, String locationId, String checkDigit, String conditionGrade,
-                              String disposition, String returnReason, String overrideReason) {
+                              String disposition, String returnReason, String overrideReason, String damageReason,
+                              String damageNote, String photo) {
+        public ReceiveScan(String scanId, String docNo, String itemNo, String ownerId, java.math.BigDecimal qty,
+                           String uom, String lotNo, java.time.LocalDate expiryDate, List<String> serials,
+                           String lpnId, String locationId, String checkDigit, String conditionGrade,
+                           String disposition, String returnReason, String overrideReason) {
+            this(scanId, docNo, itemNo, ownerId, qty, uom, lotNo, expiryDate, serials, lpnId, locationId, checkDigit,
+                    conditionGrade, disposition, returnReason, overrideReason, null, null, null);
+        }
     }
 
     public record ReceiveScanResult(TaskView task, tools.jackson.databind.JsonNode result) {
@@ -216,6 +247,7 @@ public class TaskService {
         if (loc.checkDigit() == null || s.checkDigit() == null || !loc.checkDigit().equals(s.checkDigit().trim())) {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + s.locationId());
         }
+        requireActiveLabel(siteId, "LPN", s.lpnId());
         if (!PutawayEngine.inboundStaging(loc)) {
             throw ApiException.unprocessable("TSK_LOCATION_NOT_ALLOWED",
                     s.locationId() + " is not a dock, receiving or returns location");
@@ -233,6 +265,9 @@ public class TaskService {
         if ("ASN".equals(t.kind())) {
             body.put("expiryDate", s.expiryDate() == null ? null : s.expiryDate().toString());
             body.put("overrideReason", s.overrideReason());
+            body.put("damageReason", s.damageReason());
+            body.put("damageNote", s.damageNote());
+            body.put("photo", s.photo());
             result = inbound.receiveAsnItem(siteId, t.docNo(), key, body);
         } else {
             body.put("ownerId", s.ownerId());
@@ -337,7 +372,7 @@ public class TaskService {
         }
         jdbc.sql("""
                         update task set status = 'RELEASED', assigned_to = null, assigned_at = null, exception_reason = null,
-                                        updated_at = :now where id = :id""")
+                                        pick_group = null, pick_mode = null, updated_at = :now where id = :id""")
                 .param("now", Timestamp.from(clock.instant())).param("id", taskId).update();
         event(taskId, "UNASSIGNED", "taken from " + t.assignedTo() + " by " + TenantContext.require().userId()
                 + (reason == null || reason.isBlank() ? "" : ": " + reason.trim()));
@@ -926,6 +961,93 @@ public class TaskService {
         return all.stream().map(id -> view(siteId, id)).toList();
     }
 
+    // ------------------------------------------------------------------ batch and cluster picking (ADR-0025)
+
+    /**
+     * Takes a group of picks for one trip, chosen exactly as "next" chooses (role, zone, owner, skill, equipment,
+     * priority, pick path):
+     * <ul>
+     *   <li>CLUSTER: every released pick of up to {@code size} orders, one tote per order;</li>
+     *   <li>BATCH: the released picks of the best task's item from the same bin for several orders (up to
+     *       {@code size} picks), picked together and sorted to the orders at staging.</li>
+     * </ul>
+     * Each pick is still confirmed on its own with the normal pick API. A group the operator already holds is
+     * returned again (resume).
+     */
+    @Transactional
+    public Map<String, Object> pickGroup(String siteId, String mode, int size) {
+        String m = mode == null ? "CLUSTER" : mode.trim().toUpperCase();
+        if (!List.of("CLUSTER", "BATCH").contains(m)) {
+            throw ApiException.badRequest("TSK_PICK_MODE_INVALID", "mode is CLUSTER or BATCH");
+        }
+        String user = TenantContext.require().userId();
+        if (!taskTypesOfCurrentUser().contains("PICK")) {
+            throw new ApiException(org.springframework.http.HttpStatus.FORBIDDEN, "TSK_NOT_A_PICKER", "Your roles do not include picking");
+        }
+        List<UUID> held = jdbc.sql("""
+                        select id from task where site_id = :site and status = 'ASSIGNED' and assigned_to = :user
+                          and task_type = 'PICK' and pick_group is not null order by assigned_at""")
+                .param("site", siteId).param("user", user).query(UUID.class).list();
+        if (!held.isEmpty()) {
+            return group(siteId, held);
+        }
+        int limit = Math.max(1, Math.min(size, 25));
+        record Candidate(UUID id, String order, String owner, String item, String lot, String from) {
+        }
+        List<UUID> ids = claimable(siteId, user, 200);
+        List<Candidate> picks = new ArrayList<>();
+        for (UUID id : ids) {
+            jdbc.sql("""
+                            select id, order_ref, owner_id, item_no, coalesce(lot_no, ''), from_location from task
+                            where id = :id and task_type = 'PICK'""")
+                    .param("id", id)
+                    .query((rs, n) -> picks.add(new Candidate(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
+                            rs.getString(4), rs.getString(5), rs.getString(6)))).list();
+        }
+        if (picks.isEmpty()) {
+            return Map.of("mode", m, "tasks", List.of(), "orders", List.of());
+        }
+        List<UUID> chosen = new ArrayList<>();
+        if ("CLUSTER".equals(m)) {
+            java.util.LinkedHashSet<String> orders = new java.util.LinkedHashSet<>();
+            for (Candidate c : picks) {
+                if (orders.size() < limit || orders.contains(c.order())) {
+                    orders.add(c.order());
+                    chosen.add(c.id());
+                }
+            }
+        } else {
+            Candidate first = picks.getFirst();
+            for (Candidate c : picks) {
+                if (chosen.size() < limit && c.owner().equals(first.owner()) && c.item().equals(first.item())
+                        && c.lot().equals(first.lot()) && c.from().equals(first.from())) {
+                    chosen.add(c.id());
+                }
+            }
+        }
+        UUID group = UUID.randomUUID();
+        for (UUID id : chosen) {
+            assign(id, user);
+            jdbc.sql("update task set pick_group = :g, pick_mode = :m where id = :id")
+                    .param("g", group).param("m", m).param("id", id).update();
+        }
+        return group(siteId, chosen);
+    }
+
+    private Map<String, Object> group(String siteId, List<UUID> ids) {
+        List<TaskView> tasks = ids.stream().map(id -> view(siteId, id)).toList();
+        Map<String, Object> first = jdbc.sql("select pick_group, pick_mode from task where id = :id").param("id", ids.getFirst())
+                .query().singleRow();
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("groupId", first.get("pick_group"));
+        out.put("mode", first.get("pick_mode"));
+        out.put("orders", tasks.stream().map(TaskView::orderRef).distinct().toList());
+        out.put("totalQty", tasks.stream().map(TaskView::qty).filter(java.util.Objects::nonNull)
+                .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add));
+        out.put("tasks", tasks);
+        return out;
+    }
+
     private void assign(UUID id, String user) {
         jdbc.sql("update task set status = 'ASSIGNED', assigned_to = :user, assigned_at = :now, updated_at = :now where id = :id")
                 .param("user", user).param("now", Timestamp.from(clock.instant())).param("id", id).update();
@@ -998,6 +1120,7 @@ public class TaskService {
         if (loc.checkDigit() == null || !loc.checkDigit().equals(checkDigit.trim())) {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + locationId);
         }
+        requireActiveLabel(siteId, "LOCATION", locationId);
         String strategy = null;
         String reason = null;
         if (!locationId.equals(t.targetLocation())) {

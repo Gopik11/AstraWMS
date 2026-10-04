@@ -42,7 +42,8 @@ public final class TaskDtos {
                                  @jakarta.validation.constraints.NotNull @jakarta.validation.constraints.Positive BigDecimal qty,
                                  @NotBlank String uom, String lotNo, java.time.LocalDate expiryDate, List<String> serials,
                                  String lpnId, @NotBlank String locationId, @NotBlank String checkDigit,
-                                 String conditionGrade, String disposition, String returnReason, String overrideReason) {
+                                 String conditionGrade, String disposition, String returnReason, String overrideReason,
+                                 String damageReason, String damageNote, String photo) {
     }
 
     /** RF finish of a receiving task; lines received short need a reason (SHORT_VENDOR, DAMAGED, REFUSED, IN_TRANSIT). */

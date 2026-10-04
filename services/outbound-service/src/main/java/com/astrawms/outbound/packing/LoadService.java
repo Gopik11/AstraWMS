@@ -138,17 +138,42 @@ public class LoadService {
     public List<Map<String, Object>> list(String siteId, String status) {
         return jdbc.sql("""
                         select l.load_no, l.carrier_scac, l.door, l.trailer_no, l.status, l.seal_no, l.bol_no, l.created_at,
-                               l.closed_at, (select count(*) from outbound_order o where o.load_id = l.id) as orders
+                               l.closed_at, (select count(*) from outbound_order o where o.load_id = l.id) as orders,
+                               l.tracking_no, l.tracking_status, l.tracking_detail, l.tracking_updated_at
                         from shipment_load l where l.site_id = :site and (cast(:status as text) is null or l.status = :status)
                         order by l.created_at desc limit 200""")
                 .param("site", siteId).param("status", status).query().listOfRows();
+    }
+
+    static final List<String> TRACKING = List.of("PICKED_UP", "IN_TRANSIT", "OUT_FOR_DELIVERY", "DELIVERED", "EXCEPTION");
+
+    /**
+     * Carrier tracking (ADR-0025): a status on the load, set by the carrier's webhook (through the integration
+     * client) or by hand. No route planning or freight audit: this is not a TMS.
+     */
+    @Transactional
+    public Map<String, Object> track(String siteId, String loadNo, String status, String trackingNo, String detail) {
+        String s = status == null ? null : status.trim().toUpperCase();
+        if (s == null || !TRACKING.contains(s)) {
+            throw ApiException.badRequest("OUT_TRACKING_INVALID", "status is one of " + TRACKING);
+        }
+        int n = jdbc.sql("""
+                        update shipment_load set tracking_status = :s, tracking_no = coalesce(:no, tracking_no),
+                            tracking_detail = :d, tracking_updated_at = now()
+                        where site_id = :site and load_no = :load""")
+                .param("s", s).param("no", trackingNo == null || trackingNo.isBlank() ? null : trackingNo.trim())
+                .param("d", detail).param("site", siteId).param("load", loadNo).update();
+        if (n == 0) {
+            throw unknown(loadNo);
+        }
+        return detail(siteId, loadNo);
     }
 
     @Transactional(readOnly = true)
     public Map<String, Object> detail(String siteId, String loadNo) {
         Map<String, Object> header = jdbc.sql("""
                         select id, load_no, carrier_scac, door, trailer_no, status, seal_no, bol_no, created_by, created_at,
-                               closed_by, closed_at
+                               closed_by, closed_at, tracking_no, tracking_status, tracking_detail, tracking_updated_at
                         from shipment_load where site_id = :site and load_no = :no""")
                 .param("site", siteId).param("no", loadNo).query().listOfRows().stream().findFirst()
                 .orElseThrow(() -> unknown(loadNo));

@@ -50,6 +50,7 @@ export default function OrderDetail() {
               {d.wave_no != null && <span>Wave {String(d.wave_no)}</span>}
               {d.cutoff_at != null && <span>Cutoff {fmtDate(d.cutoff_at)}</span>}
               <span>Priority {String(d.priority ?? 50)}</span>
+              {d.criticality != null && d.criticality !== 'NORMAL' && <span>Criticality {String(d.criticality).toLowerCase()}</span>}
               {d.ship_complete === true && <span><Badge value="SHIP COMPLETE" /></span>}
               <span>Pick LPN {String(d.pick_lpn)} at {String(d.staging_location)}</span>
               {d.tracking_no != null && <span>Tracking {String(d.tracking_no)}</span>}
@@ -71,6 +72,7 @@ export default function OrderDetail() {
               { header: 'Short (picks)', cell: (l) => fmtQty(l.qty_short_pick), align: 'right' },
               { header: 'Why short', cell: (l) => (Number(l.qty_short) > 0 && l.short_reason
                   ? <span title={String(l.short_detail ?? '')}>{String(l.short_reason).toLowerCase().replace(/_/g, ' ')}: {String(l.short_detail ?? '')}</span> : '') },
+              { header: 'Allocation rule', cell: (l) => <span className="muted small">{String(l.allocation_rule ?? '')}</span> },
               { header: 'Short state', cell: (l) => Number(l.qty_short) <= 0 ? ''
                   : l.short_hold ? 'waiting for stock' : Number(l.qty_short_closed) >= Number(l.qty_short) ? 'ships short' : 'recoverable' },
               { header: 'From', cell: (l) => d.allocations.filter((a) => a.erp_line_ref === l.erp_line_ref && a.status !== 'CANCELLED')

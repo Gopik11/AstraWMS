@@ -208,3 +208,5 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
 .ask-answer ul { margin: 6px 0 0; padding-left: 18px; }
 .store-banner { background: var(--neutral-bg); color: var(--neutral); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 a.button { display: inline-block; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); text-decoration: none; }
+.site-detail { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.site-detail .facts { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0; font-size: .85rem; }

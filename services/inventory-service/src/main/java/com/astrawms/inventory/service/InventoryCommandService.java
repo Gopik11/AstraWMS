@@ -46,6 +46,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -129,6 +130,7 @@ public class InventoryCommandService {
             serials.place(key, sn, ctx.operationId, ctx.now);
             ctx.line(TxnType.RECEIPT, key, qty, after, sn);
             ctx.sourceDoc = r.sourceDoc();
+            receivedFromTransit(siteId, r.sourceDoc(), r.ownerId(), r.itemNo(), lot, qty, ctx.now);
             // Receipt postings to the ERP go through the Inbound service (IF-IB-002), not IF-INV-001.
         });
     }
@@ -358,8 +360,29 @@ public class InventoryCommandService {
                     : explainShort(siteId, r, item, remaining, free.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add),
                     hasFace, fullLpn);
             return new AllocationResult(r.orderRef(), r.orderLineRef(), r.itemNo(), item.baseUom(), wanted,
-                    wanted.subtract(remaining), remaining, views, false, why[0], why[1]);
+                    wanted.subtract(remaining), remaining, views, false, why[0], why[1],
+                    rule(policy, fefo, r.rotation() != null, item.lotControlled()));
         });
+    }
+
+    /** The allocation rule that fired, in words, recorded on the order line (ADR-0025). */
+    static String rule(AllocationPolicies.Policy policy, boolean fefo, boolean requested, boolean lotControlled) {
+        StringBuilder s = new StringBuilder(fefo ? "FEFO" : "FIFO");
+        s.append(requested ? " (requested by the order)" : lotControlled ? " (lot-controlled)" : "");
+        s.append(policy.ownerId() != null ? " · owner " + policy.ownerId() + " policy"
+                : policy.updatedBy() == null ? " · built-in default (site policy not saved)" : " · site policy");
+        if (policy.pickFaceFirst()) {
+            s.append(" · pick face first");
+        }
+        s.append(switch (policy.fullLpn()) {
+            case COVERED_ONLY -> " · whole pallet only when the order covers it";
+            case SPLIT_ALLOWED -> " · pallets split freely";
+            case NEVER_SPLIT -> " · whole pallets only";
+        });
+        if (policy.lotAffinity() && lotControlled) {
+            s.append(" · one lot per line");
+        }
+        return s.toString();
     }
 
     /**
@@ -517,6 +540,11 @@ public class InventoryCommandService {
                         (prev == null ? BigDecimal.ZERO : prev.qty()).add(a.qtyPicked()), item.baseUom(), lots, allSerials));
             }
             ctx.sourceDoc = r.orderRef();
+            if (r.transferToSite() != null && !r.transferToSite().isBlank()) {
+                for (Allocation a : picked) {
+                    inTransit(r.orderRef(), siteId, r.transferToSite().trim().toUpperCase(), a, ctx);
+                }
+            }
             return new IssueResult(r.orderRef(), new ArrayList<>(lines.values()), false);
         });
     }
@@ -1032,6 +1060,52 @@ public class InventoryCommandService {
     // =====================================================================================================
     // Idempotent execution, ledger and events
     // =====================================================================================================
+
+    // ------------------------------------------------------------------ stock in transit (ADR-0025)
+
+    /** A picked allocation of a transfer leaves the shipping site: it is in transit until the receiving site receives it. */
+    private void inTransit(String transferNo, String fromSite, String toSite, Allocation a, OpContext ctx) {
+        jdbc.sql("""
+                        insert into stock_in_transit (tenant_id, transfer_no, from_site, to_site, owner_id, item_no, lot_no, qty,
+                                                      shipped_at, operation_id)
+                        values (:t, :tr, :from, :to, :owner, :item, :lot, :qty, :now, :op)
+                        on conflict (tenant_id, transfer_no, owner_id, item_no, lot_no)
+                        do update set qty = stock_in_transit.qty + excluded.qty""")
+                .param("t", TenantContext.tenantId()).param("tr", transferNo).param("from", fromSite).param("to", toSite)
+                .param("owner", a.ownerId()).param("item", a.itemNo()).param("lot", a.lotNo()).param("qty", a.qtyPicked())
+                .param("now", Timestamp.from(ctx.now)).param("op", ctx.operationId).update();
+    }
+
+    /**
+     * A receipt against a transfer ({@code sourceDoc} "TR-DC1-000001/10") reduces what is in transit to this site,
+     * same lot first, then any lot of the item. Over-receipt beyond the transit quantity is a normal receipt.
+     */
+    private void receivedFromTransit(String siteId, String sourceDoc, String ownerId, String itemNo, String lot,
+                                     BigDecimal qty, Instant now) {
+        if (sourceDoc == null || sourceDoc.isBlank()) {
+            return;
+        }
+        String transferNo = sourceDoc.contains("/") ? sourceDoc.substring(0, sourceDoc.indexOf('/')) : sourceDoc;
+        record Open(long id, BigDecimal open) {
+        }
+        List<Open> open = jdbc.sql("""
+                        select id, qty - qty_received from stock_in_transit
+                        where transfer_no = :tr and to_site = :site and owner_id = :owner and item_no = :item
+                          and qty_received < qty
+                        order by case when lot_no = :lot then 0 else 1 end, id for update""")
+                .param("tr", transferNo).param("site", siteId).param("owner", ownerId).param("item", itemNo)
+                .param("lot", lot).query((rs, n) -> new Open(rs.getLong(1), rs.getBigDecimal(2))).list();
+        BigDecimal left = qty;
+        for (Open o : open) {
+            if (left.signum() <= 0) {
+                break;
+            }
+            BigDecimal take = left.min(o.open());
+            jdbc.sql("update stock_in_transit set qty_received = qty_received + :q, received_at = :now where id = :id")
+                    .param("q", take).param("now", Timestamp.from(now)).param("id", o.id()).update();
+            left = left.subtract(take);
+        }
+    }
 
     private final class OpContext {
         final UUID operationId;

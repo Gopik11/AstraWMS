@@ -114,13 +114,21 @@ public class ReceivingService {
                     + ". Accepting a different lot needs an overrideReason (INB-EX-08)");
         }
         checkTolerance(line, r.qty(), r.overrideReason(), r.approvedBy());
+        String damage = blankToNull(r.damageReason());
+        if (damage != null && !DAMAGE_REASONS.contains(damage.toUpperCase())) {
+            throw ApiException.badRequest("INB_DAMAGE_REASON", "damageReason is one of " + DAMAGE_REASONS);
+        }
+        String status = damage == null ? line.stockTypeTarget() : "DAMAGED";
 
         InventoryClient.ReceiveResult inv = inventory.receive(siteId, "INB-" + idempotencyKey,
                 new InventoryClient.ReceiveCommand(line.ownerId(), line.itemNo(), lot, r.expiryDate(), r.qty(),
-                        r.uom(), blankToNull(r.lpnId()), r.locationId(), line.stockTypeTarget(),
+                        r.uom(), blankToNull(r.lpnId()), r.locationId(), status,
                         erpDocNo + "/" + lineRef, r.serials()));
         recordTxn(h, line, idempotencyKey, r.qty(), r.uom(), lot, r.vendorLotNo(), r.expiryDate(), r.lpnId(),
-                r.locationId(), inv.operationId(), r.overrideReason(), r.approvedBy(), r.serials());
+                r.locationId(), inv.operationId(), r.overrideReason(), r.approvedBy(), r.serials(), status);
+        if (damage != null) {
+            recordDamage(siteId, erpDocNo, line, r, damage.toUpperCase(), idempotencyKey);
+        }
         ReceiveResult result = new ReceiveResult(erpDocNo, progress(h.id()), List.of(inv.operationId()),
                 blankToNull(r.lpnId()), false);
         saveResponse(idempotencyKey, result);
@@ -189,7 +197,7 @@ public class ReceivingService {
                     new InventoryClient.ReceiveCommand(line.ownerId(), line.itemNo(), c.lotNo(), null, c.qty(), c.uom(),
                             sscc, r.locationId(), line.stockTypeTarget(), erpDocNo + "/" + c.lineRef(), null));
             recordTxn(h, line, key, c.qty(), c.uom(), c.lotNo(), null, null, sscc, r.locationId(),
-                    inv.operationId(), null, null, null);
+                    inv.operationId(), null, null, null, line.stockTypeTarget());
             operations.add(inv.operationId());
         }
         jdbc.sql("update expected_hu set received = true where expectation_id = :id and sscc = :sscc")
@@ -480,9 +488,63 @@ public class ReceivingService {
                 strip(l.qtyExpected().subtract(l.qtyReceived()).max(BigDecimal.ZERO)), l.uom())).toList();
     }
 
+    static final List<String> DAMAGE_REASONS = List.of("CRUSHED", "WET", "TORN", "BROKEN", "CONTAMINATED", "OTHER");
+    static final int MAX_PHOTO_BYTES = 1024 * 1024;   // the RF client sends a downscaled JPEG well below this
+
+    /** Damage at receive (ADR-0025): the reason and the device's photo, kept with the receipt. */
+    private void recordDamage(String siteId, String erpDocNo, Line line, ReceiveLineRequest r, String reason, String key) {
+        byte[] photo = null;
+        String type = null;
+        if (r.photo() != null && !r.photo().isBlank()) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("^data:(image/(?:jpeg|png|webp));base64,(.+)$")
+                    .matcher(r.photo().trim());
+            if (!m.matches()) {
+                throw ApiException.badRequest("INB_PHOTO_INVALID", "photo must be a JPEG, PNG or WebP data URL");
+            }
+            try {
+                photo = java.util.Base64.getDecoder().decode(m.group(2));
+            } catch (IllegalArgumentException e) {
+                throw ApiException.badRequest("INB_PHOTO_INVALID", "photo is not valid base64");
+            }
+            if (photo.length > MAX_PHOTO_BYTES) {
+                throw ApiException.badRequest("INB_PHOTO_TOO_LARGE", "photo is larger than 1 MB");
+            }
+            type = m.group(1);
+        }
+        jdbc.sql("""
+                        insert into receipt_damage (id, tenant_id, site_id, erp_doc_no, erp_line_ref, item_no, qty, uom, reason,
+                                                    note, photo, photo_type, lpn_id, location_id, idempotency_key,
+                                                    reported_by, reported_at)
+                        values (:id, :t, :site, :doc, :ref, :item, :qty, :uom, :reason, :note, :photo, :type, :lpn, :loc,
+                                :key, :user, :now)
+                        on conflict (tenant_id, idempotency_key) do nothing""")
+                .param("id", UUID.randomUUID()).param("t", TenantContext.tenantId()).param("site", siteId)
+                .param("doc", erpDocNo).param("ref", line.erpLineRef()).param("item", line.itemNo()).param("qty", r.qty())
+                .param("uom", r.uom()).param("reason", reason).param("note", blankToNull(r.damageNote()))
+                .param("photo", photo).param("type", type).param("lpn", blankToNull(r.lpnId()))
+                .param("loc", r.locationId()).param("key", key).param("user", TenantContext.require().userId())
+                .param("now", Timestamp.from(clock.instant())).update();
+    }
+
+    /** Damage reported on a receipt, with the photo as a data URL. */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> damage(String siteId, String erpDocNo) {
+        return jdbc.sql("""
+                        select erp_line_ref, item_no, qty, uom, reason, note, lpn_id, location_id, reported_by, reported_at,
+                               photo_type, photo
+                        from receipt_damage where site_id = :site and erp_doc_no = :doc order by reported_at""")
+                .param("site", siteId).param("doc", erpDocNo).query().listOfRows().stream().map(r -> {
+                    Map<String, Object> out = new java.util.LinkedHashMap<>(r);
+                    byte[] bytes = (byte[]) out.remove("photo");
+                    out.put("photo", bytes == null ? null
+                            : "data:" + r.get("photo_type") + ";base64," + java.util.Base64.getEncoder().encodeToString(bytes));
+                    return out;
+                }).toList();
+    }
+
     private void recordTxn(Header h, Line line, String key, BigDecimal qty, String uom, String lot,
                            String vendorLot, LocalDate expiry, String lpn, String location, UUID inventoryOperation,
-                           String overrideReason, String approvedBy, List<String> serials) {
+                           String overrideReason, String approvedBy, List<String> serials, String stockStatus) {
         TenantContext.Scope scope = TenantContext.require();
         jdbc.sql("""
                         insert into receipt_txn (id, tenant_id, expectation_id, erp_line_ref, idempotency_key,
@@ -495,7 +557,7 @@ public class ReceivingService {
                 .param("ref", line.erpLineRef()).param("key", key).param("qty", qty)
                 .param("uom", uom).param("lot", lot).param("vlot", blankToNull(vendorLot))
                 .param("expiry", expiry == null ? null : Date.valueOf(expiry)).param("lpn", blankToNull(lpn))
-                .param("loc", location).param("status", line.stockTypeTarget()).param("op", inventoryOperation)
+                .param("loc", location).param("status", stockStatus).param("op", inventoryOperation)
                 .param("override", blankToNull(overrideReason)).param("approvedBy", blankToNull(approvedBy))
                 .param("user", scope.userId()).param("now", Timestamp.from(clock.instant()))
                 .param("serials", serials == null || serials.isEmpty() ? null : serials.toArray(String[]::new))

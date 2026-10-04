@@ -61,3 +61,6 @@ astra:
   inbound:
     base-url: ${INBOUND_URL:http://localhost:8083}
     timeout-ms: 5000
+  master-data:
+    base-url: ${MASTER_DATA_URL:http://localhost:8081}
+    timeout-ms: 2000

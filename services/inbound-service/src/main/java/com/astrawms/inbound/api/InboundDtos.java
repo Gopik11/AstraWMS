@@ -27,7 +27,18 @@ public final class InboundDtos {
             @NotBlank String locationId,
             String overrideReason,
             String approvedBy,
-            List<String> serials) {
+            List<String> serials,
+            String damageReason,
+            String damageNote,
+            String photo) {
+
+        /** {@code damageReason} (ADR-0025): received as DAMAGED stock; {@code photo} is a data URL from the device. */
+        public ReceiveLineRequest(BigDecimal qty, String uom, String lotNo, String vendorLotNo, LocalDate expiryDate,
+                                  String lpnId, String locationId, String overrideReason, String approvedBy,
+                                  List<String> serials) {
+            this(qty, uom, lotNo, vendorLotNo, expiryDate, lpnId, locationId, overrideReason, approvedBy, serials,
+                    null, null, null);
+        }
     }
 
     /** RF receipt by item scan (ADR-0019): the item chooses the line. */

@@ -95,6 +95,8 @@ export default function Returns() {
       </Card>
       {selected && <Detail key={selected} rma={selected} site={site} canReceive={canReceive}
                            canRepost={hasRole('SUPERVISOR')} onChange={list.reload} />}
+      <ReturnRate site={site} />
+      <Repairs site={site} canUpdate={hasRole('SUPERVISOR', 'QA_MANAGER', 'RECEIVER')} />
     </Page>
   )
 }
@@ -224,5 +226,59 @@ function ReceiveForm({ base, lines, onDone }: { base: string; lines: ReturnLine[
       <ErrorBox error={receive.error} />
       <Success>{receive.result && `Received → ${receive.result.disposition} (${receive.result.stock_status})`}</Success>
     </>
+  )
+}
+
+/** Return rate by item and reason (ADR-0025): units returned ÷ units shipped from this site in the period. */
+function ReturnRate({ site }: { site: string }) {
+  const [days, setDays] = useState(90)
+  const returned = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns/report?days=${days}`), [site, days])
+  const shipped = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/shipped?days=${days}`), [site, days])
+  const shippedOf = new Map((shipped.data ?? []).map((r) => [`${String(r.owner_id)}/${String(r.item_no)}`, Number(r.units)]))
+  return (
+    <Card title="Return rate" actions={
+      <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
+        {[30, 90, 180, 365].map((d) => <option key={d} value={d}>Last {d} days</option>)}
+      </select>
+    }>
+      <ErrorBox error={returned.error ?? shipped.error} />
+      <Table rows={returned.data} empty="No returns in this period" columns={[
+        { header: 'Item', cell: (r) => `${String(r.item_no)} (${String(r.owner_id)})` },
+        { header: 'Reason', cell: (r) => String(r.reason).toLowerCase().replace(/_/g, ' ') },
+        { header: 'Returned', cell: (r) => fmtQty(r.units), align: 'right' },
+        { header: 'Shipped', cell: (r) => fmtQty(shippedOf.get(`${String(r.owner_id)}/${String(r.item_no)}`) ?? 0), align: 'right' },
+        { header: 'Return rate', align: 'right', cell: (r) => {
+          const s = shippedOf.get(`${String(r.owner_id)}/${String(r.item_no)}`) ?? 0
+          return s > 0 ? `${((100 * Number(r.units)) / s).toFixed(1)} %` : '—'
+        } },
+        { header: 'Resaleable (A/B)', cell: (r) => fmtQty(r.resaleable ?? 0), align: 'right' },
+        { header: 'Restocked / refurbish / written off', cell: (r) => `${fmtQty(r.restocked ?? 0)} / ${fmtQty(r.refurbish ?? 0)} / ${fmtQty(r.written_off ?? 0)}` },
+      ]} />
+    </Card>
+  )
+}
+
+const REPAIR = ['AWAITING_REPAIR', 'IN_REPAIR', 'REPAIRED', 'NOT_REPAIRABLE']
+
+/** The repair chain of units sent to refurbish: a status on the returned unit, not a separate module. */
+function Repairs({ site, canUpdate }: { site: string; canUpdate: boolean }) {
+  const list = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/returns/repairs`), [site])
+  const set = useAction((id: string, status: string) => post(`/api/v1/sites/${site}/returns/units/${id}/repair`, { status }))
+  return (
+    <Card title="Repairs">
+      <ErrorBox error={list.error ?? set.error} />
+      <Table rows={list.data} empty="No units sent to refurbish" columns={[
+        { header: 'RMA', cell: (r) => String(r.rma_no) },
+        { header: 'Item', cell: (r) => `${String(r.item_no)} × ${fmtQty(r.qty)}` },
+        { header: 'Grade', cell: (r) => String(r.condition_grade) },
+        { header: 'Reason', cell: (r) => String(r.return_reason_actual ?? '') },
+        { header: 'Received', cell: (r) => fmtDate(r.received_at) },
+        { header: 'Repair', cell: (r) => (canUpdate ? (
+          <select value={String(r.repair_status ?? 'AWAITING_REPAIR')} disabled={set.busy}
+                  onChange={async (e) => { await set.run(String(r.id), e.target.value); list.reload() }}>
+            {REPAIR.map((s) => <option key={s} value={s}>{s.toLowerCase().replace(/_/g, ' ')}</option>)}
+          </select>) : <Badge value={String(r.repair_status ?? '')} />) },
+      ]} />
+    </Card>
   )
 }

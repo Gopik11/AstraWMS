@@ -10,6 +10,11 @@ describe('parseGs1', () => {
   })
 
   it('reads raw scans with a symbology identifier and group separators', () => {
+    const link = parseGs1(']Q3https://id.gs1.org/01/09506000134352/10/LOT-7?17=270600&37=12')
+    expect(link?.gtin).toBe('09506000134352')
+    expect(link?.lot).toBe('LOT-7')
+    expect(link?.count).toBe(12)
+    expect(parseGs1('https://example.com/p/42')).toBeNull()
     const d = parseGs1(']C10109506000134352' + '10LOT-7\u001d' + '17270600' + '3712')
     expect(d?.gtin).toBe('09506000134352')
     expect(d?.lot).toBe('LOT-7')

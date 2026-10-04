@@ -48,6 +48,7 @@ export default function Loads() {
           { header: 'Orders', cell: (l) => String(l.orders), align: 'right' },
           { header: 'Status', cell: (l) => <Badge value={String(l.status)} /> },
           { header: 'BOL', cell: (l) => String(l.bol_no ?? '') },
+          { header: 'Tracking', cell: (l) => (l.tracking_status ? <span title={String(l.tracking_detail ?? '')}><Badge value={String(l.tracking_status)} /> {String(l.tracking_no ?? '')}</span> : '') },
           { header: 'Created', cell: (l) => fmtDate(l.created_at) },
         ]} />
       </Card>
@@ -76,7 +77,10 @@ function LoadDetail({ base, loadNo, canClose, onChange }: { base: string; loadNo
             <span>Carrier {String(d.carrier_scac ?? '—')}</span>
             {d.seal_no != null && <span>Seal {String(d.seal_no)}</span>}
             {d.bol_no != null && <span>BOL {String(d.bol_no)}</span>}
+            {d.tracking_status != null && <span>Carrier status <Badge value={String(d.tracking_status)} /> {String(d.tracking_no ?? '')}
+              {d.tracking_detail ? ` · ${String(d.tracking_detail)}` : ''} ({fmtDate(d.tracking_updated_at)})</span>}
           </div>
+          {canClose && d.status === 'CLOSED' && <Tracking base={base} loadNo={loadNo} onChange={() => { detail.reload(); onChange() }} />}
           {d.status === 'OPEN' && (
             <form className="row" onSubmit={async (e) => { e.preventDefault(); done(await add.run()) }}>
               <Field label="Scan carton SSCC or enter delivery"><input autoFocus value={scan} onChange={(e) => setScan(e.target.value)} required /></Field>
@@ -102,5 +106,23 @@ function LoadDetail({ base, loadNo, canClose, onChange }: { base: string; loadNo
         </>
       )}
     </Card>
+  )
+}
+
+const TRACKING = ['PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED', 'EXCEPTION']
+
+/** Carrier tracking on the load (ADR-0025): set by the carrier's webhook or by hand; not a TMS. */
+export function Tracking({ base, loadNo, onChange }: { base: string; loadNo: string; onChange: () => void }) {
+  const [f, setF] = useState({ status: 'IN_TRANSIT', trackingNo: '', detail: '' })
+  const save = useAction(() => post(`${base}/${loadNo}/tracking`, f))
+  return (
+    <div className="row">
+      <Field label="Carrier status"><select value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
+        {TRACKING.map((s) => <option key={s} value={s}>{s.toLowerCase().replace(/_/g, ' ')}</option>)}</select></Field>
+      <Field label="Tracking no."><input value={f.trackingNo} onChange={(e) => setF({ ...f, trackingNo: e.target.value })} size={14} /></Field>
+      <Field label="Detail"><input value={f.detail} onChange={(e) => setF({ ...f, detail: e.target.value })} size={20} /></Field>
+      <button disabled={save.busy} onClick={async () => { await save.run(); onChange() }}>Update tracking</button>
+      <ErrorBox error={save.error} />
+    </div>
   )
 }

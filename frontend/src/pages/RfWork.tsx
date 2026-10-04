@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { explainStrategy, whyNext } from '../explain'
-import { api, get, type Row, type Task } from '../api'
+import { ApiError, api, get, post, type Row, type Task } from '../api'
+import { useAuth } from '../auth'
 import { parseGs1 } from '../gs1'
 import { dropOfflineTask, isNetworkError, offlineTasks, queue, rfPost, saveOfflineTasks, sync } from '../offline'
 import { OfflineBar } from './OfflineBar'
@@ -42,9 +43,33 @@ export default function RfWork() {
     return tasks
   })
 
+  // ADR-0025 batch / cluster picking: a group of picks for one trip, worked one after the other.
+  const { hasRole } = useAuth()
+  const [group, setGroup] = useState<{ mode: string; orders: string[]; tasks: Task[] }>()
+  const takeGroup = useAction(async (mode: 'CLUSTER' | 'BATCH') => {
+    const g = await api<{ mode: string; orders: string[]; tasks: Task[] }>('POST', `/api/v1/sites/${site}/tasks/pick-group?mode=${mode}&size=${mode === 'CLUSTER' ? 4 : 8}`)
+    const open = g.tasks.filter((t) => t.status !== 'COMPLETED')
+    if (open.length === 0) {
+      setGroup(undefined)
+      setTask(null)
+      return g
+    }
+    setGroup({ ...g, tasks: open })
+    setTask(open[0])
+    setDone(undefined)
+    return g
+  })
+
   const finished = (message: string) => {
     if (task) dropOfflineTask(site, task.id)
     setDone(message)
+    const rest = group?.tasks.filter((t) => t.id !== task?.id) ?? []
+    if (group && rest.length > 0) {
+      setGroup({ ...group, tasks: rest })
+      setTask(rest[0])
+      return
+    }
+    setGroup(undefined)
     setTask(undefined)
     void next.run()
   }
@@ -64,7 +89,23 @@ export default function RfWork() {
         <button disabled={download.busy} onClick={() => void download.run()}
                 title="Takes up to 10 tasks onto this device, to go on working without network">Download my work</button>
         {download.result && <span className="muted">{download.result.length} task(s) on this device</span>}
+        {hasRole('PICKER', 'SUPERVISOR') && !group && (
+          <>
+            <button disabled={takeGroup.busy} onClick={() => void takeGroup.run('CLUSTER')}
+                    title="Up to 4 orders in one trip, one tote per order">Cluster pick</button>
+            <button disabled={takeGroup.busy} onClick={() => void takeGroup.run('BATCH')}
+                    title="One item from one bin for several orders, sorted at staging">Batch pick</button>
+          </>
+        )}
       </div>
+      <ErrorBox error={takeGroup.error} />
+      {group && (
+        <div className="card">
+          <strong>{group.mode === 'CLUSTER' ? 'Cluster pick' : 'Batch pick'}</strong>: {group.tasks.length} pick(s) left for
+          order(s) {group.orders.join(', ')}. {group.mode === 'CLUSTER' ? 'Keep one tote per order.' : 'Pick the total, then sort to the orders at staging.'}
+          <ol className="small">{group.tasks.map((t) => <li key={t.id}>{t.fromLocation} · {t.itemNo} × {fmtQty(t.qty)} → {t.orderRef}</li>)}</ol>
+        </div>
+      )}
       {task === null && <div className="card muted">No work for you right now.</div>}
       {task && task.taskType === 'RECEIVE' && <Receive task={task} site={site} onDone={finished} />}
       {task && task.taskType === 'PUTAWAY' && <Putaway task={task} site={site} onDone={finished} />}
@@ -95,6 +136,33 @@ function TaskHead({ task }: { task: Task }) {
 const OVERRIDE_REASONS = [['LOCATION_FULL', 'Location full'], ['LOCATION_BLOCKED', 'Location blocked'],
   ['LOCATION_DAMAGED', 'Location damaged'], ['CLOSER_LOCATION', 'Closer location'], ['CONSOLIDATE', 'Consolidate with same item'],
   ['OTHER', 'Other']]
+
+/** The device camera's photo as a JPEG of at most 1280 px, small enough to send from the dock. */
+async function downscale(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(bitmap.width * scale)
+  canvas.height = Math.round(bitmap.height * scale)
+  canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/jpeg', 0.7)
+}
+
+/**
+ * ADR-0025: a printed label is active only after its verification scan. When RF refuses a label that is printed but
+ * not verified, the operator verifies it here (this scan is the verification) and confirms again.
+ */
+function VerifyLabel({ error, site, scan }: { error: unknown; site: string; scan: string }) {
+  const verify = useAction(() => post<Row>(`/api/v1/sites/${site}/labels/printed/verify`, { scan }))
+  if (!(error instanceof ApiError) || error.code !== 'TSK_LABEL_NOT_VERIFIED' || !scan.trim()) return null
+  return (
+    <div className="row">
+      <button type="button" disabled={verify.busy} onClick={() => void verify.run()}>Verify label {scan}</button>
+      <ErrorBox error={verify.error} />
+      <Success>{verify.result && `${String(verify.result.barcode)} verified: confirm again`}</Success>
+    </div>
+  )
+}
 
 function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m: string) => void }) {
   const [lpn, setLpn] = useState('')
@@ -140,6 +208,7 @@ function Putaway({ task, site, onDone }: { task: Task; site: string; onDone: (m:
       )}
       <Field label="Location check digit"><input inputMode="numeric" value={checkDigit} onChange={(e) => setCheckDigit(e.target.value)} required /></Field>
       <ErrorBox error={confirm.error ?? exception.error} />
+      <VerifyLabel error={confirm.error} site={site} scan={location} />
       <div className="actions">
         <button className="primary big" disabled={confirm.busy}>Confirm putaway</button>
       </div>
@@ -181,7 +250,8 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
         qtyReceived: Number(l.qty_received), uom: String(l.uom) }))
     : ((progress.data?.lines as Progress[] | undefined) ?? [])
   const blank = { doc: '', item: '', owner: '', qty: '', uom: expected[0]?.uom ?? 'EA', lot: '', expiry: '', serials: '',
-    lpn: '', location: '', checkDigit: '', grade: 'A', disposition: '', reason: '' }
+    lpn: '', location: '', checkDigit: '', grade: 'A', disposition: '', reason: '', damage: '', damageNote: '' }
+  const [photo, setPhoto] = useState<string>()
   const [f, setF] = useState(blank)
   const [scanId, setScanId] = useState(() => crypto.randomUUID())
   const [reasons, setReasons] = useState<Record<string, string>>({})
@@ -214,6 +284,8 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
     locationId: f.location.trim().toUpperCase(), checkDigit: f.checkDigit.trim(),
     conditionGrade: rma ? f.grade : null, disposition: rma && f.disposition ? f.disposition : null,
     returnReason: rma && f.reason ? f.reason : null,
+    damageReason: !rma && f.damage ? f.damage : null, damageNote: !rma && f.damage ? f.damageNote || null : null,
+    photo: !rma && f.damage ? photo ?? null : null,
   }))
   const short = lines.filter((l) => l.qtyReceived < l.qtyExpected)
   const finish = useAction(() => tpost(`/api/v1/sites/${site}/tasks/${task.id}/receive/close`,
@@ -280,12 +352,30 @@ function Receive({ task, site, onDone }: { task: Task; site: string; onDone: (m:
           </Field>
         </div>
       )}
+      {!rma && (
+        <div className="row">
+          <Field label="Damaged?" hint="Received as DAMAGED stock: never allocated">
+            <select value={f.damage} onChange={set('damage')}>
+              <option value="">No</option>
+              {['CRUSHED', 'WET', 'TORN', 'BROKEN', 'CONTAMINATED', 'OTHER'].map((r) => <option key={r} value={r}>{r.toLowerCase()}</option>)}
+            </select>
+          </Field>
+          {f.damage && <Field label="Note"><input value={f.damageNote} onChange={set('damageNote')} size={14} /></Field>}
+          {f.damage && (
+            <Field label="Photo" hint={photo ? 'Photo attached' : 'Optional; taken with the device camera'}>
+              <input type="file" accept="image/*" capture="environment"
+                     onChange={async (e) => { const file = e.target.files?.[0]; setPhoto(file ? await downscale(file) : undefined) }} />
+            </Field>
+          )}
+        </div>
+      )}
       <Field label="LPN" hint={rma ? 'Blank: one LPN per unit is created' : 'Pallet label; blank for loose stock'}><input value={f.lpn} onChange={set('lpn')} /></Field>
       <div className="row">
         <Field label={rma ? 'Returns / dock location' : 'Dock location'}><input value={f.location} onChange={set('location')} required size={8} /></Field>
         <Field label="Check digit"><input inputMode="numeric" value={f.checkDigit} onChange={set('checkDigit')} required size={3} /></Field>
       </div>
       <ErrorBox error={scan.error} />
+      <VerifyLabel error={scan.error} site={site} scan={f.lpn} />
       <Success>{unit && (rma
         ? `Received ${String(unit.item_no)} → ${String(unit.disposition)} (${String(unit.stock_status)}) on ${String(unit.lpn_id ?? '')}`
         : `Received; ${scansDone} scan(s) on this task`)}</Success>

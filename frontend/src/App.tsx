@@ -30,6 +30,11 @@ const MasterData = lazy(() => import('./pages/MasterData'))
 const ErpSimulator = lazy(() => import('./pages/ErpSimulator'))
 const Operations = lazy(() => import('./pages/Operations'))
 const Network = lazy(() => import('./pages/Network'))
+const Items = lazy(() => import('./pages/Items'))
+const StoreReplenishment = lazy(() => import('./pages/StoreReplenishment'))
+const Recall = lazy(() => import('./pages/Recall'))
+const Management = lazy(() => import('./pages/Management'))
+const Integration = lazy(() => import('./pages/Integration'))
 
 interface NavItem {
   to: string
@@ -47,6 +52,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     items: [
       { to: '/', label: 'Overview', store: true },
       { to: '/network', label: 'Site network', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
+      { to: '/management', label: 'Management', roles: ['INV_MANAGER', 'SOLUTION_ADMIN'] },
       { to: '/receipts', label: 'Receipts', store: true },
       { to: '/returns', label: 'Customer returns' },
       { to: '/orders', label: 'Outbound orders' },
@@ -60,6 +66,9 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: 'Inventory',
     items: [
       { to: '/inventory', label: 'Stock inquiry', store: true },
+      { to: '/items', label: 'Items across sites', store: true },
+      { to: '/store-replenishment', label: 'Store replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'], store: true },
+      { to: '/recall', label: 'Recall', roles: ['QA_MANAGER', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN'] },
       { to: '/counts', label: 'Cycle counts', roles: ['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR'], store: true },
       { to: '/replenishment', label: 'Replenishment', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN'] },
       { to: '/slotting', label: 'Slotting', roles: ['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN', 'INV_ANALYST'] },
@@ -77,6 +86,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     items: [
       { to: '/master-data', label: 'Master data', roles: ['SOLUTION_ADMIN'], store: true },
       { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'], store: true },
+      { to: '/integration', label: 'Integration', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
       { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'], store: true },
     ],
   },
@@ -141,6 +151,12 @@ export default function App({ environment }: { environment?: string }) {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/network" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN']}><Network /></Guard>} />
+          <Route path="/items" element={<Items />} />
+          <Route path="/items/:ownerId/:itemNo" element={<Items />} />
+          <Route path="/store-replenishment" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'SOLUTION_ADMIN']}><StoreReplenishment /></Guard>} />
+          <Route path="/recall" element={<Guard roles={['QA_MANAGER', 'INV_MANAGER', 'SUPERVISOR', 'SOLUTION_ADMIN']}><Recall /></Guard>} />
+          <Route path="/management" element={<Guard roles={['INV_MANAGER', 'SOLUTION_ADMIN']}><Management /></Guard>} />
+          <Route path="/integration" element={<Guard roles={['ERP_INTEGRATION', 'SOLUTION_ADMIN']}><Integration /></Guard>} />
           <Route path="/rf" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR']}><RfWork /></Guard>} />
           <Route path="/rf/issue" element={<Guard roles={['RECEIVER', 'PICKER', 'INV_MANAGER', 'SUPERVISOR']}><RfIssue /></Guard>} />
           <Route path="/transfers" element={<Guard roles={['SUPERVISOR', 'INV_MANAGER', 'RECEIVER', 'PICKER']}><Transfers /></Guard>} />

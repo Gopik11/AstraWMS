@@ -63,12 +63,38 @@ function aiAt(s: string, i: number): string | null {
   return null
 }
 
+const LINK_AIS = new Set(['00', '01', '02', '10', '11', '13', '15', '17', '21', '30', '37', '400'])
+
+/** A GS1 Digital Link URL (from a QR code) as a bracketed element string; null without a GTIN or SSCC (ADR-0025). */
+export function digitalLink(url: string): string | null {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return null
+  }
+  const parts = u.pathname.split('/')
+  const start = parts.findIndex((p) => p === '01' || p === '00')
+  if (start < 0) return null
+  let out = ''
+  for (let i = start; i + 1 < parts.length; i += 2) {
+    if (LINK_AIS.has(parts[i])) out += `(${parts[i]})${decodeURIComponent(parts[i + 1])}`
+  }
+  u.searchParams.forEach((v, k) => { if (LINK_AIS.has(k)) out += `(${k})${v}` })
+  return out || null
+}
+
 export function parseGs1(scan: string | null | undefined): Gs1Data | null {
   if (!scan) return null
   let s = scan.trim()
   if (s.startsWith(']')) {
     if (s.length < 3) return null
     s = s.slice(3)
+  }
+  if (/^https?:\/\//i.test(s)) {
+    const link = digitalLink(s)
+    if (!link) return null
+    s = link
   }
   const el: Record<string, string> = {}
   try {

@@ -288,6 +288,16 @@ public class LabelService {
                 .query().listOfRows().stream().map(LabelService::row).toList();
     }
 
+    /** The state of a printed label by what a scanner reads (ADR-0025): PRINTED (not yet active), VERIFIED or VOID. */
+    @Transactional(readOnly = true)
+    public Map<String, Object> status(String siteId, String type, String scan) {
+        return jdbc.sql(PRINTED + " where site_id = :site and scan_key = :key"
+                        + " and (cast(:type as text) is null or label_type = :type) order by printed_at desc limit 1")
+                .param("site", siteId).param("key", scanKey(scan)).param("type", blankUpper(type))
+                .query().listOfRows().stream().findFirst().map(LabelService::row)
+                .orElseThrow(() -> ApiException.notFound("MD_LABEL_UNKNOWN", "No label " + scan + " was printed at " + siteId));
+    }
+
     /** Verification scan after the label is applied: it must have been printed here and not be void (ADR-0024). */
     @Transactional
     public Map<String, Object> verify(String siteId, String scan) {
