@@ -202,3 +202,35 @@ on their tile until rates are set; the seed now rates ACME.
   inventory allocation result; events are unchanged.
 - **Enforcement.** The label check depends on master data being reachable. When it is not, RF work continues and the
   miss is logged.
+
+## Review 2 (2026-10-04): what changed after the first live run
+
+1. **Overview reads**
+   - A read that hits a restarting service (502/503/504) is retried twice before the page shows an error.
+   - A non-JSON error page is reported as "service restarting", not as a script error.
+   - Status panels say "Loading…" until their list arrives and never "none" for data that did not load. Their
+     errors show on the card.
+   - The tower's replenishment tile opens the page filtered the same way (`?source=DC1`).
+2. **Accept reserves, or is refused.** Accept creates a *strict* transfer.
+   - Outbound refuses it with `OUT_SOURCE_SHORT` when the source's free quantity is below the send quantity. Free
+     is: on hand (AVAILABLE) − allocated − what open orders and transfers there still wait for. The refusal names
+     the orders and transfers holding the stock.
+   - It is refused with `OUT_TRANSFER_EXISTS` when an open transfer to the same store already carries the item.
+   - The transfer is allocated at once, under the site policy and its rule (waveless release).
+   - Every open transfer to a store is pipeline, from outbound's `/api/v1/network/outbound/commitments`, so an
+     accepted quantity is not recommended again.
+3. **Recommendation math**
+   - The source shows on hand, allocated to orders and to transfers, waiting on open documents, and free.
+   - The row says why that source won and lists the alternatives.
+   - Usage 0 is not demand: the row says "no history" and confidence stays LOW.
+   - Transit days are the store's (`/inventory/store-setting`), overridable per item policy; the row says where
+     the value came from.
+   - If outbound cannot be reached, the page says so and confidence is LOW.
+4. **Transfers show allocated, short and picked.** "RELEASED, 0 picked" is no longer read as "not allocated".
+   - The short reason on the line explains a quantity waiting for a pick-face replenishment, because the site
+     policy does not break a reserve pallet the order does not cover.
+   - Lines allocated before rules were recorded say so.
+5. **The dock tile offers "Create putaways" only for stock without an open putaway.** Stock that has one waits for
+   its RF confirmation.
+6. **Read-only acceptance checks.** `scripts/check-review.sh` verifies the review's acceptance tests on a running
+   system.

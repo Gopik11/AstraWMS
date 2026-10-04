@@ -153,6 +153,7 @@ services:
       <<: *service-env
       SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="inventory-service" password="${KAFKA_INVENTORY_PASSWORD}";
       DB_NAME: inventory
+      OUTBOUND_URL: http://outbound-service:8080
 
   inbound-service:
     <<: *service

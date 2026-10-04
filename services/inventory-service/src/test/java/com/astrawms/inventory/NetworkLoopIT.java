@@ -26,7 +26,30 @@ import org.springframework.test.web.servlet.ResultActions;
  * the enterprise item balance shows both sides; store replenishment recommends from the warehouse; the cycle plan
  * makes never-counted locations due.
  */
+@org.springframework.context.annotation.Import(NetworkLoopIT.Stubs.class)
 class NetworkLoopIT extends IntegrationTest {
+
+    /** What outbound reports open orders and transfers hold; set per test. */
+    static class StubOutbound implements com.astrawms.inventory.outbound.OutboundClient {
+        volatile Commitments next = new Commitments(List.of(), List.of(), true);
+
+        @Override
+        public Commitments commitments() {
+            return next;
+        }
+    }
+
+    @org.springframework.boot.test.context.TestConfiguration
+    static class Stubs {
+        @org.springframework.context.annotation.Bean
+        @org.springframework.context.annotation.Primary
+        StubOutbound stubOutbound() {
+            return new StubOutbound();
+        }
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    StubOutbound outbound;
 
     @BeforeEach
     void store() {
@@ -108,24 +131,52 @@ class NetworkLoopIT extends IntegrationTest {
                 .andExpect(status().isForbidden());
         mvc.perform(put("/api/v1/sites/ST03/inventory/store-policies").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"ownerId\":\"ACME\",\"itemNo\":\"ABC\",\"minQty\":10,\"maxQty\":40,\"safetyQty\":2,\"transitDays\":1}"))
+                        .content("{\"ownerId\":\"ACME\",\"itemNo\":\"ABC\",\"minQty\":10,\"maxQty\":40,\"safetyQty\":2}"))
                 .andExpect(jsonPath("$[0].max_qty", is(40.0)));
+        // The store's transit time is a site value.
+        mvc.perform(put("/api/v1/sites/ST03/inventory/store-setting").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"transitDays\":2}"))
+                .andExpect(jsonPath("$.transit_days", is(2)));
+        // DC1: 100 on hand; outbound reports 10 allocated to orders and 15 still waiting on open documents.
+        asTenant(() -> jdbc.sql("update inventory_balance set allocated_qty = 10 where item_no = 'ABC' and site_id = 'DC1'").update());
+        outbound.next = new com.astrawms.inventory.outbound.OutboundClient.Commitments(
+                List.of(new com.astrawms.inventory.outbound.OutboundClient.SourceCommitment("DC1", "ACME", "ABC",
+                        new java.math.BigDecimal("10"), java.math.BigDecimal.ZERO, new java.math.BigDecimal("15"), java.math.BigDecimal.ZERO)),
+                List.of(), true);
         network("/api/v1/network/replenishment?siteId=ST03")
                 .andExpect(jsonPath("$[0].recommended", is(true)))
                 .andExpect(jsonPath("$[0].sourceSite", is("DC1")))
                 .andExpect(jsonPath("$[0].qty", is(37)))                    // max 40 − projected 3
+                .andExpect(jsonPath("$[0].transitDays", is(2)))
+                .andExpect(jsonPath("$[0].transitDaysFrom", is("store setting")))
                 .andExpect(jsonPath("$[0].confidence", is("LOW")))           // no usage history yet
-                .andExpect(jsonPath("$[0].reason", org.hamcrest.Matchers.containsString("below min 10")));
+                .andExpect(jsonPath("$[0].history", is("NONE")))
+                .andExpect(jsonPath("$[0].stockoutRiskText", is("no history")))
+                // DC1 free = on hand 100 − allocated 10 − waiting 15, never more than on hand − allocated − open documents
+                .andExpect(jsonPath("$[0].source.onHand", is(100.0)))
+                .andExpect(jsonPath("$[0].source.allocatedOrders", is(10)))
+                .andExpect(jsonPath("$[0].source.free", is(75.0)))
+                .andExpect(jsonPath("$[0].whySource", org.hamcrest.Matchers.containsString("DC1 is a warehouse and has 75 free")))
+                .andExpect(jsonPath("$[0].reason", org.hamcrest.Matchers.containsString("no usage history: no demand assumed")));
+        // An open transfer to ST03 (not yet shipped) is pipeline: the need is covered.
+        outbound.next = new com.astrawms.inventory.outbound.OutboundClient.Commitments(List.of(),
+                List.of(new com.astrawms.inventory.outbound.OutboundClient.OpenTransfer("ST03", "ACME", "ABC", "DC1",
+                        new java.math.BigDecimal("37"), "TR-DC1-000007")), true);
+        network("/api/v1/network/replenishment?siteId=ST03")
+                .andExpect(jsonPath("$[0].recommended", is(false)))
+                .andExpect(jsonPath("$[0].openTransfers", is("TR-DC1-000007")));
+        outbound.next = new com.astrawms.inventory.outbound.OutboundClient.Commitments(List.of(), List.of(), false);
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
                         .post("/api/v1/sites/ST03/inventory/store-replenishment/accept")
                         .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"ownerId\":\"ACME\",\"itemNo\":\"ABC\",\"qty\":37,\"sourceSite\":\"DC1\",\"transferNo\":\"TR-DC1-000009\","
                                 + "\"requiredDate\":\"2026-10-06\",\"confidence\":\"LOW\",\"reason\":\"test\"}"))
                 .andExpect(jsonPath("$.transferNo", is("TR-DC1-000009")));
-        // Accepted: the open transfer is pipeline, so the need is covered and not recommended again.
+        // Accepted (outbound unreachable here): the accepted transfer is pipeline, so the need is not recommended again.
         network("/api/v1/network/replenishment?siteId=ST03")
                 .andExpect(jsonPath("$[0].recommended", is(false)))
-                .andExpect(jsonPath("$[0].inTransit", is(37.0)));
+                .andExpect(jsonPath("$[0].openTransferQty", is(37.0)));
+        outbound.next = new com.astrawms.inventory.outbound.OutboundClient.Commitments(List.of(), List.of(), true);
     }
 
     @Test

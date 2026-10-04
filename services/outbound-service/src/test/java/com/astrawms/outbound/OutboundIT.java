@@ -119,6 +119,13 @@ class OutboundIT {
         public List<InventoryAllocation> allocations(String siteId, String orderRef) {
             return pickedByOrder.getOrDefault(orderRef, List.of());
         }
+
+        @Override
+        public Availability availability(String siteId, String ownerId, String itemNo) {
+            // Free includes stock the allocation cannot take now (e.g. a pallet the order does not cover).
+            return new Availability(stock.getOrDefault(itemNo, BigDecimal.ZERO).add(elsewhere.getOrDefault(itemNo, BigDecimal.ZERO)),
+                    BigDecimal.ZERO);
+        }
     }
 
     @TestConfiguration
@@ -612,6 +619,42 @@ class OutboundIT {
         assertThat(asn.get("lines").get(0).get("lotNo").asString()).isEqualTo("L1");
         call(get("/api/v1/sites/ST01/outbound/transfers?direction=IN"), "")
                 .andExpect(jsonPath("$[0].erp_doc_no", is(doc))).andExpect(jsonPath("$[0].from_site", is("DC1")));
+    }
+
+    @Test
+    void anAcceptedReplenishmentIsAStrictTransferRefusedWhenTheSourceCannotCoverIt_ADR0025() throws Exception {
+        inventory.stock.put("SKU-1", new BigDecimal("5"));
+        call(post("/api/v1/sites/DC2/outbound/transfers"), """
+                {"toSiteId":"ST12","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":8,"uom":"EA"}]}""")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("OUT_SOURCE_SHORT")))
+                .andExpect(jsonPath("$.detail", org.hamcrest.Matchers.containsString("DC2 has 5 of SKU-1 free")));
+        call(post("/api/v1/sites/DC2/outbound/transfers"), """
+                {"toSiteId":"ST12","strict":true,"priority":80,"criticality":"HIGH",
+                 "lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":4,"uom":"EA"}]}""")
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.status", is("RELEASED")))
+                .andExpect(jsonPath("$.criticality", is("HIGH")))
+                .andExpect(jsonPath("$.lines[0].qty_allocated", is(4)));
+        // Accepting the same need again is refused while the transfer is open; outbound reports it as pipeline.
+        call(post("/api/v1/sites/DC2/outbound/transfers"), """
+                {"toSiteId":"ST12","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":1,"uom":"EA"}]}""")
+                .andExpect(jsonPath("$.code", is("OUT_TRANSFER_EXISTS")));
+        // Free but not allocable now: nothing is reserved and no transfer is created.
+        inventory.stock.put("SKU-9", BigDecimal.ZERO);
+        inventory.elsewhere.put("SKU-9", new BigDecimal("10"));
+        call(post("/api/v1/sites/DC2/outbound/transfers"), """
+                {"toSiteId":"ST13","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-9","qty":6,"uom":"EA"}]}""")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("OUT_NOT_ALLOCABLE")))
+                .andExpect(jsonPath("$.detail", org.hamcrest.Matchers.containsString("Nothing was reserved")));
+        call(get("/api/v1/sites/ST13/outbound/transfers?direction=IN"), "").andExpect(jsonPath("$.length()", is(0)));
+        // The refused transfer's number goes to the next transfer, whose allocations are its own.
+        call(post("/api/v1/sites/DC2/outbound/transfers"), """
+                {"toSiteId":"ST13","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-1","qty":1,"uom":"EA"}]}""")
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.erp_doc_no", is("TR-DC2-000002")))
+                .andExpect(jsonPath("$.lines[0].qty_allocated", is(1)));
+        call(get("/api/v1/network/outbound/commitments?itemNo=SKU-1"), "")
+                .andExpect(jsonPath("$.toStore[?(@.site_id == 'ST12')].open_qty", org.hamcrest.Matchers.contains(4.0)))
+                .andExpect(jsonPath("$.toStore[?(@.site_id == 'ST13')].open_qty", org.hamcrest.Matchers.contains(1.0)))
+                .andExpect(jsonPath("$.bySource[0].allocated_transfers", is(5.0)));
     }
 
     @Test

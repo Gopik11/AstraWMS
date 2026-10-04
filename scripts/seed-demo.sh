@@ -214,9 +214,12 @@ network_policies() {
   # A picker's profile: equipment and skills (a task needing other skills or zone equipment is not offered).
   put "/api/v1/sites/DC1/tasks/operators/${OPERATOR_USER:-test4}" '{"equipment":["RF","PALLET_JACK"],"skills":["PICK","REPLEN"]}'
   for s in "${STORES[@]}"; do
-    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100100","minQty":10,"maxQty":40,"safetyQty":4,"transitDays":1}'
-    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100300","minQty":5,"maxQty":20,"safetyQty":2,"transitDays":1}'
-    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100600","minQty":6,"maxQty":24,"safetyQty":2,"transitDays":1}'
+    # Transit days are a store value (ADR-0025): nearby stores 1 day, the rest 2 or 3.
+    n="$(store_no "$s")"; days=1; (( n > 5 )) && days=2; (( n > 15 )) && days=3
+    put "/api/v1/sites/$s/inventory/store-setting" "{\"transitDays\":$days}"
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100100","minQty":10,"maxQty":40,"safetyQty":4}'
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100300","minQty":5,"maxQty":20,"safetyQty":2}'
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100600","minQty":6,"maxQty":24,"safetyQty":2}'
   done
   put "/api/v1/sites/DC1/inventory/counts/plan/frequency" '{"aDays":30,"bDays":90,"cDays":180}'
   echo "ACME rated, ${#STORES[@]} stores x 3 replenishment policies"

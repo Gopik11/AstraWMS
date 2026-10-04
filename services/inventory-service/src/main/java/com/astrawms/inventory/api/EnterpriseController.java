@@ -94,6 +94,21 @@ public class EnterpriseController {
         return replenishment.putPolicy(siteId, body);
     }
 
+    /** A store's transit time from its source, in days (ADR-0025): the default for its item policies. */
+    @GetMapping("/api/v1/sites/{siteId}/inventory/store-setting")
+    public Map<String, Object> storeSetting(@PathVariable String siteId) {
+        return replenishment.storeSetting(siteId);
+    }
+
+    public record StoreSettingRequest(Integer transitDays) {
+    }
+
+    @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','INV_MANAGER','SUPERVISOR')")
+    @PutMapping("/api/v1/sites/{siteId}/inventory/store-setting")
+    public Map<String, Object> putStoreSetting(@PathVariable String siteId, @RequestBody StoreSettingRequest body) {
+        return replenishment.putStoreSetting(siteId, body.transitDays());
+    }
+
     @PreAuthorize("hasAnyRole('INV_MANAGER','SUPERVISOR')")
     @PostMapping("/api/v1/sites/{siteId}/inventory/store-replenishment/accept")
     public Map<String, Object> accept(@PathVariable String siteId, @RequestBody StoreReplenishment.AcceptRequest body) {

@@ -66,6 +66,22 @@ public class HttpInventoryClient implements InventoryClient {
     }
 
     @Override
+    public Availability availability(String siteId, String ownerId, String itemNo) {
+        TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
+        JsonNode s = rest.get().uri("/api/v1/sites/{site}/inventory/items/{owner}/{item}/summary", siteId, ownerId, itemNo)
+                .retrieve().body(JsonNode.class);
+        BigDecimal onHand = BigDecimal.ZERO;
+        BigDecimal allocated = BigDecimal.ZERO;
+        for (JsonNode t : s.get("byStatus")) {
+            if ("AVAILABLE".equals(t.get("status").asString())) {
+                onHand = onHand.add(t.get("qty").decimalValue());
+                allocated = allocated.add(t.get("allocatedQty").decimalValue());
+            }
+        }
+        return new Availability(onHand, allocated);
+    }
+
+    @Override
     public List<InventoryAllocation> allocations(String siteId, String orderRef) {
         TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         try {

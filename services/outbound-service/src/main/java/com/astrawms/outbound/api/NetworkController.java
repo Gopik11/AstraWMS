@@ -76,6 +76,40 @@ public class NetworkController {
                 .query().listOfRows();
     }
 
+    /**
+     * What open orders and transfers hold or wait for (ADR-0025), per site and item: allocated to customer orders,
+     * allocated to transfers, still short on orders and on transfers (committed but not yet allocated); and per
+     * receiving store, what open transfers will bring that has not shipped yet. Inventory's store replenishment uses it
+     * for the source's real availability and the store's pipeline.
+     */
+    @GetMapping("/api/v1/network/outbound/commitments")
+    @Transactional(readOnly = true)
+    public Map<String, Object> commitments(@org.springframework.web.bind.annotation.RequestParam(required = false) String itemNo) {
+        AccessScope scope = AccessScope.current();
+        String item = itemNo == null || itemNo.isBlank() ? null : itemNo.trim();
+        List<Map<String, Object>> bySource = jdbc.sql("""
+                        select o.site_id, l.owner_id, l.item_no,
+                               coalesce(sum(l.qty_allocated) filter (where o.transfer_to_site is null), 0) as allocated_orders,
+                               coalesce(sum(l.qty_allocated) filter (where o.transfer_to_site is not null), 0) as allocated_transfers,
+                               coalesce(sum(l.qty_short - l.qty_short_closed) filter (where o.transfer_to_site is null), 0) as short_orders,
+                               coalesce(sum(l.qty_short - l.qty_short_closed) filter (where o.transfer_to_site is not null), 0) as short_transfers
+                        from outbound_order o join outbound_line l on l.order_id = o.id
+                        where %s and (cast(:item as text) is null or l.item_no = :item)
+                        group by o.site_id, l.owner_id, l.item_no""".formatted(OPEN))
+                .param("item", item).query().listOfRows();
+        List<Map<String, Object>> toStore = jdbc.sql("""
+                        select o.transfer_to_site as site_id, l.owner_id, l.item_no, o.site_id as from_site,
+                               coalesce(sum(coalesce(l.qty_requested_base, l.qty_requested) - l.qty_short_closed), 0) as open_qty,
+                               string_agg(distinct o.erp_doc_no, ',') as transfers
+                        from outbound_order o join outbound_line l on l.order_id = o.id
+                        where %s and o.transfer_to_site is not null and (cast(:item as text) is null or l.item_no = :item)
+                          and (:sitesAll or o.transfer_to_site in (:sites) or o.site_id in (:sites))
+                        group by o.transfer_to_site, l.owner_id, l.item_no, o.site_id""".formatted(OPEN))
+                .param("item", item).param("sitesAll", scope.sitesAll()).param("sites", scope.siteList())
+                .query().listOfRows();
+        return Map.of("bySource", bySource, "toStore", toStore);
+    }
+
     @GetMapping("/api/v1/network/outbound")
     @Transactional(readOnly = true)
     public List<Map<String, Object>> sites() {

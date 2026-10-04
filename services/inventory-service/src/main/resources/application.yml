@@ -50,3 +50,6 @@ astra:
       audience: astrawms-api
   outbox:
     relay-interval-ms: 500
+  outbound:
+    base-url: ${OUTBOUND_URL:http://localhost:8085}
+    timeout-ms: 3000
