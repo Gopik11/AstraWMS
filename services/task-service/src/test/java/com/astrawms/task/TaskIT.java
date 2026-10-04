@@ -54,6 +54,16 @@ import tools.jackson.databind.json.JsonMapper;
 class TaskIT {
 
     /** Records LPN moves; idempotent by key like the real inventory service. */
+    /** Label states by barcode; unknown barcodes were not printed by AstraWMS. */
+    static class StubLabels implements com.astrawms.task.labels.LabelClient {
+        final java.util.Map<String, String> states = new java.util.concurrent.ConcurrentHashMap<>();
+
+        @Override
+        public java.util.Optional<String> status(String siteId, String type, String barcode) {
+            return java.util.Optional.ofNullable(states.get(type + ":" + barcode));
+        }
+    }
+
     static class StubInventory implements InventoryClient {
         record Move(String key, String lpn, String from, String to) {
         }
@@ -175,6 +185,12 @@ class TaskIT {
 
         @Bean
         @Primary
+        StubLabels stubLabels() {
+            return new StubLabels();
+        }
+
+        @Bean
+        @Primary
         StubInbound stubInbound() {
             return new StubInbound();
         }
@@ -189,6 +205,8 @@ class TaskIT {
     WebApplicationContext context;
     @Autowired
     StubInventory inventory;
+    @Autowired
+    StubLabels labels;
     @Autowired
     StubInbound inbound;
     @Autowired
@@ -293,6 +311,20 @@ class TaskIT {
             assertThat(m.to()).isEqualTo("A-02");
         });
         tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(status().isNoContent());
+    }
+
+    @Test
+    void aPrintedBinLabelIsActiveOnlyAfterItsVerificationScan_ADR0025() throws Exception {
+        received("LPN-L", "SKU-1");
+        awaitTask("LPN-L", "RELEASED");
+        String id = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        labels.states.put("LOCATION:A-02", "PRINTED");
+        confirm(id, "LPN-L", "A-02", "22").andExpect(jsonPath("$.code", is("TSK_LABEL_NOT_VERIFIED")));
+        labels.states.put("LOCATION:A-02", "VOID");
+        confirm(id, "LPN-L", "A-02", "22").andExpect(jsonPath("$.code", is("TSK_LABEL_VOID")));
+        labels.states.put("LOCATION:A-02", "VERIFIED");
+        confirm(id, "LPN-L", "A-02", "22").andExpect(jsonPath("$.status", is("COMPLETED")));
+        labels.states.clear();
     }
 
     @Test
@@ -924,6 +956,36 @@ class TaskIT {
                 .query(Integer.class).single()) == 0);
         mvc.perform(post("/api/v1/sites/DC1/tasks/sweep-dock").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)))
                 .andExpect(jsonPath("$.putawaysCreated", is(0))).andExpect(jsonPath("$.lpnsCreated", is(0)));
+    }
+
+    // ------------------------------------------------------------------ ADR-0025 batch and cluster picking
+
+    @Test
+    void clusterAndBatchPickingGroupPicksForOneTripAndEachIsConfirmedAsUsual() throws Exception {
+        UUID a1 = UUID.randomUUID();
+        UUID a2 = UUID.randomUUID();
+        UUID a3 = UUID.randomUUID();
+        pickRequested(a1, "SO-A", "A-02", "2");
+        pickRequested(a2, "SO-B", "A-02", "3");
+        pickRequested(a3, "SO-C", "A-01", "1");
+        awaitPickTask(a1, "RELEASED");
+        awaitPickTask(a2, "RELEASED");
+        awaitPickTask(a3, "RELEASED");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/pick-group?mode=CLUSTER").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(status().isForbidden());
+        // BATCH: the same item from the same bin (A-02, first on the pick path) for SO-A and SO-B, not A-01.
+        tasks(post("/api/v1/sites/DC1/tasks/pick-group?mode=BATCH&size=5"))
+                .andExpect(jsonPath("$.mode", is("BATCH")))
+                .andExpect(jsonPath("$.tasks.length()", is(2)))
+                .andExpect(jsonPath("$.totalQty", org.hamcrest.Matchers.anyOf(is(5), is(5.0))))
+                .andExpect(jsonPath("$.orders", org.hamcrest.Matchers.containsInAnyOrder("SO-A", "SO-B")));
+        // The operator resumes the same group until it is done.
+        String group = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/pick-group?mode=CLUSTER")), "$.groupId");
+        assertThat(asTenant(() -> jdbc.sql("select count(*) from task where pick_group = cast(:g as uuid)").param("g", group)
+                .query(Integer.class).single())).isEqualTo(2);
+        // CLUSTER for another picker: the remaining order.
+        mvc.perform(post("/api/v1/sites/DC1/tasks/pick-group?mode=CLUSTER&size=4").with(TestTokens.as(tenant, "pete", Roles.PICKER)))
+                .andExpect(jsonPath("$.mode", is("CLUSTER"))).andExpect(jsonPath("$.orders[0]", is("SO-C")));
     }
 
     // ------------------------------------------------------------------ ADR-0024 supervisor unassign

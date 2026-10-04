@@ -39,10 +39,10 @@ public final class AllocationDtos {
     public record AllocationResult(String orderRef, String orderLineRef, String itemNo, String baseUom,
                                    BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
                                    List<AllocationView> allocations, boolean replayed, String shortReason,
-                                   String shortDetail) {
+                                   String shortDetail, String rule) {
         public AllocationResult asReplay() {
             return new AllocationResult(orderRef, orderLineRef, itemNo, baseUom, requestedQty, allocatedQty, shortQty,
-                    allocations, true, shortReason, shortDetail);
+                    allocations, true, shortReason, shortDetail, rule);
         }
     }
 
@@ -62,7 +62,11 @@ public final class AllocationDtos {
             boolean shortClose) {
     }
 
-    public record IssueRequest(@NotBlank String orderRef) {
+    /** {@code transferToSite} (ADR-0025): the order is a transfer; what is issued goes in transit to that site. */
+    public record IssueRequest(@NotBlank String orderRef, String transferToSite) {
+        public IssueRequest(String orderRef) {
+            this(orderRef, null);
+        }
     }
 
     public record IssueResult(String orderRef, List<IssuedLine> lines, boolean replayed) {

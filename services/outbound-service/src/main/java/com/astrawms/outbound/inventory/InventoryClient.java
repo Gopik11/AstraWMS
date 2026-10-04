@@ -11,12 +11,18 @@ public interface InventoryClient {
     }
 
     /** {@code shortReason}/{@code shortDetail}: why the allocation came up short (ADR-0021); null when not short. */
+    /** {@code rule}: the allocation rule that fired, in words (ADR-0025), recorded on the order line. */
     record AllocateResult(String baseUom, BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
-                          List<Allocation> allocations, String shortReason, String shortDetail) {
+                          List<Allocation> allocations, String shortReason, String shortDetail, String rule) {
 
         public AllocateResult(String baseUom, BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
                               List<Allocation> allocations) {
-            this(baseUom, requestedQty, allocatedQty, shortQty, allocations, null, null);
+            this(baseUom, requestedQty, allocatedQty, shortQty, allocations, null, null, null);
+        }
+
+        public AllocateResult(String baseUom, BigDecimal requestedQty, BigDecimal allocatedQty, BigDecimal shortQty,
+                              List<Allocation> allocations, String shortReason, String shortDetail) {
+            this(baseUom, requestedQty, allocatedQty, shortQty, allocations, shortReason, shortDetail, null);
         }
     }
 
@@ -41,6 +47,11 @@ public interface InventoryClient {
     List<InventoryAllocation> allocations(String siteId, String orderRef);
 
     List<IssuedLine> issue(String siteId, String key, String orderRef);
+
+    /** Goods issue of a transfer (ADR-0025): inventory keeps what was issued in transit to {@code transferToSite}. */
+    default List<IssuedLine> issue(String siteId, String key, String orderRef, String transferToSite) {
+        return issue(siteId, key, orderRef);
+    }
 
     void release(String siteId, String key, String orderRef);
 }

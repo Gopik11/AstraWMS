@@ -119,6 +119,16 @@ public class PackingController {
         return loads.removeOrder(siteId, loadNo, erpDocNo);
     }
 
+    public record TrackingRequest(String status, String trackingNo, String detail) {
+    }
+
+    /** Carrier tracking status on the load (ADR-0025): from the carrier's webhook via the integration client, or by hand. */
+    @PreAuthorize("hasAnyRole('SUPERVISOR','ERP_INTEGRATION')")
+    @PostMapping("/loads/{loadNo}/tracking")
+    public Map<String, Object> track(@PathVariable String siteId, @PathVariable String loadNo, @RequestBody TrackingRequest body) {
+        return loads.track(siteId, loadNo, body.status(), body.trackingNo(), body.detail());
+    }
+
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/loads/{loadNo}/close")
     public Map<String, Object> closeLoad(@PathVariable String siteId, @PathVariable String loadNo,

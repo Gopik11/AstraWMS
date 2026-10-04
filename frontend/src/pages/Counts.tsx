@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { get, post, query, type Row } from '../api'
+import { get, post, put, query, type Row } from '../api'
 import { useAuth } from '../auth'
 import { Badge, Card, ErrorBox, Field, Page, Success, Table, fmtDate, fmtQty, useAction, useLoad, useSite } from '../ui'
 
@@ -59,6 +59,8 @@ export default function Counts() {
         ]} />
       </Card>
       {selected && <Detail id={selected} site={site} canDecide={hasRole('INV_MANAGER', 'SUPERVISOR')} onChange={list.reload} />}
+      <CyclePlan site={site} canOpen={hasRole('INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR')} canSet={hasRole('INV_MANAGER', 'SOLUTION_ADMIN')}
+                 onChange={list.reload} />
       <PhysicalInventory site={site} canRun={hasRole('INV_MANAGER', 'SUPERVISOR')} onChange={list.reload} />
     </Page>
   )
@@ -178,6 +180,54 @@ function PhysicalInventory({ site, canRun, onChange }: { site: string; canRun: b
           )}
         </>
       )}
+    </Card>
+  )
+}
+
+/**
+ * Risk-based cycle counting (ADR-0025): a location's class is the fastest item it holds (A, B, C); it is due every
+ * 30 / 90 / 180 days (site setting), half as often apart after a count with a variance, and at once when never counted.
+ */
+function CyclePlan({ site, canOpen, canSet, onChange }: { site: string; canOpen: boolean; canSet: boolean; onChange: () => void }) {
+  const plan = useLoad(() => get<{ frequency: { aDays: number; bDays: number; cDays: number }; locations: Row[] }>(
+    `/api/v1/sites/${site}/inventory/counts/plan`), [site])
+  const [limit, setLimit] = useState('20')
+  const open = useAction(() => post<{ opened: number; locations: string[] }>(`/api/v1/sites/${site}/inventory/counts/plan/open${query({ limit })}`))
+  const [freq, setFreq] = useState<{ aDays: string; bDays: string; cDays: string }>()
+  const saveFreq = useAction(() => put(`/api/v1/sites/${site}/inventory/counts/plan/frequency`, {
+    aDays: Number(freq?.aDays), bDays: Number(freq?.bDays), cDays: Number(freq?.cDays) }))
+  const due = (plan.data?.locations ?? []).filter((l) => l.due)
+  const f = plan.data?.frequency
+  return (
+    <Card title={`Cycle count plan: ${due.length} location(s) due`} actions={canOpen && due.length > 0 ? (
+      <div className="row tight">
+        <input type="number" min={1} max={200} value={limit} onChange={(e) => setLimit(e.target.value)} size={3} aria-label="How many" />
+        <button className="primary small" disabled={open.busy}
+                onClick={async () => { if (await open.run()) { plan.reload(); onChange() } }}>Open counts</button>
+      </div>) : undefined}>
+      <ErrorBox error={plan.error ?? open.error ?? saveFreq.error} />
+      <Success>{open.result && `${open.result.opened} blind count(s) opened on RF: ${open.result.locations.join(', ')}`}</Success>
+      {f && (
+        <p className="muted">Every {f.aDays} days for class A, {f.bDays} for B, {f.cDays} for C; half that after a variance.
+          {canSet && !freq && <> <button className="link" onClick={() => setFreq({ aDays: String(f.aDays), bDays: String(f.bDays), cDays: String(f.cDays) })}>Change</button></>}</p>
+      )}
+      {freq && (
+        <div className="row">
+          {(['aDays', 'bDays', 'cDays'] as const).map((k) => (
+            <Field key={k} label={`Class ${k[0].toUpperCase()} (days)`}><input type="number" min={1} value={freq[k]}
+                   onChange={(e) => setFreq({ ...freq, [k]: e.target.value })} size={4} /></Field>
+          ))}
+          <button className="primary" disabled={saveFreq.busy} onClick={async () => { if (await saveFreq.run()) { setFreq(undefined); plan.reload() } }}>Save</button>
+        </div>
+      )}
+      <Table rows={plan.data?.locations.slice(0, 50)} empty="No stocked locations" columns={[
+        { header: 'Location', cell: (l) => <strong>{String(l.location_id)}</strong> },
+        { header: 'Class', cell: (l) => String(l.velocity_class) },
+        { header: 'Last counted', cell: (l) => (l.last_counted_at ? fmtDate(l.last_counted_at) : 'never') },
+        { header: 'Every', cell: (l) => `${String(l.interval_days)} d`, align: 'right' },
+        { header: 'Due', cell: (l) => (l.count_open ? <Badge value="OPEN" /> : l.due ? <span className="text-late">now</span> : fmtDate(l.due_at)) },
+        { header: 'Why', cell: (l) => <span className="muted">{String(l.reason)}</span> },
+      ]} />
     </Card>
   )
 }

@@ -42,6 +42,12 @@ public class ReceiptController {
         return scope.filter(siteId, receiving.list(siteId, status, q), ExpectationSummary::erpDocNo);
     }
 
+    /** Damage reported at receive (ADR-0025), with photos. */
+    @GetMapping("/{erpDocNo}/damage")
+    public java.util.List<java.util.Map<String, Object>> damage(@PathVariable String siteId, @PathVariable String erpDocNo) {
+        return receiving.damage(siteId, erpDocNo);
+    }
+
     @GetMapping("/{erpDocNo}")
     public ExpectationDetail detail(@PathVariable String siteId, @PathVariable String erpDocNo) {
         scope.require(siteId, erpDocNo);

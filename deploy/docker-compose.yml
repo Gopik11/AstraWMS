@@ -169,6 +169,7 @@ services:
       DB_NAME: tasks
       INVENTORY_URL: http://inventory-service:8080
       INBOUND_URL: http://inbound-service:8080
+      MASTER_DATA_URL: http://master-data-service:8080
       OIDC_CLIENT_ID: astra-task
       OIDC_CLIENT_SECRET: task-dev-secret
     depends_on:

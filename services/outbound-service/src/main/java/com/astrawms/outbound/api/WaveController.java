@@ -54,7 +54,7 @@ public class WaveController {
     public record OwnerPolicyRequest(Boolean shipComplete, Boolean packList, String labelTemplate) {
     }
 
-    public record OrderPolicyRequest(Integer priority, Boolean shipComplete) {
+    public record OrderPolicyRequest(Integer priority, Boolean shipComplete, String criticality, java.math.BigDecimal distanceKm) {
     }
 
     @GetMapping("/config")
@@ -118,7 +118,8 @@ public class WaveController {
     @PutMapping("/orders/{erpDocNo}/policy")
     public Map<String, Object> orderPolicy(@PathVariable String siteId, @PathVariable String erpDocNo,
                                            @RequestBody OrderPolicyRequest body) {
-        return outbound.setOrderPolicy(siteId, erpDocNo, body.priority(), body.shipComplete());
+        return outbound.setOrderPolicy(siteId, erpDocNo, body.priority(), body.shipComplete(), body.criticality(),
+                body.distanceKm());
     }
 
     /** Preview only (ADV-030): which pooled orders a wave with these criteria would contain. */

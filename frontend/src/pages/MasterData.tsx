@@ -35,6 +35,7 @@ export default function MasterData() {
       <Success>{republish.result && `${republish.result.locationsRepublished} location(s) republished; the other services update within seconds`}</Success>
       <div className="grid">
         <SiteForm key={`${site}-${known.length}`} site={site} />
+        <Owners />
         <ZoneForm site={site} />
         <LocationForm site={site} />
         <GenerateForm site={site} />
@@ -385,6 +386,31 @@ function Items() {
         { header: 'Status', cell: (i) => String(i.status) },
         { header: 'Version', cell: (i) => String(i.version), align: 'right' },
       ]} />
+    </Card>
+  )
+}
+
+const OWNERSHIP = [['OWN', 'Own stock'], ['CONSIGNMENT', 'Consignment'], ['CUSTOMER_OWNED', 'Customer-owned'],
+  ['SUPPLIER_OWNED', 'Supplier-owned']]
+
+/** Inventory ownership (ADR-0025): an attribute of the owner on the one ledger, not a second stock ledger. */
+function Owners() {
+  const owners = useLoad(() => get<Row[]>('/api/v1/network/owners'), [])
+  const save = useAction((ownerId: string, name: unknown, ownershipType: string) =>
+    put(`/api/v1/network/owners/${ownerId}`, { name: name == null ? null : String(name), ownershipType }))
+  return (
+    <Card title="Owners and ownership">
+      <ErrorBox error={owners.error ?? save.error} />
+      <Table rows={owners.data} empty="No owners yet" columns={[
+        { header: 'Owner', cell: (o) => <strong>{String(o.owner_id)}</strong> },
+        { header: 'Ownership', cell: (o) => (
+          <select value={String(o.ownership_type)} disabled={save.busy}
+                  onChange={async (e) => { await save.run(String(o.owner_id), o.name, e.target.value); owners.reload() }}>
+            {OWNERSHIP.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>) },
+      ]} />
+      <p className="muted">Consignment stock belongs to the supplier until it is consumed; customer- and supplier-owned
+        stock is held for them. All of it is on the same ledger and the same balances.</p>
     </Card>
   )
 }

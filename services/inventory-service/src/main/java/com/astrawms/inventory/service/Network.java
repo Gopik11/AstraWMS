@@ -57,25 +57,42 @@ public class Network {
     }
 
     /**
-     * Stock per aisle of a site. The aisle is the location id up to its second dash ({@code A-01-10} is aisle
-     * {@code A-01}); a location without one is its own aisle (DOCK-01 is aisle DOCK-01).
+     * Per aisle of a site (ADR-0024, ADR-0025 twin): occupancy (locations holding stock of all locations), stock,
+     * held stock, aged dock stock, frozen, and the last stock movement. The aisle is the location id up to its second
+     * dash ({@code A-01-10} is aisle {@code A-01}); a location without one is its own aisle (DOCK-01).
      */
     @Transactional(readOnly = true)
     public List<Map<String, Object>> aisles(String siteId) {
         AccessScope scope = AccessScope.current();
         return jdbc.sql("""
-                        select coalesce(substring(b.location_id from '^[^-]+-[^-]+'), b.location_id) as aisle,
+                        with stock as (
+                            select b.location_id,
+                                   sum(b.qty) as on_hand, sum(b.allocated_qty) as allocated,
+                                   sum(b.qty) filter (where b.stock_status <> 'AVAILABLE') as held,
+                                   count(*) filter (where b.stock_status = 'AVAILABLE' and b.receipt_date < :dockBefore) as aged
+                            from inventory_balance b
+                            where b.site_id = :site and b.qty > 0 and (:ownersAll or b.owner_id in (:owners))
+                            group by b.location_id),
+                        moved as (
+                            select location_id, max(occurred_at) as last_movement from inventory_txn
+                            where site_id = :site and occurred_at >= :since group by location_id)
+                        select coalesce(substring(l.location_id from '^[^-]+-[^-]+'), l.location_id) as aisle,
                                min(coalesce(l.zone_type, '')) as zone_type,
-                               sum(b.qty) as on_hand,
-                               sum(b.allocated_qty) as allocated,
-                               sum(b.qty) filter (where b.stock_status <> 'AVAILABLE') as held,
-                               count(*) filter (where %s and b.stock_status = 'AVAILABLE' and b.receipt_date < :dockBefore) as dock_aged,
-                               bool_or(f.location_id is not null) as frozen
-                        from inventory_balance b
-                        left join ref_location l on l.site_id = b.site_id and l.location_id = b.location_id
-                        left join location_freeze f on f.site_id = b.site_id and f.location_id = b.location_id
-                        where b.site_id = :site and b.qty > 0 and (:ownersAll or b.owner_id in (:owners))
+                               count(*) as locations,
+                               count(s.location_id) as occupied,
+                               coalesce(sum(s.on_hand), 0) as on_hand,
+                               coalesce(sum(s.allocated), 0) as allocated,
+                               coalesce(sum(s.held), 0) as held,
+                               coalesce(sum(s.aged) filter (where %s), 0) as dock_aged,
+                               bool_or(f.location_id is not null) as frozen,
+                               max(m.last_movement) as last_movement
+                        from ref_location l
+                        left join stock s on s.location_id = l.location_id
+                        left join moved m on m.location_id = l.location_id
+                        left join location_freeze f on f.site_id = l.site_id and f.location_id = l.location_id
+                        where l.site_id = :site
                         group by 1 order by 1""".formatted(DOCK))
+                .param("since", java.sql.Timestamp.from(clock.instant().minus(java.time.Duration.ofDays(90))))
                 .param("site", siteId).param("dockBefore", Timestamp.from(clock.instant().minus(DOCK_LIMIT)))
                 .param("ownersAll", scope.ownersAll()).param("owners", scope.ownerList())
                 .query().listOfRows();

@@ -115,7 +115,8 @@ public class TaskController {
                                                  @Valid @RequestBody TaskDtos.ReceiveRequest b) {
         return tasks.confirmReceive(siteId, taskId, new TaskService.ReceiveScan(b.scanId(), b.docNo(), b.itemNo(),
                 b.ownerId(), b.qty(), b.uom(), b.lotNo(), b.expiryDate(), b.serials(), b.lpnId(), b.locationId(),
-                b.checkDigit(), b.conditionGrade(), b.disposition(), b.returnReason(), b.overrideReason()));
+                b.checkDigit(), b.conditionGrade(), b.disposition(), b.returnReason(), b.overrideReason(),
+                b.damageReason(), b.damageNote(), b.photo()));
     }
 
     @PreAuthorize("hasAnyRole('RECEIVER','SUPERVISOR')")
@@ -136,6 +137,14 @@ public class TaskController {
     @PostMapping("/{taskId}/release")
     public TaskView release(@PathVariable String siteId, @PathVariable UUID taskId) {
         return tasks.release(siteId, taskId);
+    }
+
+    /** Batch or cluster picking (ADR-0025): a group of picks for one trip; each pick is confirmed as usual. */
+    @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")
+    @PostMapping("/pick-group")
+    public java.util.Map<String, Object> pickGroup(@PathVariable String siteId, @RequestParam(defaultValue = "CLUSTER") String mode,
+                                         @RequestParam(defaultValue = "4") int size) {
+        return tasks.pickGroup(siteId, mode, size);
     }
 
     /** Supervisor unassign (ADR-0024): back to the queue whoever holds it; the reason goes on the task history. */

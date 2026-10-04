@@ -155,8 +155,12 @@ public class OutboundService {
     public record TransferLine(String ownerId, String itemNo, java.math.BigDecimal qty, String uom, String lotNo) {
     }
 
+    /** {@code priority} (default 50) and {@code criticality} (default NORMAL) rank it in the short-stock queue. */
     public record TransferRequest(String toSiteId, String carrierScac, Instant plannedShipUtc, String note,
-                                  List<TransferLine> lines) {
+                                  List<TransferLine> lines, Integer priority, String criticality, java.math.BigDecimal distanceKm) {
+        public TransferRequest(String toSiteId, String carrierScac, Instant plannedShipUtc, String note, List<TransferLine> lines) {
+            this(toSiteId, carrierScac, plannedShipUtc, note, lines, null, null, null);
+        }
     }
 
     /**
@@ -192,7 +196,14 @@ public class OutboundService {
                 new OutboundOrder.ShipTo(to, "Site " + to, null, null),
                 r.carrierScac() == null || r.carrierScac().isBlank() ? null : r.carrierScac().trim().toUpperCase(),
                 r.plannedShipUtc(), lines, clock.instant());
-        create(siteId, order, "ASTRAWMS", to, r.note());
+        String criticality = r.criticality() == null || r.criticality().isBlank() ? "NORMAL" : r.criticality().trim().toUpperCase();
+        if (!List.of("LOW", "NORMAL", "HIGH", "CRITICAL").contains(criticality)) {
+            throw ApiException.badRequest("OUT_TRANSFER_INVALID", "criticality is LOW, NORMAL, HIGH or CRITICAL");
+        }
+        UUID id = create(siteId, order, "ASTRAWMS", to, r.note());
+        jdbc.sql("update outbound_order set priority = :p, criticality = :c, distance_km = :d where id = :id")
+                .param("p", r.priority() == null ? 50 : Math.max(0, Math.min(r.priority(), 100))).param("c", criticality)
+                .param("d", r.distanceKm()).param("id", id).update();
         return detail(siteId, no);
     }
 
@@ -313,10 +324,12 @@ public class OutboundService {
             InventoryClient.AllocateResult a = results.get(l.ref());
             jdbc.sql("""
                             update outbound_line set base_uom = :baseUom, qty_requested_base = :reqBase,
-                                qty_allocated = :alloc, qty_short = :short, short_reason = :reason, short_detail = :detail
+                                qty_allocated = :alloc, qty_short = :short, short_reason = :reason, short_detail = :detail,
+                                allocation_rule = :rule
                             where order_id = :o and erp_line_ref = :ref""")
                     .param("baseUom", a.baseUom()).param("reqBase", a.requestedQty()).param("alloc", a.allocatedQty())
                     .param("short", a.shortQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                    .param("rule", a.rule() == null ? null : a.rule() + " · at release")
                     .param("o", order.id()).param("ref", l.ref()).update();
             requestPicks(order, l.ref(), l.owner(), l.item(), a, null);
             totalAllocated = totalAllocated.add(a.allocatedQty());
@@ -475,13 +488,27 @@ public class OutboundService {
                           and (cast(:owner as text) is null or l.owner_id = :owner)
                           and (cast(:item as text) is null or l.item_no = :item)
                           and (cast(:order as uuid) is null or o.id = :order)
-                        order by coalesce(o.cutoff_at, o.planned_gi_utc) nulls last, o.priority desc, o.created_at,
-                                 l.erp_line_ref""")
+                        order by o.priority desc, coalesce(o.cutoff_at, o.planned_gi_utc) nulls last,
+                                 case o.criticality when 'CRITICAL' then 0 when 'HIGH' then 1 when 'NORMAL' then 2 else 3 end,
+                                 o.distance_km nulls last, o.created_at, l.erp_line_ref""")
                 .param("site", siteId).param("statuses", statuses).param("owner", ownerId).param("item", itemNo)
                 .param("order", orderId)
                 .query((rs, n) -> new ShortLine(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
                         rs.getString(4), rs.getString(5), rs.getBigDecimal(6), rs.getString(7), rs.getString(8)))
                 .list();
+    }
+
+    /**
+     * Where the order stood in the short-stock queue (ADR-0025): priority, then promised date, then criticality, then
+     * distance, then age — not request time alone.
+     */
+    private String queuePosition(Order order) {
+        Map<String, Object> o = jdbc.sql("""
+                        select priority, coalesce(cutoff_at, planned_gi_utc) as promised, criticality, distance_km
+                        from outbound_order where id = :id""").param("id", order.id()).query().singleRow();
+        return "priority " + o.get("priority") + ", promised " + (o.get("promised") == null ? "—" : o.get("promised"))
+                + ", criticality " + o.get("criticality")
+                + (o.get("distance_km") == null ? "" : ", distance " + o.get("distance_km") + " km");
     }
 
     /** A waiting ship-complete order is allocated whole again; returns the quantity allocated (0 if still short). */
@@ -522,9 +549,12 @@ public class OutboundService {
                             qty_short_closed = least(qty_short_closed, qty_short - :got),
                             short_hold = short_hold and qty_short - :got > qty_short_closed,
                             short_reason = case when qty_short - :got > 0 then :reason end,
-                            short_detail = case when qty_short - :got > 0 then :detail end
+                            short_detail = case when qty_short - :got > 0 then :detail end,
+                            allocation_rule = :rule
                         where order_id = :o and erp_line_ref = :ref""")
                 .param("got", a.allocatedQty()).param("reason", a.shortReason()).param("detail", a.shortDetail())
+                .param("rule", (a.rule() == null ? "" : a.rule() + " · ") + "recovered (" + trigger.toLowerCase()
+                        + ") by the queue: " + queuePosition(order))
                 .param("o", order.id()).param("ref", s.ref()).update();
         logRecovery(order.id(), s.ref(), a.allocatedQty(), trigger, arrival);
         if (!"RELEASED".equals(order.status())) {
@@ -764,7 +794,7 @@ public class OutboundService {
             throw ApiException.unprocessable("OUT_NOT_PICKED", "Order " + erpDocNo + " is " + o.status() + "; it must be PICKED");
         }
         packing.requirePacked(o.id(), siteId, erpDocNo);                     // SHP-002
-        List<InventoryClient.IssuedLine> issued = inventory.issue(siteId, "OUT-SHIP-" + erpDocNo, erpDocNo);
+        List<InventoryClient.IssuedLine> issued = inventory.issue(siteId, "OUT-SHIP-" + erpDocNo, erpDocNo, transferTo(o.id()));
         Instant now = clock.instant();
         String txn = WmsTxnId.next(clock);
         jdbc.sql("""
@@ -789,11 +819,17 @@ public class OutboundService {
         Instant shippedAt = jdbc.sql("select shipped_at from outbound_order where id = :id").param("id", o.id())
                 .query(Timestamp.class).single().toInstant();
         // The issue is replayed by its idempotency key, returning the same lines without a second stock effect.
-        List<InventoryClient.IssuedLine> issued = inventory.issue(siteId, "OUT-SHIP-" + erpDocNo, erpDocNo);
+        List<InventoryClient.IssuedLine> issued = inventory.issue(siteId, "OUT-SHIP-" + erpDocNo, erpDocNo, transferTo(o.id()));
         jdbc.sql("update outbound_order set status = 'SHIPPED', erp_error_class = null, erp_error_text = null, updated_at = :now where id = :id")
                 .param("now", Timestamp.from(clock.instant())).param("id", o.id()).update();
         publishConfirmation(siteId, o.id(), erpDocNo, o.shipmentTxnId(), shippedAt, issued);
         return detail(siteId, erpDocNo);
+    }
+
+    /** The receiving site of a transfer order, null for a customer order. */
+    private String transferTo(UUID orderId) {
+        return jdbc.sql("select transfer_to_site from outbound_order where id = :id").param("id", orderId)
+                .query(String.class).list().stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
     }
 
     private void publishConfirmation(String siteId, UUID orderId, String erpDocNo, String txn, Instant shippedAt,
@@ -913,6 +949,16 @@ public class OutboundService {
      */
     @Transactional
     public Map<String, Object> setOrderPolicy(String siteId, String erpDocNo, Integer priority, Boolean shipComplete) {
+        return setOrderPolicy(siteId, erpDocNo, priority, shipComplete, null, null);
+    }
+
+    /** Priority, ship complete, and (ADR-0025) criticality and distance, which rank the order in the short-stock queue. */
+    @Transactional
+    public Map<String, Object> setOrderPolicy(String siteId, String erpDocNo, Integer priority, Boolean shipComplete,
+                                              String criticality, BigDecimal distanceKm) {
+        if (criticality != null && !List.of("LOW", "NORMAL", "HIGH", "CRITICAL").contains(criticality.trim().toUpperCase())) {
+            throw ApiException.badRequest("OUT_CRITICALITY_INVALID", "criticality is LOW, NORMAL, HIGH or CRITICAL");
+        }
         Order o = lockOrder(siteId, erpDocNo).orElseThrow(() -> unknown(erpDocNo));
         if (!List.of("POOLED", "BACKORDERED", "RELEASED").contains(o.status())) {
             throw ApiException.unprocessable("OUT_ORDER_POLICY_LOCKED", "Order " + erpDocNo + " is " + o.status());
@@ -926,8 +972,10 @@ public class OutboundService {
         }
         jdbc.sql("""
                         update outbound_order set priority = coalesce(:p, priority),
-                            ship_complete = coalesce(:sc, ship_complete), updated_at = :now where id = :id""")
+                            ship_complete = coalesce(:sc, ship_complete), criticality = coalesce(:c, criticality),
+                            distance_km = coalesce(:d, distance_km), updated_at = :now where id = :id""")
                 .param("p", priority).param("sc", shipComplete).param("now", Timestamp.from(clock.instant()))
+                .param("c", criticality == null ? null : criticality.trim().toUpperCase()).param("d", distanceKm)
                 .param("id", o.id()).update();
         return detail(siteId, erpDocNo);
     }
@@ -971,7 +1019,8 @@ public class OutboundService {
         Map<String, Object> header = jdbc.sql("""
                         select o.id, o.erp_doc_no, o.order_type, o.revision, o.status, o.carrier_scac, o.staging_location,
                                o.pick_lpn, o.shipment_txn_id, o.tracking_no, o.erp_document, o.erp_error_class,
-                               o.erp_error_text, w.wave_no, o.priority, o.planned_gi_utc, o.ship_to ->> 'name' as ship_to_name,
+                               o.erp_error_text, w.wave_no, o.priority, o.criticality, o.distance_km, o.planned_gi_utc,
+                               o.ship_to ->> 'name' as ship_to_name,
                                o.load_id is not null as loaded, o.cutoff_at, o.ship_complete, o.transfer_to_site, o.note
                         from outbound_order o left join outbound_wave w on w.id = o.wave_id
                         where o.site_id = :site and o.erp_doc_no = :doc""")
@@ -980,7 +1029,8 @@ public class OutboundService {
         Map<String, Object> result = new HashMap<>(header);
         result.put("lines", jdbc.sql("""
                         select erp_line_ref, item_no, qty_requested, uom, base_uom, qty_requested_base, qty_allocated,
-                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold, short_reason, short_detail
+                               qty_picked, qty_short, qty_short_pick, qty_short_closed, short_hold, short_reason, short_detail,
+                               allocation_rule
                         from outbound_line where order_id = :o order by erp_line_ref""")
                 .param("o", header.get("id")).query().listOfRows().stream().map(OutboundService::stripRow).toList());
         result.put("allocations", jdbc.sql("""

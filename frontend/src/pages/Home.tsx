@@ -5,6 +5,7 @@ import { useAuth } from '../auth'
 import { offlineTasks, useOffline } from '../offline'
 import { AskBox } from './Ask'
 import { cutoffForecast } from '../forecast'
+import { acceptRecommendation, type Recommendation } from '../replenish'
 import { Card, ErrorBox, Page, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
 
 function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string, number> {
@@ -175,6 +176,14 @@ function StoreWork({ site }: { site: string }) {
   const shipped = (incoming.data ?? []).filter((t) => ['SHIPPED', 'CONFIRMED'].includes(String(t.status)))
   const byStatus = countBy(issues.data, (r) => String(r.status))
   const countsOpen = (counts.data ?? []).filter((c) => ['OPEN', 'RECOUNT'].includes(String(c.status))).length
+  // ADR-0025 satellite manager: available, demand today, recommended replenishment, in transit, stockout risk.
+  const recs = useLoad(() => get<Recommendation[]>(`/api/v1/network/replenishment?siteId=${site}`), [site])
+  const net = useLoad(() => get<Row[]>('/api/v1/network/inventory'), [])
+  const here = (net.data ?? []).find((r) => r.site_id === site)
+  const demandToday = (recs.data ?? []).reduce((n, r) => n + Number(r.dailyUsage ?? 0), 0)
+  const inTransit = (recs.data ?? []).reduce((n, r) => n + Number(r.inTransit ?? 0), 0)
+  const recommended = (recs.data ?? []).filter((r) => r.recommended)
+  const atRisk = (recs.data ?? []).filter((r) => r.stockoutRisk)
   return (
     <Section title="Store work" hint="Receive what the DC sent, issue to cost centres, WBS elements and orders, count.">
       <ErrorBox error={receipts.error ?? issues.error ?? counts.error} />
@@ -190,6 +199,18 @@ function StoreWork({ site }: { site: string }) {
                      to="/material-issues?status=REQUESTED" />
         )}
         <Attention n={counts.data ? countsOpen : undefined} label="Counts open" one="Count open" to="/counts" detail="Blind count on RF" />
+      </div>
+      <div className="tiles">
+        <div className="tile"><span className="tile-n">{here ? fmtQty(Number(here.on_hand ?? 0) - Number(here.allocated ?? 0) - Number(here.held ?? 0)) : '…'}</span>
+          <span className="tile-l">Available</span><span className="tile-d">on hand, not allocated or held</span></div>
+        <div className="tile"><span className="tile-n">{recs.data ? fmtQty(demandToday) : '…'}</span>
+          <span className="tile-l">Demand today</span><span className="tile-d">average daily issues, last 28 days</span></div>
+        <Attention n={recs.data ? recommended.length : undefined} label="Replenishments recommended" one="Replenishment recommended"
+                   to="/store-replenishment" detail={recommended.slice(0, 2).map((r) => `${r.itemNo} × ${fmtQty(r.qty)} from ${String(r.sourceSite)}`).join('; ') || 'Covered'} />
+        <div className="tile"><span className="tile-n">{recs.data ? fmtQty(inTransit) : '…'}</span>
+          <span className="tile-l">In transit to {site}</span></div>
+        <Attention n={recs.data ? atRisk.length : undefined} label="Items at stockout risk" one="Item at stockout risk" to="/store-replenishment"
+                   detail={atRisk.slice(0, 3).map((r) => `${r.itemNo} (${r.daysOfCover ?? 0} d)`).join(', ') || 'None'} />
       </div>
       <div className="row">
         <Link className="button" to="/rf">RF work</Link>
@@ -369,6 +390,18 @@ function ControlTower({ site }: { site: string }) {
   const openWaves = (waves.data ?? []).filter((w) => w.status === 'PLANNED' || w.status === 'HELD')
   const approvals = counts.data && issues.data ? counts.data.length + issues.data.length : undefined
   const later = (...loads: { reload: () => void }[]) => setTimeout(() => loads.forEach((l) => l.reload()), 2500)
+  // ADR-0025: store replenishment this site should send.
+  const recs = useLoad(() => get<Recommendation[]>('/api/v1/network/replenishment'), [site])
+  const toSend = (recs.data ?? []).filter((r) => r.recommended && r.sourceSite === site)
+  const acceptAll: TileAction = {
+    label: 'Accept', confirm: `Create ${toSend.length} transfer(s) from ${site}: ${toSend.map((r) => `${r.itemNo} × ${fmtQty(r.qty)} → ${r.siteId}`).join(', ')}?`,
+    run: async () => {
+      const made: string[] = []
+      for (const r of toSend) made.push(await acceptRecommendation(r))
+      recs.reload()
+      return `${made.length} transfer(s) created: ${made.join(', ')}`
+    },
+  }
 
   // One supervisor action per tile (ADR-0024); each confirms first and reports what it did.
   const sweepDock: TileAction = {
@@ -403,6 +436,15 @@ function ControlTower({ site }: { site: string }) {
       }
       orders.reload()
       return `${fmtQty(qty)} ${plural(qty, 'unit')} allocated` + (failed.length ? `; not done: ${failed.join('; ')}` : '')
+    },
+  }
+  const dwelling = (yard.data?.inYard ?? []).filter((a) => minutesSince(a.checked_in_at) > LIMITS.trailerDwell)
+  const checkOut: TileAction = {
+    label: 'Check out', confirm: `Check out ${dwelling.map((a) => `${String(a.appt_no)} (${String(a.trailer_no ?? '')})`).join(', ')}: in the yard over ${LIMITS.trailerDwell / 60} h?`,
+    run: async () => {
+      for (const a of dwelling) await post(`/api/v1/sites/${site}/yard/appointments/${String(a.appt_no)}/check-out`, {})
+      yard.reload()
+      return `${dwelling.length} ${plural(dwelling.length, 'trailer')} checked out`
     },
   }
   const noShow: TileAction = {
@@ -440,7 +482,12 @@ function ControlTower({ site }: { site: string }) {
                      oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} action={sweepDock} />
           <Attention n={yard.data?.inYard.length} label="Trailers in the yard" one="Trailer in the yard" to="/yard"
                      detail="Dwell since gate check-in"
-                     oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell} />
+                     oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell}
+                     action={dwelling.length ? checkOut : undefined} />
+          <Attention n={recs.data ? toSend.length : undefined} label="Store replenishments to send" one="Store replenishment to send"
+                     to="/store-replenishment" action={acceptAll}
+                     detail={toSend.length ? toSend.slice(0, 3).map((r) => `${r.siteId}: ${r.itemNo} × ${fmtQty(r.qty)} by ${String(r.requiredDate)}`).join('; ')
+                       : 'Recommended transfers from this site to its stores'} />
           <Attention n={yard.data ? lateAppts.length : undefined} label="Appointments late" one="Appointment late" to="/yard"
                      detail={lateAppts.length ? lateAppts.map((a) => String(a.appt_no)).join(', ') : 'Scheduled, not arrived 15 min after the start'}
                      oldest={oldestOf(lateAppts.map((a) => a.scheduled_start))} limitMin={15} action={noShow} />

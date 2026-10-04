@@ -54,6 +54,12 @@ public final class Gs1 {
             }
             s = s.substring(3);
         }
+        if (s.regionMatches(true, 0, "http://", 0, 7) || s.regionMatches(true, 0, "https://", 0, 8)) {
+            s = digitalLink(s);                          // a QR code with a GS1 Digital Link URL (ADR-0025)
+            if (s == null) {
+                return Optional.empty();
+            }
+        }
         try {
             Map<String, String> elements = s.startsWith("(") ? parseBracketed(s) : parseRaw(s);
             if (elements == null || elements.isEmpty()) {
@@ -66,6 +72,50 @@ public final class Gs1 {
         } catch (RuntimeException e) {                   // malformed field, impossible date: not usable GS1 data
             return Optional.empty();
         }
+    }
+
+    private static final java.util.Set<String> LINK_AIS = java.util.Set.of("00", "01", "02", "10", "11", "13", "15", "17",
+            "21", "30", "37", "400");
+
+    /**
+     * A GS1 Digital Link ({@code https://id.example.com/01/09506000134352/10/LOT7?17=270630}) as a bracketed element
+     * string; null when the URL carries no GTIN or SSCC. AIs AstraWMS does not use are ignored.
+     */
+    static String digitalLink(String url) {
+        java.net.URI u;
+        try {
+            u = java.net.URI.create(url);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        String[] parts = u.getRawPath() == null ? new String[0] : u.getRawPath().split("/");
+        StringBuilder out = new StringBuilder();
+        int start = -1;
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i].equals("01") || parts[i].equals("00")) {
+                start = i;
+                break;
+            }
+        }
+        if (start < 0) {
+            return null;
+        }
+        for (int i = start; i + 1 < parts.length; i += 2) {
+            if (LINK_AIS.contains(parts[i])) {
+                out.append('(').append(parts[i]).append(')')
+                        .append(java.net.URLDecoder.decode(parts[i + 1], java.nio.charset.StandardCharsets.UTF_8));
+            }
+        }
+        if (u.getRawQuery() != null) {
+            for (String kv : u.getRawQuery().split("&")) {
+                int eq = kv.indexOf('=');
+                if (eq > 0 && LINK_AIS.contains(kv.substring(0, eq))) {
+                    out.append('(').append(kv, 0, eq).append(')')
+                            .append(java.net.URLDecoder.decode(kv.substring(eq + 1), java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+        }
+        return out.isEmpty() ? null : out.toString();
     }
 
     private static Map<String, String> parseBracketed(String s) {

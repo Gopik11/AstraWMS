@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { get, type Row } from '../api'
 import { Card, ErrorBox, Page, Table, fmtQty, useLoad, useSiteContext, type SiteInfo } from '../ui'
@@ -41,6 +42,8 @@ export default function Network() {
     ?? sites.find((s) => s.siteId === sites.find((x) => x.siteId === site)?.supplyingSite)
     ?? sites.find((s) => s.siteType === 'MAIN')
   const open = (id: string) => { setSite(id); navigate('/') }
+  const [picked, setPicked] = useState<string>()
+  const chosen = rows.find((r) => r.site.siteId === picked)
 
   return (
     <Page title="Site network">
@@ -51,7 +54,8 @@ export default function Network() {
       {sites.length === 0 ? <p className="muted">No sites in master data for your access yet.</p> : (
         <div className="grid2">
           <Card title="Network map" actions={<Legend />}>
-            <NetworkMap rows={rows} current={site} onOpen={open} />
+            <NetworkMap rows={rows} current={site} onOpen={setPicked} />
+            {chosen && <SiteDetail row={chosen} onOpen={() => open(chosen.site.siteId)} />}
           </Card>
           {main && <Card title={`${main.siteId} aisles`} actions={<Legend />}><Twin site={main.siteId} /></Card>}
         </div>
@@ -74,6 +78,38 @@ export default function Network() {
       </Card>
     </Page>
   )
+}
+
+/** The node clicked on the map: its numbers and where to go from here. */
+function SiteDetail({ row, onOpen }: { row: SiteRow; onOpen: () => void }) {
+  const navigate = useNavigate()
+  const { setSite } = useSiteContext()
+  const go = (to: string) => { setSite(row.site.siteId); navigate(to) }
+  return (
+    <div className="site-detail">
+      <strong>{row.site.siteId}</strong> {row.site.name} · {row.site.siteType === 'STORE' ? 'store' : 'main warehouse'}
+      <div className="facts">
+        <span>On hand {fmtQty(row.inv?.on_hand ?? 0)}</span>
+        <span>Available {fmtQty(Number(row.inv?.on_hand ?? 0) - Number(row.inv?.allocated ?? 0) - Number(row.inv?.held ?? 0))}</span>
+        <span>In transit in {n(row.inb?.transfers_in_transit)}</span>
+        <span>Open tasks {n(row.tsk?.tasks_open)}</span>
+        <span>Exceptions {row.exceptions}</span>
+      </div>
+      <div className="row tight">
+        <button className="small primary" onClick={onOpen}>Overview</button>
+        <button className="small" onClick={() => go('/tasks?status=EXCEPTION')}>Exceptions</button>
+        <button className="small" onClick={() => go('/receipts?status=NOT_STARTED')}>Receipts</button>
+        <button className="small" onClick={() => go('/transfers')}>Transfers</button>
+        {row.site.siteType === 'STORE' && <button className="small" onClick={() => go('/store-replenishment')}>Replenishment</button>}
+      </div>
+    </div>
+  )
+}
+
+const ago = (v: unknown) => {
+  if (!v) return 'no movement in 90 d'
+  const h = (Date.now() - new Date(String(v)).getTime()) / 3_600_000
+  return h < 1 ? 'moved < 1 h ago' : h < 48 ? `moved ${Math.round(h)} h ago` : `moved ${Math.round(h / 24)} d ago`
 }
 
 function Legend() {
@@ -139,10 +175,12 @@ function Twin({ site }: { site: string }) {
         const exceptions = n(a.work?.exceptions) + n(a.work?.stale_assigned) + n(a.stock?.dock_aged)
         return (
           <button key={aisle} className={`twin-cell ${tone(exceptions)} ${a.stock?.frozen ? 'frozen' : ''}`}
-                  title={`${aisle}: ${fmtQty(a.stock?.on_hand ?? 0)} on hand, ${n(a.work?.tasks_open)} open task(s), ${exceptions} aged exception(s)${a.stock?.frozen ? ', frozen for a physical inventory' : ''}`}
+                  title={`${aisle}: ${n(a.stock?.occupied)} of ${n(a.stock?.locations)} locations occupied, ${fmtQty(a.stock?.on_hand ?? 0)} on hand, ${n(a.work?.tasks_open)} open task(s), ${exceptions} aged exception(s), ${ago(a.stock?.last_movement)}${a.stock?.frozen ? ', frozen for a physical inventory' : ''}`}
                   onClick={() => navigate(`/tasks?q=${encodeURIComponent(aisle)}`)}>
             <strong>{aisle}</strong>
+            {a.stock?.locations != null && <span>{Math.round((100 * n(a.stock.occupied)) / Math.max(1, n(a.stock.locations)))} % full</span>}
             <span>{fmtQty(a.stock?.on_hand ?? 0)}</span>
+            <span className="muted">{ago(a.stock?.last_movement)}</span>
             {n(a.work?.tasks_open) > 0 && <span>{n(a.work?.tasks_open)} task(s)</span>}
             {exceptions > 0 && <span className="text-late">{exceptions} exc.</span>}
             {a.stock?.frozen ? <span>frozen</span> : null}

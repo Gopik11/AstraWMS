@@ -60,6 +60,13 @@ public class LabelController {
         return labels.printed(siteId, type, status, q);
     }
 
+    /** A label's state by scan: only a VERIFIED label is active for RF work (ADR-0025). */
+    @GetMapping("/printed/status")
+    public Map<String, Object> status(@PathVariable String siteId, @RequestParam(required = false) String type,
+                                      @RequestParam String scan) {
+        return labels.status(siteId, type, scan);
+    }
+
     /** Verification scan of a label after it is applied. */
     @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','SUPERVISOR','INV_MANAGER','INV_ANALYST','RECEIVER','PICKER')")
     @PostMapping("/printed/verify")

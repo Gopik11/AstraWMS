@@ -9,6 +9,17 @@ import org.junit.jupiter.api.Test;
 class Gs1Test {
 
     @Test
+    void qrDigitalLinkAndDataMatrixGiveTheSameData() {
+        var link = Gs1.parse("]Q3https://id.gs1.org/01/09506000134352/10/LOT-7?17=270630&3103=000500&37=12").orElseThrow();
+        var matrix = Gs1.parse("]d20109506000134352" + "10LOT-7" + Gs1.GS + "17270630" + "3712").orElseThrow();
+        org.assertj.core.api.Assertions.assertThat(link.gtin()).isEqualTo("09506000134352").isEqualTo(matrix.gtin());
+        org.assertj.core.api.Assertions.assertThat(link.lot()).isEqualTo("LOT-7").isEqualTo(matrix.lot());
+        org.assertj.core.api.Assertions.assertThat(link.expiry()).isEqualTo(matrix.expiry());
+        org.assertj.core.api.Assertions.assertThat(link.count()).isEqualByComparingTo("12").isEqualByComparingTo(matrix.count());
+        org.assertj.core.api.Assertions.assertThat(Gs1.parse("https://example.com/products/42")).isEmpty();
+    }
+
+    @Test
     void bracketedGtinLotExpiryAndSerial() {
         Gs1.Data d = Gs1.parse("(01)09506000134352(17)271231(10)LOT-7(21)SN123").orElseThrow();
         assertThat(d.gtin()).isEqualTo("09506000134352");

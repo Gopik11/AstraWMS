@@ -63,6 +63,8 @@ receipt() { # receipt <site> <key> <json>; retried while the services learn the 
   for _ in $(seq 1 40); do
     call '201|200|422|404' POST "/api/v1/sites/$1/inventory/receipts" "$3" -H "Idempotency-Key: seed-$2"
     [[ "$CODE" =~ ^20 ]] && return 0
+    # Received by an earlier run of the seed (same key, other quantity): already there, nothing to do.
+    [[ "$BODY" == *IDEMPOTENCY_KEY_REUSED* ]] && return 0
     sleep 1
   done
   fail "receipt $2 at $1: $BODY"
@@ -199,6 +201,27 @@ for b in "${beta[@]}"; do
 done
 echo "20 items: 12 from SAP with GTINs, 8 BETA"
 
+# ADR-0025 network loop: owner ownership, ACME billing rates (no more unrated ACME events), an operator profile,
+# store replenishment policies (min/max/safety/transit) for every store, and the cycle count frequency. All upserts.
+network_policies() {
+  step "Network loop: ownership, ACME rates, operator profile, store policies, count frequency"
+  put "/api/v1/network/owners/ACME" '{"name":"Acme Industrial","ownershipType":"OWN"}'
+  put "/api/v1/network/owners/BETA" '{"name":"Beta Foods (3PL client)","ownershipType":"CUSTOMER_OWNED"}'
+  for r in RECEIPT:LPN:3.50 PICK:UNIT:0.18 RETURN:EVENT:2.50 STORAGE:LPN:0.60; do
+    IFS=: read -r type basis rate <<<"$r"
+    put "/api/v1/sites/DC1/inventory/billing/rates" "{\"ownerId\":\"ACME\",\"eventType\":\"$type\",\"basis\":\"$basis\",\"rate\":$rate}"
+  done
+  # A picker's profile: equipment and skills (a task needing other skills or zone equipment is not offered).
+  put "/api/v1/sites/DC1/tasks/operators/${OPERATOR_USER:-test4}" '{"equipment":["RF","PALLET_JACK"],"skills":["PICK","REPLEN"]}'
+  for s in "${STORES[@]}"; do
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100100","minQty":10,"maxQty":40,"safetyQty":4,"transitDays":1}'
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100300","minQty":5,"maxQty":20,"safetyQty":2,"transitDays":1}'
+    put "/api/v1/sites/$s/inventory/store-policies" '{"ownerId":"ACME","itemNo":"100600","minQty":6,"maxQty":24,"safetyQty":2,"transitDays":1}'
+  done
+  put "/api/v1/sites/DC1/inventory/counts/plan/frequency" '{"aDays":30,"bDays":90,"cDays":180}'
+  echo "ACME rated, ${#STORES[@]} stores x 3 replenishment policies"
+}
+
 # NETWORK_ONLY=1: for a tenant seeded before the site network (ADR-0024). Sites, locations and items above are
 # upserts, so this marks DC1 as MAIN and every store as STORE, adds the new stores and extends the items to them; then
 # it saves DC1's allocation policy and puts a starter shelf in stores ST06 and up. Documents are not created again.
@@ -211,12 +234,11 @@ if [[ "${NETWORK_ONLY:-}" == 1 ]]; then
     j=0
     for i in 100100 100300 100600; do
       j=$((j + 1)); added=$((added + 1))
-      receipt "$s" "net-$s-$i" "{\"ownerId\":\"ACME\",\"itemNo\":\"$i\",\"qty\":$((10 + RANDOM % 30)),\"uom\":\"EA\",\"locationId\":\"$(printf 'S-%02d' "$j")\"}"
+      receipt "$s" "net-$s-$i" "{\"ownerId\":\"ACME\",\"itemNo\":\"$i\",\"qty\":$((10 + ($(store_no "$s") * 7 + j * 11) % 30)),\"uom\":\"EA\",\"locationId\":\"$(printf 'S-%02d' "$j")\"}"
     done
   done
-  printf '
-SEED DONE (network only): DC1 + %s stores typed and supplied by DC1, %s stock receipts in new stores.
-' "${#STORES[@]}" "$added"
+  network_policies
+  printf '\nSEED DONE (network only): DC1 + %s stores typed and supplied by DC1, %s stock receipts in new stores.\n' "${#STORES[@]}" "$added"
   exit 0
 fi
 
@@ -240,6 +262,7 @@ for r in RECEIPT:LPN:4.50 PICK:UNIT:0.22 RETURN:EVENT:3.00 STORAGE:LPN:0.85; do
   put "/api/v1/sites/DC1/inventory/billing/rates" "{\"ownerId\":\"BETA\",\"eventType\":\"$type\",\"basis\":\"$basis\",\"rate\":$rate}"
 done
 put "/api/v1/sites/DC1/inventory/billing/rates" '{"ownerId":"BETA","eventType":"VAS","service":"LABEL","basis":"UNIT","rate":0.15}'
+network_policies
 for co in "COST_CENTER/CC-4100|Maintenance|MAINT" "COST_CENTER/CC-4200|Facilities|FACIL" "WBS/P-2026-001|Store refit Dallas|PROJ" "ORDER/700123|Forklift repair|MAINT"; do
   IFS='|' read -r path desc dept <<<"$co"
   put "/api/v1/sites/DC1/inventory/cost-objects/$path" "{\"description\":\"$desc\",\"department\":\"$dept\"}"

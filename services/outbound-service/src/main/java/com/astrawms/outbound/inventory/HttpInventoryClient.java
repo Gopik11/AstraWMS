@@ -46,7 +46,17 @@ public class HttpInventoryClient implements InventoryClient {
 
     @Override
     public List<IssuedLine> issue(String siteId, String key, String orderRef) {
-        JsonNode result = post("/api/v1/sites/{site}/inventory/issues", siteId, key, Map.of("orderRef", orderRef));
+        return issue(siteId, key, orderRef, null);
+    }
+
+    @Override
+    public List<IssuedLine> issue(String siteId, String key, String orderRef, String transferToSite) {
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("orderRef", orderRef);
+        if (transferToSite != null) {
+            body.put("transferToSite", transferToSite);
+        }
+        JsonNode result = post("/api/v1/sites/{site}/inventory/issues", siteId, key, body);
         return json.readerForListOf(IssuedLine.class).readValue(result.get("lines"));
     }
 

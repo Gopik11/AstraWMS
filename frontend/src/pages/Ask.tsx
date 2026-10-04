@@ -8,7 +8,8 @@ import { ErrorBox, fmtDate, fmtQty, useAction } from '../ui'
  * document. It is rules, not a language model: it recognises the questions below and says so when it does not.
  */
 export const ASK_EXAMPLES = ['what is late for UPSN', 'which orders are short', 'what failed to post',
-  'which tasks are stuck', 'what is waiting at the dock', 'transfers to ST03', 'where is SKU-1']
+  'which tasks are stuck', 'what is waiting at the dock', 'transfers to ST03', 'which appointments are late',
+  'where is SKU-1']
 
 export interface Answer {
   text: string
@@ -24,6 +25,17 @@ export async function answer(site: string, question: string): Promise<Answer> {
   const word = (re: RegExp) => re.exec(q)?.[1]?.toUpperCase()
   const orders = () => get<Row[]>(`/api/v1/sites/${site}/outbound/orders`)
 
+  if (/appointment|trailer|yard|door/.test(lower)) {
+    const yard = await get<{ inYard: Row[]; late: Row[] }>(`/api/v1/sites/${site}/yard/summary`)
+    const carrier = word(/\b(?:for|by|with|carrier)\s+([A-Za-z0-9]{2,6})\b/)
+    const rows = (/late|missed|no.?show/.test(lower) ? yard.late : [...yard.late, ...yard.inYard])
+      .filter((a) => !carrier || String(a.carrier_scac ?? '').toUpperCase() === carrier)
+    return {
+      text: `${rows.length} ${/late/.test(lower) ? 'late appointment(s)' : 'appointment(s) late or in the yard'}${carrier ? ` for ${carrier}` : ''} at ${site}; "Mark no-show" on the overview closes late ones`,
+      items: rows.map((a) => ({ label: String(a.appt_no), to: '/yard',
+        detail: `${String(a.status)} · ${String(a.carrier_scac ?? '')} ${String(a.trailer_no ?? '')} · door ${String(a.door ?? '—')} · ${fmtDate(a.scheduled_start)}` })),
+    }
+  }
   if (/\blate\b|overdue|behind|miss(ing)? (the )?cutoff/.test(lower)) {
     const carrier = word(/\b(?:for|by|with|carrier)\s+([A-Za-z0-9]{2,6})\b/)
     const late = (await orders()).filter(OPEN)
