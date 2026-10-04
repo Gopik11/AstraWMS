@@ -14,10 +14,17 @@ function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string
   return out
 }
 
-function Tiles({ counts, link }: { counts: Record<string, number>; link: string }) {
-  const entries = Object.entries(counts)
+/** Counts per status of one list, each linking to that list filtered the same way (ADR-0024: tile = list). */
+function Tiles({ rows, status, link }: { rows: { data?: unknown[]; error?: unknown }; status: (r: never) => string; link: string }) {
+  if (rows.error) {
+    return null   // the card's ErrorBox says what failed; no "none" for data that did not load
+  }
+  if (!rows.data) {
+    return <p className="muted">Loading…</p>
+  }
+  const entries = Object.entries(countBy(rows.data as never[], status))
   if (entries.length === 0) {
-    return <p className="muted">None yet</p>
+    return <p className="muted">None</p>
   }
   return (
     <div className="tiles">
@@ -383,6 +390,11 @@ function ControlTower({ site }: { site: string }) {
   const dockAvailable = dock.data?.filter((b) => b.stock_status === 'AVAILABLE')
   const dockQty = dockAvailable?.reduce((n, b) => n + Number(b.qty), 0)
   const dockLpns = dockAvailable ? new Set(dockAvailable.map((b) => `${String(b.location_id)}/${String(b.lpn_id)}`)).size : undefined
+  // ADR-0025: stock that already has a putaway waits for RF; "Create putaways" never makes a second task.
+  const putawayLpns = new Set((tasks.data ?? []).filter((t) => t.taskType === 'PUTAWAY' && ['RELEASED', 'ASSIGNED', 'EXCEPTION'].includes(t.status))
+    .map((t) => t.lpnId))
+  const dockWithTask = dockAvailable ? new Set(dockAvailable.filter((b) => b.lpn_id && putawayLpns.has(String(b.lpn_id))).map((b) => String(b.lpn_id))).size : 0
+  const dockWithoutTask = (dockLpns ?? 0) - dockWithTask
   const overStandard = labor.data?.operators.filter((o) => o.current?.overStandard).length
   const atRisk = labor.data && orders.data
     ? cutoffForecast(orders.data, labor.data.pickWorkByOrder ?? [], labor.data.activeOperators).filter((c) => c.atRisk) : undefined
@@ -397,9 +409,16 @@ function ControlTower({ site }: { site: string }) {
     label: 'Accept', confirm: `Create ${toSend.length} transfer(s) from ${site}: ${toSend.map((r) => `${r.itemNo} × ${fmtQty(r.qty)} → ${r.siteId}`).join(', ')}?`,
     run: async () => {
       const made: string[] = []
-      for (const r of toSend) made.push(await acceptRecommendation(r))
+      const refused: string[] = []
+      for (const r of toSend) {
+        try {
+          made.push(await acceptRecommendation(r))
+        } catch (e) {
+          refused.push(`${r.siteId} ${r.itemNo}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       recs.reload()
-      return `${made.length} transfer(s) created: ${made.join(', ')}`
+      return `${made.length} transfer(s) created${made.length ? `: ${made.join(', ')}` : ''}${refused.length ? `; refused: ${refused.join('; ')}` : ''}`
     },
   }
 
@@ -460,7 +479,7 @@ function ControlTower({ site }: { site: string }) {
     <>
       <Section title="Control tower" hint="What needs attention now; a tile turns red when its oldest item is past its limit.">
         <AskBox site={site} />
-        <ErrorBox error={receipts.error ?? orders.error ?? returns.error ?? dock.error} />
+        <ErrorBox error={receipts.error ?? orders.error ?? returns.error ?? dock.error ?? tasks.error ?? recs.error} />
         <div className="tiles">
           <Attention n={receipts.data ? notStartedRows.length : undefined} label="Receipts not started" one="Receipt not started" to="/receipts?status=NOT_STARTED"
                      oldest={oldestOf(notStartedRows.map((r) => r.createdAt))} limitMin={LIMITS.receiptNotStarted} />
@@ -478,14 +497,15 @@ function ControlTower({ site }: { site: string }) {
                      detail={staleDetail || 'Assigned to an operator but not confirmed'}
                      oldest={oldestOf(staleRows.map((t) => t.assignedAt))} limitMin={LIMITS.taskAssigned} action={unassignStale} />
           <Attention n={dockLpns} label={`${plural(dockLpns, 'Pallet')} or loose stock waiting on dock`} to="/tasks?type=PUTAWAY"
-                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} ${plural(dockQty, 'unit')} at dock / receiving, not yet allocable`}
-                     oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} action={sweepDock} />
+                     detail={dockQty === undefined ? undefined : `${fmtQty(dockQty)} ${plural(dockQty, 'unit')} at dock / receiving, not yet allocable`
+                       + (dockWithTask ? `; ${dockWithTask} already ${dockWithTask === 1 ? 'has a putaway' : 'have putaways'}: confirm on RF` : '')}
+                     oldest={oldestOf((dockAvailable ?? []).map((b) => b.receipt_date))} limitMin={LIMITS.dockStock} action={dockWithoutTask > 0 ? sweepDock : undefined} />
           <Attention n={yard.data?.inYard.length} label="Trailers in the yard" one="Trailer in the yard" to="/yard"
                      detail="Dwell since gate check-in"
                      oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell}
                      action={dwelling.length ? checkOut : undefined} />
           <Attention n={recs.data ? toSend.length : undefined} label="Store replenishments to send" one="Store replenishment to send"
-                     to="/store-replenishment" action={acceptAll}
+                     to={`/store-replenishment?source=${site}`} action={acceptAll}
                      detail={toSend.length ? toSend.slice(0, 3).map((r) => `${r.siteId}: ${r.itemNo} × ${fmtQty(r.qty)} by ${String(r.requiredDate)}`).join('; ')
                        : 'Recommended transfers from this site to its stores'} />
           <Attention n={yard.data ? lateAppts.length : undefined} label="Appointments late" one="Appointment late" to="/yard"
@@ -507,9 +527,9 @@ function ControlTower({ site }: { site: string }) {
         </div>
       </Section>
       <div className="grid">
-        <Card title="Receipts"><ErrorBox error={receipts.error} /><Tiles counts={countBy(receipts.data, (r) => r.status)} link="/receipts" /></Card>
-        <Card title="Outbound orders"><ErrorBox error={orders.error} /><Tiles counts={countBy(orders.data, (r) => String(r.status))} link="/orders" /></Card>
-        <Card title="Tasks"><ErrorBox error={tasks.error} /><Tiles counts={countBy(tasks.data, (t) => t.status)} link="/tasks" /></Card>
+        <Card title="Receipts"><ErrorBox error={receipts.error} /><Tiles rows={receipts} status={(r: ReceiptSummary) => r.status} link="/receipts" /></Card>
+        <Card title="Outbound orders"><ErrorBox error={orders.error} /><Tiles rows={orders} status={(r: Row) => String(r.status)} link="/orders" /></Card>
+        <Card title="Tasks"><ErrorBox error={tasks.error} /><Tiles rows={tasks} status={(t: Task) => t.status} link="/tasks" /></Card>
       </div>
     </>
   )
@@ -568,8 +588,8 @@ function Documents({ site }: { site: string }) {
   const orders = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/orders`), [site])
   return (
     <div className="grid">
-      <Card title="Receipts"><ErrorBox error={receipts.error} /><Tiles counts={countBy(receipts.data, (r) => r.status)} link="/receipts" /></Card>
-      <Card title="Outbound orders"><ErrorBox error={orders.error} /><Tiles counts={countBy(orders.data, (r) => String(r.status))} link="/orders" /></Card>
+      <Card title="Receipts"><ErrorBox error={receipts.error} /><Tiles rows={receipts} status={(r: ReceiptSummary) => r.status} link="/receipts" /></Card>
+      <Card title="Outbound orders"><ErrorBox error={orders.error} /><Tiles rows={orders} status={(r: Row) => String(r.status)} link="/orders" /></Card>
     </div>
   )
 }

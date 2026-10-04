@@ -18,6 +18,18 @@ public class InventoryConfig {
         return new TransactionTemplate(txManager);
     }
 
+    /** ADR-0025: what open orders and transfers hold, for store replenishment. */
+    @Bean
+    com.astrawms.inventory.outbound.OutboundClient outboundClient(com.astrawms.common.security.ServiceCallInterceptor serviceCalls,
+            @org.springframework.beans.factory.annotation.Value("${astra.outbound.base-url}") String baseUrl,
+            @org.springframework.beans.factory.annotation.Value("${astra.outbound.timeout-ms:3000}") long timeoutMs) {
+        org.springframework.http.client.SimpleClientHttpRequestFactory factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(java.time.Duration.ofMillis(timeoutMs));
+        factory.setReadTimeout(java.time.Duration.ofMillis(timeoutMs));
+        return new com.astrawms.inventory.outbound.HttpOutboundClient(org.springframework.web.client.RestClient.builder()
+                .baseUrl(baseUrl).requestFactory(factory).requestInterceptor(serviceCalls).build());
+    }
+
     // Topics are declared for local/dev environments; production topics are provisioned by infrastructure.
     @Bean
     NewTopic inventoryEventsTopic(Topics topics) {

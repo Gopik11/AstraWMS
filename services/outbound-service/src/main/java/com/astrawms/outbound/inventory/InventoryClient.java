@@ -46,6 +46,17 @@ public interface InventoryClient {
     /** All allocations of an order, as inventory sees them (the authority on what was actually picked). */
     List<InventoryAllocation> allocations(String siteId, String orderRef);
 
+    /** On hand in AVAILABLE status and how much of it is allocated, for one item at a site (ADR-0025). */
+    record Availability(BigDecimal onHand, BigDecimal allocated) {
+        public BigDecimal free() {
+            return onHand.subtract(allocated);
+        }
+    }
+
+    default Availability availability(String siteId, String ownerId, String itemNo) {
+        throw new UnsupportedOperationException("availability");
+    }
+
     List<IssuedLine> issue(String siteId, String key, String orderRef);
 
     /** Goods issue of a transfer (ADR-0025): inventory keeps what was issued in transit to {@code transferToSite}. */

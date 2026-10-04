@@ -47,14 +47,37 @@ export async function api<T>(method: string, path: string, options: RequestOptio
     return undefined as T
   }
   const text = await response.text()
-  const data = text ? (JSON.parse(text) as unknown) : undefined
+  let data: unknown
+  try {
+    data = text ? (JSON.parse(text) as unknown) : undefined
+  } catch {
+    // Not JSON: a gateway page (502 while a service restarts) or a proxy error.
+    data = { title: response.statusText || `HTTP ${response.status}`,
+      detail: response.status >= 502 ? 'The service is restarting or unavailable; try again in a moment' : text.slice(0, 200) }
+  }
   if (!response.ok) {
     throw new ApiError(response.status, (data as Record<string, unknown>) ?? { title: response.statusText })
   }
   return data as T
 }
 
-export const get = <T>(path: string) => api<T>('GET', path)
+const RETRYABLE = new Set([502, 503, 504])
+
+/**
+ * Reads retry twice (after 0.8 s and 2 s) when the gateway answers 502/503/504, e.g. while a service restarts during a
+ * deployment, so a page does not show a half-loaded state. Commands are never retried here: they carry their own
+ * idempotency keys and the user decides.
+ */
+export async function get<T>(path: string): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api<T>('GET', path)
+    } catch (e) {
+      if (attempt >= 2 || !(e instanceof ApiError) || !RETRYABLE.has(e.status)) throw e
+      await new Promise((r) => setTimeout(r, attempt === 0 ? 800 : 2000))
+    }
+  }
+}
 export const post = <T>(path: string, body?: unknown, options: RequestOptions = {}) =>
   api<T>('POST', path, { ...options, body })
 export const put = <T>(path: string, body?: unknown, options: RequestOptions = {}) =>

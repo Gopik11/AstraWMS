@@ -120,6 +120,14 @@ public class OutboundService {
 
     /** Stores a new order and, in waveless mode, releases it (allocation and picks). */
     private UUID create(String site, OutboundOrder o, String sourceSystem, String transferTo, String note) {
+        return create(site, o, sourceSystem, transferTo, note, null);
+    }
+
+    /**
+     * {@code attempt}: part of the allocation idempotency keys. A strict transfer that is refused leaves its number
+     * free for the next transfer; its own attempt keeps the next one's allocations from replaying the refused ones.
+     */
+    private UUID create(String site, OutboundOrder o, String sourceSystem, String transferTo, String note, String attempt) {
         boolean pooled = "WAVE".equals(releaseMode(site));
         UUID id = UUID.randomUUID();
         Timestamp now = Timestamp.from(clock.instant());
@@ -143,7 +151,7 @@ public class OutboundService {
                 .param("staging", stagingLocation).param("pickLpn", "PK-" + o.erpDocNo()).param("now", now).update();
         insertLines(id, o.lines());
         if (!pooled) {
-            allocateAndRelease(lockOrder(id), null);
+            allocateAndRelease(lockOrder(id), attempt);
         }
         return id;
     }
@@ -155,12 +163,78 @@ public class OutboundService {
     public record TransferLine(String ownerId, String itemNo, java.math.BigDecimal qty, String uom, String lotNo) {
     }
 
-    /** {@code priority} (default 50) and {@code criticality} (default NORMAL) rank it in the short-stock queue. */
+    /**
+     * {@code priority} (default 50) and {@code criticality} (default NORMAL) rank it in the short-stock queue.
+     * {@code strict} (an accepted replenishment, ADR-0025): refused unless the source has the quantity free (on hand,
+     * less allocated, less what open orders and transfers still wait for) and no open transfer to the same store
+     * already carries the item.
+     */
     public record TransferRequest(String toSiteId, String carrierScac, Instant plannedShipUtc, String note,
-                                  List<TransferLine> lines, Integer priority, String criticality, java.math.BigDecimal distanceKm) {
+                                  List<TransferLine> lines, Integer priority, String criticality, java.math.BigDecimal distanceKm,
+                                  Boolean strict) {
         public TransferRequest(String toSiteId, String carrierScac, Instant plannedShipUtc, String note, List<TransferLine> lines) {
-            this(toSiteId, carrierScac, plannedShipUtc, note, lines, null, null, null);
+            this(toSiteId, carrierScac, plannedShipUtc, note, lines, null, null, null, null);
         }
+    }
+
+    /**
+     * A strict transfer is allocated in full or not at all (ADR-0025, review 2): free stock the site policy cannot
+     * allocate now (a reserve pallet the transfer does not cover while the pick face waits for its replenishment) is
+     * not a reservation. Anything allocated is released and the transfer is not created; the refusal says why.
+     */
+    private void requireAllocated(String siteId, UUID orderId, String transferNo) {
+        List<Map<String, Object>> shorts = jdbc.sql("""
+                        select erp_line_ref, item_no, qty_short, short_reason, short_detail from outbound_line
+                        where order_id = :o and qty_short > 0 order by erp_line_ref """)
+                .param("o", orderId).query().listOfRows();
+        if (shorts.isEmpty()) {
+            return;
+        }
+        inventory.release(siteId, "OUT-STRICT-" + orderId, transferNo);
+        throw ApiException.conflict("OUT_NOT_ALLOCABLE", "Nothing was reserved: " + shorts.stream()
+                .map(l -> l.get("item_no") + " short " + strip((BigDecimal) l.get("qty_short")).toPlainString()
+                        + (l.get("short_detail") == null ? "" : " (" + l.get("short_detail") + ")"))
+                .collect(java.util.stream.Collectors.joining("; "))
+                + ". Accept again when the stock can be allocated, e.g. after the pick-face replenishment is confirmed on RF.");
+    }
+
+    /** The source's free quantity for a strict transfer, and who holds the rest when it is not enough. */
+    private void requireFree(String siteId, String toSite, String owner, String item, BigDecimal qty) {
+        List<String> open = jdbc.sql("""
+                        select distinct o.erp_doc_no from outbound_order o join outbound_line l on l.order_id = o.id
+                        where o.site_id = :site and o.transfer_to_site = :to and l.owner_id = :owner and l.item_no = :item
+                          and o.status not in ('SHIPPED', 'CONFIRMED', 'CANCELLED', 'SHIP_ERROR')""")
+                .param("site", siteId).param("to", toSite).param("owner", owner).param("item", item).query(String.class).list();
+        if (!open.isEmpty()) {
+            throw ApiException.conflict("OUT_TRANSFER_EXISTS", "Open transfer " + String.join(", ", open) + " already brings "
+                    + item + " from " + siteId + " to " + toSite + "; it is counted before recommending again");
+        }
+        InventoryClient.Availability a = inventory.availability(siteId, owner, item);
+        BigDecimal waiting = jdbc.sql("""
+                        select coalesce(sum(l.qty_short - l.qty_short_closed), 0) from outbound_order o
+                        join outbound_line l on l.order_id = o.id
+                        where o.site_id = :site and l.owner_id = :owner and l.item_no = :item
+                          and o.status not in ('SHIPPED', 'CONFIRMED', 'CANCELLED', 'SHIP_ERROR')""")
+                .param("site", siteId).param("owner", owner).param("item", item).query(BigDecimal.class).single();
+        BigDecimal free = a.free().subtract(waiting);
+        if (free.compareTo(qty) >= 0) {
+            return;
+        }
+        List<String> holders = jdbc.sql("""
+                        select o.erp_doc_no || coalesce(' (to ' || o.transfer_to_site || ')', '') || ': '
+                               || case when l.qty_allocated > 0 then trim(to_char(l.qty_allocated, 'FM999999990.###')) || ' allocated' else '' end
+                               || case when l.qty_allocated > 0 and l.qty_short - l.qty_short_closed > 0 then ', ' else '' end
+                               || case when l.qty_short - l.qty_short_closed > 0
+                                       then trim(to_char(l.qty_short - l.qty_short_closed, 'FM999999990.###')) || ' waiting' else '' end
+                        from outbound_order o join outbound_line l on l.order_id = o.id
+                        where o.site_id = :site and l.owner_id = :owner and l.item_no = :item
+                          and o.status not in ('SHIPPED', 'CONFIRMED', 'CANCELLED', 'SHIP_ERROR')
+                          and (l.qty_allocated > 0 or l.qty_short - l.qty_short_closed > 0)
+                        order by l.qty_allocated + l.qty_short desc limit 8""")
+                .param("site", siteId).param("owner", owner).param("item", item).query(String.class).list();
+        throw ApiException.conflict("OUT_SOURCE_SHORT", siteId + " has " + strip(free.max(BigDecimal.ZERO)).toPlainString() + " of " + item
+                + " free (on hand " + strip(a.onHand()).toPlainString() + ", allocated " + strip(a.allocated()).toPlainString() + ", waiting on open orders and transfers "
+                + strip(waiting).toPlainString() + "), not " + strip(qty).toPlainString() + (holders.isEmpty() ? "" : ". Held by: " + String.join("; ", holders)));
     }
 
     /**
@@ -188,6 +262,9 @@ public class OutboundService {
                 throw ApiException.badRequest("OUT_TRANSFER_INVALID", "Each line needs ownerId, itemNo, a positive qty and uom");
             }
             com.astrawms.common.security.AccessScope.current().requireOwner(l.ownerId().trim().toUpperCase());
+            if (Boolean.TRUE.equals(r.strict())) {
+                requireFree(siteId, to, l.ownerId().trim().toUpperCase(), l.itemNo().trim(), l.qty());
+            }
             n += 10;
             lines.add(new OutboundOrder.Line("%06d".formatted(n), l.ownerId().trim().toUpperCase(), l.itemNo().trim(),
                     l.qty(), l.uom().trim().toUpperCase(), l.lotNo() == null || l.lotNo().isBlank() ? null : l.lotNo().trim()));
@@ -200,7 +277,14 @@ public class OutboundService {
         if (!List.of("LOW", "NORMAL", "HIGH", "CRITICAL").contains(criticality)) {
             throw ApiException.badRequest("OUT_TRANSFER_INVALID", "criticality is LOW, NORMAL, HIGH or CRITICAL");
         }
-        UUID id = create(siteId, order, "ASTRAWMS", to, r.note());
+        String attempt = Boolean.TRUE.equals(r.strict()) ? "S" + UUID.randomUUID().toString().substring(0, 8) : null;
+        UUID id = create(siteId, order, "ASTRAWMS", to, r.note(), attempt);
+        if (Boolean.TRUE.equals(r.strict())) {
+            if ("POOLED".equals(lockOrder(id).status())) {
+                allocateAndRelease(lockOrder(id), attempt);   // a reservation is allocated now, wave release or not
+            }
+            requireAllocated(siteId, id, no);
+        }
         jdbc.sql("update outbound_order set priority = :p, criticality = :c, distance_km = :d where id = :id")
                 .param("p", r.priority() == null ? 50 : Math.max(0, Math.min(r.priority(), 100))).param("c", criticality)
                 .param("d", r.distanceKm()).param("id", id).update();
@@ -214,7 +298,10 @@ public class OutboundService {
                         select o.erp_doc_no, o.site_id as from_site, o.transfer_to_site as to_site, o.status, o.carrier_scac,
                                o.planned_gi_utc, o.shipped_at, o.erp_document, o.created_at, o.note,
                                (select count(*) from outbound_line l where l.order_id = o.id) as lines,
-                               (select coalesce(sum(l.qty_picked), 0) from outbound_line l where l.order_id = o.id) as qty_picked
+                               (select coalesce(sum(l.qty_picked), 0) from outbound_line l where l.order_id = o.id) as qty_picked,
+                               (select coalesce(sum(coalesce(l.qty_requested_base, l.qty_requested)), 0) from outbound_line l where l.order_id = o.id) as qty_requested,
+                               (select coalesce(sum(l.qty_allocated), 0) from outbound_line l where l.order_id = o.id) as qty_allocated,
+                               (select coalesce(sum(l.qty_short - l.qty_short_closed), 0) from outbound_line l where l.order_id = o.id) as qty_short
                         from outbound_order o
                         where o.transfer_to_site is not null
                           and (case when :incoming then o.transfer_to_site = :site else o.site_id = :site end)
