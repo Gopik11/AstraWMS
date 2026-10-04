@@ -46,10 +46,11 @@ docker compose -f deploy/docker-compose.yml up -d --build
 - `smoke-tender.sh` covers ADR-0022: SAP material master, labels, material issue to a cost centre with the SAP 201 posting, and a frozen physical inventory posted by a non-counter.
 - `smoke-flow.sh` replays the SAP flow test of ADR-0019: an order backordered before stock, an ASN received on an RF RECEIVE task, putaway to storage with an override, the backorder recovered automatically, a second order picked, packed and loaded by the picker onto the supervisor's load, and an RMA restocked with a putaway task for the returned unit.
 - `smoke-returns.sh` covers customer returns: a SAP returns delivery becomes an RMA, units graded A (restocked) and D (RTV, blocked), over-RMA refused, then close posts the 651 receipt and 453 restock in simulated SAP; plus a blind return.
+- `smoke-rfid.sh` covers ADR-0027 RFID: unit, case and pallet tags resolved (hex and URI reads of one tag counted once), a pallet tag reconciling its location, a serial not read, and a WMS-encoded SGTIN-96 tag commissioned.
 - `smoke-waves.sh` covers wave release: orders pooled in WAVE mode, wave plan / create / release, a short pick re-allocated to another location, a picked order cancelled from SAP and returned to stock by an RF return task (cancel acknowledged only then), and the other order shipped complete.
 
 ```bash
-scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh && scripts/smoke-counts.sh && scripts/smoke-replenishment.sh && scripts/smoke-packing.sh && scripts/smoke-returns.sh && scripts/smoke-flow.sh
+scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh && scripts/smoke-counts.sh && scripts/smoke-replenishment.sh && scripts/smoke-packing.sh && scripts/smoke-returns.sh && scripts/smoke-flow.sh && scripts/smoke-rfid.sh
 ```
 
 **Android RF app.** `mobile/android` is the handheld app with RFID (ADR-0027); see [its README](mobile/android/README.md). `cd mobile/android && ./gradlew -p core test && ./gradlew :app:assembleDebug` tests the platform-independent core, then builds the APK (needs the Android SDK). Sign-in uses the Keycloak client `astra-mobile`.
