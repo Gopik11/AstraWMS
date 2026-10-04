@@ -109,6 +109,16 @@ docker exec -e KCPW="$KC_ADMIN_PASSWORD" -e PUBLIC_URL="$PUBLIC_URL" "$(dc ps -q
   $K update clients/$id -r astrawms -s "redirectUris=[\"$PUBLIC_URL/*\"]" -s "webOrigins=[\"$PUBLIC_URL\"]"     -s "attributes.\"post.logout.redirect.uris\"=$PUBLIC_URL/*" $C
   rc=$?; rm -f /tmp/kcadm.cfg; exit $rc' || { echo "FAILED: could not update the astra-web client" >&2; exit 1; }
 
+# ADR-0027: the Android RF app's client (added after the first import of some realms) is created when missing.
+python3 -c 'import json; print(json.dumps(next(c for c in json.load(open("keycloak-template/astrawms-realm.json"))["clients"] if c["clientId"] == "astra-mobile")))' > /tmp/astra-mobile.json
+docker cp /tmp/astra-mobile.json "$(dc ps -q keycloak)":/tmp/astra-mobile.json && rm -f /tmp/astra-mobile.json
+docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
+  K=/opt/keycloak/bin/kcadm.sh; C="--config /tmp/kcadm.cfg"
+  $K config credentials --server http://localhost:8080 --realm master --user admin --password "$KCPW" $C >/dev/null 2>&1 &&
+  if $K get clients -r astrawms -q clientId=astra-mobile --fields id $C | grep -q "[0-9a-f-]\{36\}"; then rc=0;
+  else $K create clients -r astrawms -f /tmp/astra-mobile.json $C; rc=$?; fi
+  rm -f /tmp/kcadm.cfg /tmp/astra-mobile.json; exit $rc' || { echo "FAILED: could not create the astra-mobile client" >&2; exit 1; }
+
 say "Stage 3: gateway, then the services one at a time"
 dc up -d gateway
 for svc in master-data-service inventory-service inbound-service task-service outbound-service sap-adapter; do

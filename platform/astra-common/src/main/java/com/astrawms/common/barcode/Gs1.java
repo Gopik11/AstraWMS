@@ -17,6 +17,9 @@ import java.util.Optional;
  * Supported AIs: 00 SSCC, 01 GTIN, 02 GTIN of contained items, 10 batch/lot, 11 production date, 15 best before,
  * 17 expiry, 21 serial, 30 variable count, 37 count of units, 400 customer PO. A plain item number or a bare GTIN is
  * not GS1 element-string data: {@link #parse} returns empty and the scan is used as it is.
+ * <p>
+ * An RFID read is accepted wherever a GS1 scan is (ADR-0027): an SGTIN EPC reads as AI 01 + 21 (GTIN and serial), an
+ * SSCC EPC as AI 00. Element strings are tried first, so no barcode reads differently than before.
  */
 public final class Gs1 {
 
@@ -42,8 +45,13 @@ public final class Gs1 {
     private Gs1() {
     }
 
-    /** Parses a scan; empty when it is not a GS1 element string (or is malformed). */
+    /** Parses a scan; empty when it is neither a GS1 element string nor a GS1 EPC (or is malformed). */
     public static Optional<Data> parse(String scan) {
+        return parseElements(scan).or(() -> com.astrawms.common.rfid.Epc.parse(scan)
+                .flatMap(com.astrawms.common.rfid.Epc.Tag::toGs1));
+    }
+
+    private static Optional<Data> parseElements(String scan) {
         if (scan == null) {
             return Optional.empty();
         }
