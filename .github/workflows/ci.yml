@@ -52,3 +52,32 @@ jobs:
           npm ci --no-audit --no-fund
           npm test
           npm run build
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile/android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The platform-independent core (EPC/GS1 codecs, tag buffer, API client, offline queue) on the JVM,
+      # then the Android app (the runner image has the Android SDK).
+      - name: Test the core and build the Android app
+        run: |
+          ./gradlew --no-daemon -p core test
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload the debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrawms-rf-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/*.apk

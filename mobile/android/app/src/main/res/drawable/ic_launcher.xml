@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A pallet with an RFID wave: the AstraWMS RF app. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#FF1B3A5C" android:pathData="M4,4h40v40h-40z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M10,30h20v8h-20z" />
+    <path android:fillColor="#FFF5A623" android:pathData="M30,10a10,10 0,0 1,10 10h-3a7,7 0,0 0,-7 -7z" />
+    <path android:fillColor="#FFF5A623" android:pathData="M30,16a4,4 0,0 1,4 4h-4z" />
+</vector>

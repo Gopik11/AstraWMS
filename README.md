@@ -12,13 +12,14 @@ This repository contains:
 |---|---|
 | [`platform/astra-common`](platform/astra-common) | OAuth2 resource server (token validation, tenant from the token, role checks, approver proof, service-to-service tokens), Postgres RLS binding, RFC 9457 errors, transactional outbox/relay, inbox de-duplication, 16-char `WmsTxnId`, shared event contracts |
 | [`services/master-data-service`](services/master-data-service) | Items (UoMs, GTINs, site control data), sites, zones, locations with zone inheritance and bulk generation; ZPL bin/item/LPN labels and site label printers; publishes `ItemUpserted` / `LocationUpserted` |
-| [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; allocation policy per site and owner (FEFO/FIFO, lot affinity, full LPN); replenishment, slotting (velocity, reslot) and 3PL billing from the ledger; controlled material issue to cost objects; full physical inventory with freeze; publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
+| [`services/inventory-service`](services/inventory-service) | Bin/LPN/lot inventory with an append-only ledger; receipts, moves (qty and whole LPN), adjustments, status changes; allocation policy per site and owner (FEFO/FIFO, lot affinity, full LPN); replenishment, slotting (velocity, reslot) and 3PL billing from the ledger; controlled material issue to cost objects; full physical inventory with freeze; RFID tag resolve, location reconcile and tag commissioning (ADR-0027); publishes `InventoryChanged` and ERP `GoodsMovement` (IF-INV-001) |
 | [`services/inbound-service`](services/inbound-service) | Receipt expectations from the ERP with the IF-IB-001 change matrix and application acks; RF line and SSCC receiving with tolerance and lot rules; receipt close with short reasons; `ReceiptConfirmation` (IF-IB-002), ERP result tracking and repost; customer returns; yard and dock appointments |
 | [`services/task-service`](services/task-service) | Directed putaway: tasks created when LPNs arrive at the dock; engine with temperature, hazmat, mixing and capacity rules, consolidate then nearest-empty; RF next / confirm (LPN and check-digit scan) / exception with re-planning; receive, pick, replenish, move, count and return tasks; labor standards and board; automation task API for devices |
 | [`services/outbound-service`](services/outbound-service) | Outbound orders from the ERP (IF-OB-001) with acks; waveless release or waves (pool, plan preview, hold, release by carrier cutoff); ship complete and owner rules; allocation and pick requests; backorder recovery with a recovery log; re-allocation after short picks; ship (issue + `ShipmentConfirmation`, IF-OB-003); ERP result tracking and repost; cancellation with reverse picks of picked stock |
 | [`adapters/sap-adapter`](adapters/sap-adapter) | DELVRY07 → `ReceiptExpectation`; MATMAS05 → item master; confirmations → `BAPI_INB_DELIVERY_CONFIRM_DEC`; goods movements → `BAPI_GOODSMVT_CREATE`; IDoc status; `SapGateway` with a simulated SAP backend (fault injection, duplicate check) |
 | [`platform/astra-test-support`](platform/astra-test-support) | Shared Testcontainers setup (Postgres as a non-owner role, Kafka) and a test token issuer |
 | [`frontend`](frontend) | Web UI (React + TypeScript): RF screens, receipts, orders and waves, tasks, stock inquiry and adjustments, master data, ERP simulator |
+| [`mobile/android`](mobile/android) | Android RF app (Kotlin, Jetpack Compose) with RFID: Zebra DataWedge, Bluetooth UHF (TSL ASCII), NFC and simulated readers; RF work for every task type with tags as LPN / item scans, quantities, serials and count lines; location check, tag find and commissioning; offline queue (ADR-0027) |
 | [`deploy`](deploy) | Docker Compose stack with Keycloak (`deploy/keycloak`, realm `astrawms`) and the nginx API gateway (`deploy/gateway`) |
 
 Design decisions are recorded in [docs/architecture/adr](docs/architecture/adr/README.md).
@@ -51,6 +52,8 @@ docker compose -f deploy/docker-compose.yml up -d --build
 scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh && scripts/smoke-waves.sh && scripts/smoke-counts.sh && scripts/smoke-replenishment.sh && scripts/smoke-packing.sh && scripts/smoke-returns.sh && scripts/smoke-flow.sh
 ```
 
+**Android RF app.** `mobile/android` is the handheld app with RFID (ADR-0027); see [its README](mobile/android/README.md). `cd mobile/android && ./gradlew -p core test && ./gradlew :app:assembleDebug` tests the platform-independent core, then builds the APK (needs the Android SDK). Sign-in uses the Keycloak client `astra-mobile`.
+
 **Monitoring.** `docker compose -f deploy/docker-compose.yml --profile monitoring up -d` adds Prometheus at http://localhost:9090 with the alert rules in `deploy/monitoring/alerts.yml`. Dead letters, outbox backlog and service health are on the **Operations** page of the web UI (SOLUTION_ADMIN). See ADR-0018.
 
 **Deploy to a VPS (test environment).** `scripts/deploy-vps.sh` builds the images locally, uploads them over SSH in checksummed chunks and starts [deploy/vps/docker-compose.yml](deploy/vps/docker-compose.yml) in `/opt/astrawms`.
@@ -67,7 +70,7 @@ scripts/smoke-test.sh && scripts/smoke-inbound.sh && scripts/smoke-outbound.sh &
 | Service | Base path |
 |---|---|
 | Master data | `/api/v1/items`, `/api/v1/sites/...` |
-| Inventory | `/api/v1/sites/{siteId}/inventory/...` |
+| Inventory | `/api/v1/sites/{siteId}/inventory/...`; RFID under `/inventory/rfid` (`resolve`, `locations/{loc}/reconcile`, `sightings`, `tags`) |
 | Inbound | `/api/v1/sites/{siteId}/receipts/...` |
 | Task | `/api/v1/sites/{siteId}/tasks/...` (`next`, `{id}/confirm`, `{id}/pick`, `{id}/return`, `{id}/exception`, `{id}/replan`) |
 | Outbound | `/api/v1/sites/{siteId}/outbound/orders/...` (`{doc}/ship`, `{doc}/repost`), `/outbound/config` (release mode), `/outbound/waves` (`plan`, create, `{no}/release`) |

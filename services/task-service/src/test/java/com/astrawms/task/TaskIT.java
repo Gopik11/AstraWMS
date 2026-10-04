@@ -774,6 +774,52 @@ class TaskIT {
         inbound.calls.clear();                                       // the stub is shared by the tests
     }
 
+    @Test
+    void rfidTagsStandInForBarcodes_ADR0027() throws Exception {
+        send(MasterDataEvents.TOPIC, MasterDataEvents.ITEM_UPSERTED, "ACME:SKU-1",
+                new ItemUpserted("ACME", "SKU-1", "EA", "ACTIVE", null, null, false,
+                        List.of(new ItemUpserted.Site("DC1", false, "NONE", "ACTIVE")),
+                        List.of(new ItemUpserted.Uom("EA", 1, 1, "04012345678901")), Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from ref_item_gtin").query(Integer.class).single()) == 1);
+        String unitTag = com.astrawms.common.rfid.Epc.sgtin96("04012345678901", 7, 99, 1).hex();
+
+        // Putaway: the pallet's SSCC-96 tag is its LPN scan.
+        String sscc = "106141412345678908";
+        received(sscc, "SKU-1");
+        awaitTask(sscc, "RELEASED");
+        String putaway = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        confirm(putaway, com.astrawms.common.rfid.Epc.sscc96("106141417777777779", 7, 0).hex(), "A-02", "22")
+                .andExpect(jsonPath("$.code", is("TSK_WRONG_LPN")));
+        confirm(putaway, "3174257BF4499602D2000000", "A-02", "22").andExpect(jsonPath("$.status", is("COMPLETED")));
+
+        // Pick: the unit's SGTIN-96 tag verifies the item.
+        location("STAGE-OUT", "STAGING_OUT", null, false, "77", 99);
+        UUID allocation = UUID.randomUUID();
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, OutboundContracts.PickRequested.TYPE, "DC1:SO-R1",
+                new OutboundContracts.PickRequested(allocation, "SO-R1", "000010", "ACME", "SKU-1", "",
+                        new BigDecimal("1"), "EA", "A-01", "", "STAGE-OUT", "PK-SO-R1", 60));
+        String pick = awaitPickTask(allocation, "RELEASED");
+        tasks(post("/api/v1/sites/DC1/tasks/next")).andExpect(jsonPath("$.id", is(pick)));
+        pickConfirm(pick, "33", "1", unitTag, "").andExpect(jsonPath("$.status", is("COMPLETED")));
+
+        // Receive: the tag identifies the item; its serial is not the unit's serial (SKU-1 is not serial-tracked).
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:1800077", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("ASN", "1800077",
+                        "ACME", "V-100", Instant.now(), List.of(new com.astrawms.common.contracts.ReceivingContracts
+                        .ReceiveRequested.Line("000010", "SKU-1", new BigDecimal("2"), "EA", null)), 40));
+        await(() -> receiveTasks("1800077", "RELEASED") == 1);
+        var rita = TestTokens.as(tenant, "rita", Roles.RECEIVER);
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(rita))
+                .andReturn().getResponse().getContentAsString(), "$.id");
+        receive(rita, id, """
+                {"scanId":"r1","docNo":"1800077","itemNo":"%s","qty":1,"uom":"EA","locationId":"DOCK-1",
+                 "checkDigit":"11"}""".formatted(unitTag)).andExpect(status().isOk());
+        StubInbound.Call call = inbound.calls.getLast();
+        assertThat(call.body().get("itemNo")).isEqualTo("SKU-1");
+        assertThat((List<?>) call.body().get("serials")).isEmpty();
+        inbound.calls.clear();
+    }
+
     // ------------------------------------------------------------------ ADR-0021 labor
 
     @Test

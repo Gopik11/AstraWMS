@@ -313,8 +313,11 @@ public class TaskService {
             throw ApiException.unprocessable("TSK_GTIN_AMBIGUOUS", "GTIN " + gtin + " belongs to several items; scan the item number");
         }
         com.astrawms.common.barcode.Gs1.Data d = gs1.orElse(null);
+        // ADR-0027: every SGTIN tag carries a serial, also on items that are not serial-tracked, so a tag's serial is
+        // never taken as the unit's serial here; the RF client sends the serials of serial-tracked items explicitly.
+        boolean rfidTag = com.astrawms.common.rfid.Epc.parse(s.itemNo()).isPresent();
         List<String> serials = s.serials() != null && !s.serials().isEmpty() ? s.serials()
-                : d != null && d.serial() != null ? List.of(d.serial()) : s.serials();
+                : d != null && d.serial() != null && !rfidTag ? List.of(d.serial()) : s.serials();
         return new ReceiveScan(s.scanId(), s.docNo(), candidates.getFirst()[1],
                 s.ownerId() == null || s.ownerId().isBlank() ? candidates.getFirst()[0] : s.ownerId(),
                 s.qty() != null ? s.qty() : d == null ? null : d.count(), s.uom(),
@@ -326,6 +329,11 @@ public class TaskService {
 
     private static boolean blank(String v) {
         return v == null || v.isBlank();
+    }
+
+    /** The SSCC of an LPN scan given as a GS1-128 pallet label {@code (00)...} or an SSCC RFID tag (ADR-0027); else null. */
+    static String ssccOf(String lpnScan) {
+        return com.astrawms.common.barcode.Gs1.parse(lpnScan).map(com.astrawms.common.barcode.Gs1.Data::sscc).orElse(null);
     }
 
     /**
@@ -1112,7 +1120,7 @@ public class TaskService {
         if (!"ASSIGNED".equals(t.status()) || !user.equals(t.assignedTo())) {
             throw ApiException.conflict("TSK_NOT_ASSIGNED", "Task is " + t.status() + " and not assigned to " + user);
         }
-        if (!t.lpnId().equals(lpnId)) {
+        if (!t.lpnId().equals(lpnId) && !t.lpnId().equals(ssccOf(lpnId))) {
             throw ApiException.unprocessable("TSK_WRONG_LPN", "Scanned LPN " + lpnId + " but the task is for " + t.lpnId());   // PUT-EX-05
         }
         Projections.Location loc = projections.location(siteId, locationId).orElseThrow(() ->
