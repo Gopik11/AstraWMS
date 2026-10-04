@@ -49,12 +49,12 @@ public class Rfid {
 
     /**
      * One read, resolved. {@code epc} is the canonical hex; {@code baseQty} is how many base units the tag stands for
-     * (1 for a unit of the base UoM, 12 for a case of 12). {@code problem} says why a read is not usable as it is:
+     * (1 for a unit of the base UoM, 12 for a case of 12), in {@code baseUom}. {@code problem} says why a read is not usable as it is:
      * NOT_AN_EPC, UNREGISTERED, RETIRED, GTIN_UNKNOWN, GTIN_AMBIGUOUS, LPN_UNKNOWN, SERIAL_NOT_IN_STOCK, OWNER_DENIED.
      */
     public record Resolved(String read, String epc, String scheme, String uri, Kind kind, String gtin, String sscc,
                            String tagSerial, String ownerId, String itemNo, String uom, BigDecimal baseQty,
-                           boolean serialTracked, String serialNo, String lotNo, String lpnId, String locationId,
+                           String baseUom, boolean serialTracked, String serialNo, String lotNo, String lpnId, String locationId,
                            String stockStatus, boolean registered, String problem) {
     }
 
@@ -119,7 +119,8 @@ public class Rfid {
                 continue;
             }
             Resolved r = resolveOne(siteId, read.strip());
-            String key = r.epc() != null ? r.epc() : r.read();
+            // one result per tag identity: hex (with its filter value) and a pure identity URI of one tag are one tag
+            String key = r.uri() != null ? r.uri() : r.epc() != null ? r.epc() : r.read();
             if (byEpc.putIfAbsent(key, r) == null) {        // a reader reports a tag many times: one result per tag
                 out.add(r);
             }
@@ -170,17 +171,17 @@ public class Rfid {
 
         Resolved unknown(String problem) {
             return new Resolved(read, epc, scheme, uri, Kind.UNKNOWN, gtin, sscc, tagSerial, null, null, null, null,
-                    false, null, null, null, null, null, false, problem);
+                    null, false, null, null, null, null, null, false, problem);
         }
 
         Resolved asset() {
             return new Resolved(read, epc, scheme, uri, Kind.ASSET, gtin, sscc, tagSerial, null, null, null, null,
-                    false, null, null, null, null, null, false, null);
+                    null, false, null, null, null, null, null, false, null);
         }
 
         Resolved location(String locationId, boolean registered) {
             return new Resolved(read, epc, scheme, uri, Kind.LOCATION, gtin, sscc, tagSerial, null, null, null, null,
-                    false, null, null, null, locationId, null, registered, null);
+                    null, false, null, null, null, locationId, null, registered, null);
         }
     }
 
@@ -195,12 +196,13 @@ public class Rfid {
         }
         // An LPN that is not (or no longer) in stock keeps its id: receiving can use the tag as the new LPN.
         return new Resolved(b.read(), b.epc(), b.scheme(), b.uri(), Kind.LPN, b.gtin(), b.sscc(), b.tagSerial(),
-                lpn.map(Lpn::owner).orElse(null), null, null, null, false, null, null, lpnId,
+                lpn.map(Lpn::owner).orElse(null), null, null, null, null, false, null, null, lpnId,
                 lpn.map(Lpn::location).orElse(null), null, registered, lpn.isPresent() ? null : "LPN_UNKNOWN");
     }
 
     /** An item unit of measure that a tag can stand for. */
-    private record ItemUom(String owner, String item, String uom, BigDecimal baseQty, boolean serialTracked) {
+    private record ItemUom(String owner, String item, String uom, BigDecimal baseQty, String baseUom,
+                           boolean serialTracked) {
     }
 
     private Resolved unit(String siteId, Base b, List<ItemUom> candidates, String serial, boolean registered) {
@@ -218,7 +220,8 @@ public class Rfid {
         boolean atSite = s != null && siteId.equals(s.siteId());
         String problem = i.serialTracked() && serial != null && !atSite ? "SERIAL_NOT_IN_STOCK" : null;
         return new Resolved(b.read(), b.epc(), b.scheme(), b.uri(), Kind.ITEM, b.gtin(), b.sscc(), b.tagSerial(),
-                i.owner(), i.item(), i.uom(), i.baseQty(), i.serialTracked(), i.serialTracked() ? serial : null,
+                i.owner(), i.item(), i.uom(), i.baseQty(), i.baseUom(), i.serialTracked(),
+                i.serialTracked() ? serial : null,
                 atSite ? emptyToNull(s.lotNo()) : null, atSite ? emptyToNull(s.lpnId()) : null,
                 atSite ? s.locationId() : null, atSite ? s.stockStatus() : null, registered, problem);
     }
@@ -226,14 +229,14 @@ public class Rfid {
     /** Items with a unit of this GTIN, known at the site (GTINs are stored without leading zeros). */
     private List<ItemUom> itemsByGtin(String siteId, String gtin) {
         return jdbc.sql("""
-                        select u.owner_id, u.item_no, u.uom, u.numerator, u.denominator, i.serial_control
+                        select u.owner_id, u.item_no, u.uom, u.numerator, u.denominator, i.serial_control, i.base_uom
                         from ref_item_uom u
                         join ref_item i on i.owner_id = u.owner_id and i.item_no = u.item_no and i.site_id = :site
                         where u.gtin = :gtin
                         order by u.owner_id, u.item_no, u.uom""")
                 .param("site", siteId).param("gtin", gtin.replaceFirst("^0+(?=.)", ""))
                 .query((rs, n) -> new ItemUom(rs.getString(1), rs.getString(2), rs.getString(3),
-                        rs.getBigDecimal(4).divide(rs.getBigDecimal(5), 3, RoundingMode.HALF_UP),
+                        rs.getBigDecimal(4).divide(rs.getBigDecimal(5), 3, RoundingMode.HALF_UP), rs.getString(7),
                         tracked(rs.getString(6))))
                 .list();
     }
@@ -244,7 +247,8 @@ public class Rfid {
                         select base_uom, serial_control from ref_item
                         where owner_id = :o and item_no = :i and site_id = :site""")
                 .param("o", owner).param("i", item).param("site", siteId)
-                .query((rs, n) -> new ItemUom(owner, item, rs.getString(1), BigDecimal.ONE, tracked(rs.getString(2))))
+                .query((rs, n) -> new ItemUom(owner, item, rs.getString(1), BigDecimal.ONE, rs.getString(1),
+                        tracked(rs.getString(2))))
                 .optional().orElse(null);
     }
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AstraWMS" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FF1B3A5C</item>
+        <item name="android:windowBackground">#FFF6F7F9</item>
+    </style>
+</resources>

@@ -57,10 +57,11 @@ class RfidIT extends IntegrationTest {
     void resolvesUnitsCasesPalletsAndUnknownReads() throws Exception {
         receive("SKU-TAG", "24", "EA", "A-01-01", PALLET, null).andExpect(status().isCreated());
 
-        rfid("/resolve", reads(unit(EA_GTIN, 1), unit(CS_GTIN, 7), "0x" + PALLET_EPC.toLowerCase(), PALLET_EPC,
+        rfid("/resolve", reads(unit(EA_GTIN, 1), unit(CS_GTIN, 7), "0x" + PALLET_EPC.toLowerCase(),
+                "urn:epc:id:sscc:0614141.1234567890",
                 unit("00614141999989", 1), "E2801160600002000000000A", "not-a-tag"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(6)))                         // the pallet read twice is one tag
+                .andExpect(jsonPath("$", hasSize(6)))                         // the pallet read twice (hex, URI) is one tag
                 .andExpect(jsonPath("$[0].kind", is("ITEM")))
                 .andExpect(jsonPath("$[0].itemNo", is("SKU-TAG")))
                 .andExpect(jsonPath("$[0].uom", is("EA")))
@@ -68,6 +69,7 @@ class RfidIT extends IntegrationTest {
                 .andExpect(jsonPath("$[0].serialNo", nullValue()))           // not serial-tracked
                 .andExpect(jsonPath("$[1].uom", is("CS")))
                 .andExpect(jsonPath("$[1].baseQty", is(12.0)))
+                .andExpect(jsonPath("$[1].baseUom", is("EA")))
                 .andExpect(jsonPath("$[2].kind", is("LPN")))
                 .andExpect(jsonPath("$[2].lpnId", is(PALLET)))
                 .andExpect(jsonPath("$[2].locationId", is("A-01-01")))
