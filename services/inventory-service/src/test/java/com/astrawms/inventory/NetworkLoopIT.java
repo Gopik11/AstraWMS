@@ -179,6 +179,52 @@ class NetworkLoopIT extends IntegrationTest {
         outbound.next = new com.astrawms.inventory.outbound.OutboundClient.Commitments(List.of(), List.of(), true);
     }
 
+    /** Ships {@code qty} of ABC from ST03 to a customer: the store's usage history. */
+    private void issueAtStore(String order, String qty) throws Exception {
+        String alloc = JsonPath.read(at("ST03", "/allocations", """
+                {"orderRef":"%s","orderLineRef":"000010","ownerId":"ACME","itemNo":"ABC","qty":%s,"uom":"EA"}""".formatted(order, qty))
+                .andReturn().getResponse().getContentAsString(), "$.allocations[0].id");
+        at("ST03", "/allocations/" + alloc + "/pick", """
+                {"qty":%s,"toLocationId":"STAGE-OUT","toLpnId":"PK-%s"}""".formatted(qty, order)).andExpect(status().isCreated());
+        at("ST03", "/issues", "{\"orderRef\":\"" + order + "\"}").andExpect(status().isCreated());
+    }
+
+    @Test
+    void withUsageHistoryTheStockoutDateRiskAndDemandSizedQuantityAppear_ADR0026() throws Exception {
+        asTenant(() -> refs.upsertLocation(new LocationUpserted("ST03", "STAGE-OUT", "SHIP", "STAGING_OUT", "0001", null, false,
+                true, true, "ACTIVE", Instant.now(), "77", 1)));
+        receive("ABC", "100", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        at("ST03", "/receipts", """
+                {"ownerId":"ACME","itemNo":"ABC","qty":40,"uom":"EA","locationId":"S-01"}""").andExpect(status().isCreated());
+        mvc.perform(put("/api/v1/sites/ST03/inventory/store-setting").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"transitDays\":2,\"coverDays\":7}"))
+                .andExpect(jsonPath("$.cover_days", is(7)));
+        mvc.perform(put("/api/v1/sites/ST03/inventory/store-policies").with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"ownerId\":\"ACME\",\"itemNo\":\"ABC\",\"minQty\":10,\"maxQty\":60,\"safetyQty\":4}"));
+        // No usage yet: LOW confidence, "no history", refill to max.
+        network("/api/v1/network/replenishment?siteId=ST03")
+                .andExpect(jsonPath("$[0].risk", is("NO_HISTORY"))).andExpect(jsonPath("$[0].stockoutDate").doesNotExist())
+                .andExpect(jsonPath("$[0].recommended", is(false)));
+        issueAtStore("SO-U1", "28");                                      // 28 in 28 days: 1 a day
+        String today = java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString();
+        network("/api/v1/network/replenishment?siteId=ST03")
+                .andExpect(jsonPath("$[0].dailyUsage", is(1.0)))
+                .andExpect(jsonPath("$[0].history", is("SHORT")))
+                .andExpect(jsonPath("$[0].confidence", is("LOW")))          // one day of history
+                .andExpect(jsonPath("$[0].stockoutDate", is(java.time.LocalDate.parse(today).plusDays(12).toString())))
+                .andExpect(jsonPath("$[0].risk", is("NONE")))               // 12 days of cover > 2 transit + 7 cover
+                .andExpect(jsonPath("$[0].recommended", is(true)))          // but below min + safety
+                .andExpect(jsonPath("$[0].qty", is(4)))                     // back to min + safety (demand alone: 1)
+                .andExpect(jsonPath("$[0].qtyBasis", org.hamcrest.Matchers.containsString("usage 1/day")));
+        issueAtStore("SO-U2", "11");                                      // 1 left: runs out before a transfer arrives
+        network("/api/v1/network/replenishment?siteId=ST03")
+                .andExpect(jsonPath("$[0].risk", is("CRITICAL")))
+                .andExpect(jsonPath("$[0].shortage", is(true)))
+                .andExpect(jsonPath("$[0].stockoutRiskText", org.hamcrest.Matchers.startsWith("critical")))
+                .andExpect(jsonPath("$[0].qty", is(16)));                   // 1.393/day × 9 days + 4 − 1, back above min
+    }
+
     @Test
     void ownershipRecallAndTheCyclePlan() throws Exception {
         receive("SKU-LOT", "5", "EA", "A-01-02", null, "L-RECALL").andExpect(status().isCreated());

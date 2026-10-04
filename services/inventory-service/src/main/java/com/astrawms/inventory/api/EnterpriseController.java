@@ -100,13 +100,13 @@ public class EnterpriseController {
         return replenishment.storeSetting(siteId);
     }
 
-    public record StoreSettingRequest(Integer transitDays) {
+    public record StoreSettingRequest(Integer transitDays, Integer coverDays) {
     }
 
     @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','INV_MANAGER','SUPERVISOR')")
     @PutMapping("/api/v1/sites/{siteId}/inventory/store-setting")
     public Map<String, Object> putStoreSetting(@PathVariable String siteId, @RequestBody StoreSettingRequest body) {
-        return replenishment.putStoreSetting(siteId, body.transitDays());
+        return replenishment.putStoreSetting(siteId, body.transitDays(), body.coverDays());
     }
 
     @PreAuthorize("hasAnyRole('INV_MANAGER','SUPERVISOR')")

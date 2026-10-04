@@ -6,7 +6,7 @@ import { offlineTasks, useOffline } from '../offline'
 import { AskBox } from './Ask'
 import { cutoffForecast } from '../forecast'
 import { acceptRecommendation, type Recommendation } from '../replenish'
-import { Card, ErrorBox, Page, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
+import { Card, ErrorBox, Page, Table, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
 
 function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string, number> {
   const out: Record<string, number> = {}
@@ -132,11 +132,14 @@ export default function Home() {
   const supervisor = hasRole('SUPERVISOR')
   const rf = hasRole('RECEIVER', 'PICKER', 'INV_ANALYST', 'SUPERVISOR')
   // ADR-0024: at a satellite store the overview is the store's work only; waves, yard, labor and billing are DC work.
+  // ADR-0026 store home: my work, transfers coming in, issues, inventory below min, counts, sync status.
   const sections = isStore ? [
-    <StoreBanner key="banner" site={site} />,
     rf && <MyWork key="me" site={site} />,
-    <StoreWork key="store" site={site} />,
-    hasRole('SOLUTION_ADMIN') && <Integration key="adm" site={site} />,
+    <StoreInbound key="in" site={site} />,
+    <StoreIssues key="issues" site={site} />,
+    <StoreBelowMin key="min" site={site} />,
+    <StoreCounts key="counts" site={site} />,
+    <StoreSync key="sync" site={site} />,
   ].filter(Boolean) : [
     rf && <MyWork key="me" site={site} />,
     hasRole('RECEIVER') && !supervisor && <Receiving key="rcv" site={site} />,
@@ -157,73 +160,110 @@ export default function Home() {
 
 // ------------------------------------------------------------------ satellite store (ADR-0024)
 
-/** What the store client does without network, stated once on the store's overview (ADR-0023, ADR-0024). */
-function StoreBanner({ site }: { site: string }) {
-  const { online, pending, failed } = useOffline()
+/** Transfers and deliveries coming to the store: what to receive on RF, and what is still on its way. */
+function StoreInbound({ site }: { site: string }) {
+  const receipts = useLoad(() => get<ReceiptSummary[]>(`/api/v1/sites/${site}/receipts`), [site])
+  const incoming = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/transfers?direction=IN`), [site])
+  const toReceive = (receipts.data ?? []).filter((r) => r.status === 'NOT_STARTED' || r.status === 'IN_PROGRESS')
+  const onTheWay = (incoming.data ?? []).filter((t) => !['SHIPPED', 'CONFIRMED', 'CANCELLED'].includes(String(t.status)))
+  const shipped = (incoming.data ?? []).filter((t) => ['SHIPPED', 'CONFIRMED'].includes(String(t.status)))
   return (
-    <div className="store-banner" role="note">
-      <strong>{site} is a store.</strong> {online ? 'Online.' : 'Offline.'} RF receiving, material issue and counting
-      keep working without network: download tasks on RF work, scans wait on this device and are sent in order when the
-      network is back. The server wins on a stock conflict: a refused scan is listed under "needs attention" and its task
-      goes to the supervisor as a sync conflict. Everything else (lists, approvals, transfers) is online only.
-      {pending.length > 0 && <> · <strong>{pending.length}</strong> scan(s) waiting to sync</>}
-      {failed.length > 0 && <> · <strong className="text-late">{failed.length}</strong> need attention</>}
-    </div>
+    <Section title="Inbound" hint="Transfers to this store: received on RF; a shipped transfer is an expected receipt.">
+      <ErrorBox error={receipts.error ?? incoming.error} />
+      <div className="tiles">
+        <Attention n={receipts.data ? toReceive.length : undefined} label="Deliveries to receive" one="Delivery to receive"
+                   to="/receipts?status=NOT_STARTED" detail={shipped.length ? `${shipped.length} transfer(s) shipped here` : 'Receive on RF'}
+                   oldest={oldestOf(toReceive.map((r) => r.createdAt))} limitMin={24 * 60} />
+        <Attention n={incoming.data ? onTheWay.length : undefined} label="Transfers being prepared" one="Transfer being prepared"
+                   to="/transfers" detail={onTheWay.slice(0, 3).map((t) => `${String(t.erp_doc_no)} from ${String(t.from_site)}`).join(', ') || 'Not shipped yet'} />
+      </div>
+    </Section>
   )
 }
 
-/** The store's work: transfers to receive, material issues, counts. */
-function StoreWork({ site }: { site: string }) {
+/** Material issues of the store: to approve (supervisors) and to scan out on RF. */
+function StoreIssues({ site }: { site: string }) {
   const { hasRole } = useAuth()
-  const receipts = useLoad(() => get<ReceiptSummary[]>(`/api/v1/sites/${site}/receipts`), [site])
-  const incoming = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/outbound/transfers?direction=IN`), [site])
   const issues = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/material-issues`), [site])
-  const counts = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/counts`), [site])
-  const toReceive = (receipts.data ?? []).filter((r) => r.status === 'NOT_STARTED' || r.status === 'IN_PROGRESS')
-  const shipped = (incoming.data ?? []).filter((t) => ['SHIPPED', 'CONFIRMED'].includes(String(t.status)))
   const byStatus = countBy(issues.data, (r) => String(r.status))
-  const countsOpen = (counts.data ?? []).filter((c) => ['OPEN', 'RECOUNT'].includes(String(c.status))).length
-  // ADR-0025 satellite manager: available, demand today, recommended replenishment, in transit, stockout risk.
-  const recs = useLoad(() => get<Recommendation[]>(`/api/v1/network/replenishment?siteId=${site}`), [site])
-  const net = useLoad(() => get<Row[]>('/api/v1/network/inventory'), [])
-  const here = (net.data ?? []).find((r) => r.site_id === site)
-  const demandToday = (recs.data ?? []).reduce((n, r) => n + Number(r.dailyUsage ?? 0), 0)
-  const inTransit = (recs.data ?? []).reduce((n, r) => n + Number(r.inTransit ?? 0), 0)
-  const recommended = (recs.data ?? []).filter((r) => r.recommended)
-  const atRisk = (recs.data ?? []).filter((r) => r.stockoutRisk)
   return (
-    <Section title="Store work" hint="Receive what the DC sent, issue to cost centres, WBS elements and orders, count.">
-      <ErrorBox error={receipts.error ?? issues.error ?? counts.error} />
+    <Section title="Issues" hint="Issue to cost centres, WBS elements and orders; scan out on RF material issue.">
+      <ErrorBox error={issues.error} />
       <div className="tiles">
-        <Attention n={receipts.data ? toReceive.length : undefined} label="Deliveries to receive" one="Delivery to receive" to="/receipts?status=NOT_STARTED"
-                   detail={incoming.data ? `${shipped.length} transfer(s) shipped to ${site}; receive on RF` : undefined}
-                   oldest={oldestOf(toReceive.map((r) => r.createdAt))} limitMin={24 * 60} />
         <Attention n={issues.data ? (byStatus.APPROVED ?? 0) + (byStatus.PARTIALLY_ISSUED ?? 0) : undefined}
-                   label="Material issues to issue" one="Material issue to issue" to="/material-issues?status=APPROVED,PARTIALLY_ISSUED"
-                   detail="Scan out on RF material issue" />
+                   label="Material issues to issue" one="Material issue to issue" to="/material-issues?status=APPROVED,PARTIALLY_ISSUED" />
         {hasRole('SUPERVISOR', 'INV_MANAGER') && (
           <Attention n={issues.data ? byStatus.REQUESTED ?? 0 : undefined} label="Material issues to approve" one="Material issue to approve"
                      to="/material-issues?status=REQUESTED" />
         )}
-        <Attention n={counts.data ? countsOpen : undefined} label="Counts open" one="Count open" to="/counts" detail="Blind count on RF" />
       </div>
+    </Section>
+  )
+}
+
+/**
+ * Store items below min + safety stock, or at stockout risk (ADR-0026), with the recommended transfer. Without usage
+ * history the risk is "no history", never "none".
+ */
+function StoreBelowMin({ site }: { site: string }) {
+  const recs = useLoad(() => get<Recommendation[]>(`/api/v1/network/replenishment?siteId=${site}`), [site])
+  const short = (recs.data ?? []).filter((r) => r.recommended || r.shortage)
+  return (
+    <Section title="Inventory below min" hint="Available + pipeline against min + safety stock; risk from usage over the last 28 days.">
+      <ErrorBox error={recs.error} />
+      {recs.data && short.length === 0 && <p className="muted">Every item with a policy is covered.</p>}
+      {!recs.data && !recs.error && <p className="muted">Loading…</p>}
+      {short.length > 0 && (
+        <Table rows={short} columns={[
+          { header: 'Item', cell: (r) => `${r.itemNo} (${r.ownerId})` },
+          { header: 'Available', cell: (r) => fmtQty(r.available), align: 'right' },
+          { header: 'Min + safety', cell: (r) => fmtQty(Number(r.min) + Number(r.safety)), align: 'right' },
+          { header: 'Pipeline', cell: (r) => fmtQty(Number(r.inTransit) + Number(r.openTransferQty)), align: 'right' },
+          { header: 'Stockout', cell: (r) => r.stockoutDate ?? <span className="muted">no history</span> },
+          { header: 'Risk', cell: (r) => <span className={r.stockoutRisk ? 'text-late' : 'muted'}>{r.stockoutRiskText}</span> },
+          { header: 'Recommended', cell: (r) => (r.recommended ? `${fmtQty(r.qty)} from ${String(r.sourceSite)} by ${String(r.requiredDate)}` : '') },
+        ]} />
+      )}
+    </Section>
+  )
+}
+
+function StoreCounts({ site }: { site: string }) {
+  const counts = useLoad(() => get<Row[]>(`/api/v1/sites/${site}/inventory/counts`), [site])
+  const open = (counts.data ?? []).filter((c) => ['OPEN', 'RECOUNT'].includes(String(c.status)))
+  const approval = (counts.data ?? []).filter((c) => c.status === 'PENDING_APPROVAL')
+  return (
+    <Section title="Counts" hint="Blind counts on RF; variances go to a supervisor.">
+      <ErrorBox error={counts.error} />
       <div className="tiles">
-        <div className="tile"><span className="tile-n">{here ? fmtQty(Number(here.on_hand ?? 0) - Number(here.allocated ?? 0) - Number(here.held ?? 0)) : '…'}</span>
-          <span className="tile-l">Available</span><span className="tile-d">on hand, not allocated or held</span></div>
-        <div className="tile"><span className="tile-n">{recs.data ? fmtQty(demandToday) : '…'}</span>
-          <span className="tile-l">Demand today</span><span className="tile-d">average daily issues, last 28 days</span></div>
-        <Attention n={recs.data ? recommended.length : undefined} label="Replenishments recommended" one="Replenishment recommended"
-                   to="/store-replenishment" detail={recommended.slice(0, 2).map((r) => `${r.itemNo} × ${fmtQty(r.qty)} from ${String(r.sourceSite)}`).join('; ') || 'Covered'} />
-        <div className="tile"><span className="tile-n">{recs.data ? fmtQty(inTransit) : '…'}</span>
-          <span className="tile-l">In transit to {site}</span></div>
-        <Attention n={recs.data ? atRisk.length : undefined} label="Items at stockout risk" one="Item at stockout risk" to="/store-replenishment"
-                   detail={atRisk.slice(0, 3).map((r) => `${r.itemNo} (${r.daysOfCover ?? 0} d)`).join(', ') || 'None'} />
+        <Attention n={counts.data ? open.length : undefined} label="Counts open" one="Count open" to="/counts" detail="Count on RF" />
+        <Attention n={counts.data ? approval.length : undefined} label="Variances to approve" one="Variance to approve" to="/counts" />
       </div>
-      <div className="row">
-        <Link className="button" to="/rf">RF work</Link>
-        <Link className="button" to="/rf/issue">RF material issue</Link>
-        <Link className="button" to="/transfers">Transfers</Link>
+    </Section>
+  )
+}
+
+/**
+ * Sync status. Offline work ships (ADR-0023): RF receiving, material issue and counting keep working without network,
+ * scans wait on this device and are sent in order; the server wins on a stock conflict. Lists and approvals are online
+ * only. This says which is the case now.
+ */
+function StoreSync({ site }: { site: string }) {
+  const { online, pending, failed } = useOffline()
+  const onDevice = offlineTasks(site).length
+  return (
+    <Section title="Sync status">
+      <div className="tiles">
+        <div className={`tile ${online ? '' : 'tile-warn'}`}><span className="tile-n">{online ? 'Online' : 'Offline'}</span>
+          <span className="tile-l">{online ? 'Connected' : 'Scans are kept on this device'}</span></div>
+        <Link className={`tile ${pending.length ? 'tile-warn' : ''}`} to="/rf"><span className="tile-n">{pending.length}</span>
+          <span className="tile-l">{pending.length === 1 ? 'scan waiting to send' : 'scans waiting to send'}</span></Link>
+        <Link className={`tile ${failed.length ? 'tile-late' : ''}`} to="/rf"><span className="tile-n">{failed.length}</span>
+          <span className="tile-l">need attention</span><span className="tile-d">refused when sent: the server's stock stands</span></Link>
+        <div className="tile"><span className="tile-n">{onDevice}</span><span className="tile-l">tasks on this device</span></div>
       </div>
+      <p className="muted small">Offline: RF receiving, material issue and counting (download your work on RF first). Online only:
+        lists, approvals, transfers and replenishment.</p>
     </Section>
   )
 }
@@ -405,6 +445,9 @@ function ControlTower({ site }: { site: string }) {
   // ADR-0025: store replenishment this site should send.
   const recs = useLoad(() => get<Recommendation[]>('/api/v1/network/replenishment'), [site])
   const toSend = (recs.data ?? []).filter((r) => r.recommended && r.sourceSite === site)
+  // ADR-0026: stores at CRITICAL or HIGH stockout risk, or below min + safety without usage history.
+  const shortages = (recs.data ?? []).filter((r) => r.shortage)
+  const critical = shortages.filter((r) => r.risk === 'CRITICAL').length
   const acceptAll: TileAction = {
     label: 'Accept', confirm: `Create ${toSend.length} transfer(s) from ${site}: ${toSend.map((r) => `${r.itemNo} × ${fmtQty(r.qty)} → ${r.siteId}`).join(', ')}?`,
     run: async () => {
@@ -504,6 +547,11 @@ function ControlTower({ site }: { site: string }) {
                      detail="Dwell since gate check-in"
                      oldest={oldestOf((yard.data?.inYard ?? []).map((a) => a.checked_in_at))} limitMin={LIMITS.trailerDwell}
                      action={dwelling.length ? checkOut : undefined} />
+          <Attention n={recs.data ? shortages.length : undefined} label="Store shortages" one="Store shortage"
+                     to="/store-replenishment?shortage=1"
+                     oldest={critical ? 1e9 : undefined} limitMin={critical ? 0 : undefined}
+                     detail={shortages.length ? `${critical} critical; ` + shortages.slice(0, 3).map((r) => `${r.siteId} ${r.itemNo} (${r.stockoutRiskText.split(':')[0]})`).join(', ')
+                       : 'No store at CRITICAL or HIGH stockout risk'} />
           <Attention n={recs.data ? toSend.length : undefined} label="Store replenishments to send" one="Store replenishment to send"
                      to={`/store-replenishment?source=${site}`} action={acceptAll}
                      detail={toSend.length ? toSend.slice(0, 3).map((r) => `${r.siteId}: ${r.itemNo} × ${fmtQty(r.qty)} by ${String(r.requiredDate)}`).join('; ')
