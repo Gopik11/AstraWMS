@@ -60,13 +60,49 @@ class AllocationPolicyIT extends IntegrationTest {
         allocate("SO-B", "12")
                 .andExpect(jsonPath("$.allocatedQty", is(2)))
                 .andExpect(jsonPath("$.shortQty", is(10)))
-                .andExpect(jsonPath("$.shortReason", is("WAITING_FOR_REPLENISHMENT")));   // ADR-0021
+                .andExpect(jsonPath("$.shortReason", is("WAITING_FOR_REPLENISHMENT")))   // ADR-0021
+                // ADR-0028: the reason names the face, its free and capacity, the open replenishment and the rule.
+                .andExpect(jsonPath("$.shortDetail", org.hamcrest.Matchers.allOf(
+                        org.hamcrest.Matchers.containsString("pick face A-01-01 has 0 free (capacity 10)"),
+                        org.hamcrest.Matchers.containsString("replenishment of 8 from A-01-02 open"),
+                        org.hamcrest.Matchers.containsString("takes a pallet only when the order covers it"))));
+        getJson("/faces/ACME/SKU-EA")
+                .andExpect(jsonPath("$.faces[0].location_id", is("A-01-01")))
+                .andExpect(jsonPath("$.faces[0].free", is(0.0)))
+                .andExpect(jsonPath("$.faces[0].capacity", is(10.0)))
+                .andExpect(jsonPath("$.faces[0].open_replenishments", hasSize(1)));
+        // "Create replen" while one is open: the open one is returned, no second task.
+        replenishFaces().andExpect(jsonPath("$[0].alreadyOpen", is(true))).andExpect(jsonPath("$[0].created", is(0)))
+                .andExpect(jsonPath("$[0].open", hasSize(1)));
+        getJson("/replenishments?status=OPEN").andExpect(jsonPath("$", hasSize(1)));
 
         // 3. A full reserve pallet goes to an order that needs all of it.
         allocate("SO-C", "35")
                 .andExpect(jsonPath("$.allocatedQty", is(30)))
                 .andExpect(jsonPath("$.allocations[0].lpnId", is("LPN-R2")))
                 .andExpect(jsonPath("$.allocations[0].qty", is(30)));
+    }
+
+    private ResultActions replenishFaces() throws Exception {
+        return mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/v1/sites/" + SITE + "/inventory/faces/ACME/SKU-EA/replenish")
+                .with(TestTokens.as(tenant, "sue", Roles.SUPERVISOR)));
+    }
+
+    @Test
+    void aSupervisorTopsUpAFaceAboveItsMinimumFromAReservePalletWithFreeStock_ADR0027() throws Exception {
+        receive("SKU-EA", "6", "EA", "A-01-01", null, null).andExpect(status().isCreated());        // face: 6 > min 2
+        receive("SKU-EA", "12", "EA", "A-01-02", "LPN-R1", null).andExpect(status().isCreated());
+        faceRule("A-01-01", "2", "10").andExpect(status().isOk());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .post("/api/v1/sites/" + SITE + "/inventory/faces/ACME/SKU-EA/replenish")
+                        .with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(status().isForbidden());
+        replenishFaces().andExpect(jsonPath("$[0].created", is(1))).andExpect(jsonPath("$[0].alreadyOpen", is(false)))
+                .andExpect(jsonPath("$[0].open[0].qty", is(4.0)))                // up to capacity 10
+                .andExpect(jsonPath("$[0].open[0].source_lpn", is("LPN-R1")));
+        replenishFaces().andExpect(jsonPath("$[0].created", is(0))).andExpect(jsonPath("$[0].alreadyOpen", is(true)));
+        assertThat(outboxTypes().stream().filter("ReplenRequested"::equals)).hasSize(1);   // one task only
     }
 
     @Test

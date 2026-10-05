@@ -409,7 +409,8 @@ public class InventoryCommandService {
         if (heldBack.signum() > 0) {
             return hasFace && fullLpn != AllocationPolicies.FullLpn.NEVER_SPLIT
                     ? new String[] {"WAITING_FOR_REPLENISHMENT", heldBack.toPlainString() + unit
-                            + " are in reserve pallets; the pick face is being replenished and the line is allocated when it arrives"}
+                            + " are in reserve pallets; " + replenishments.faceSummary(siteId, r.ownerId(), r.itemNo())
+                            + "; the line is allocated when the face is replenished"}
                     : new String[] {"POLICY_NO_SPLIT", heldBack.toPlainString() + unit
                             + " are in reserve pallets larger than the open quantity; the site's policy does not split pallets"};
         }
