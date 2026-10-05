@@ -1,9 +1,16 @@
 import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { get, put, query, type Row } from '../api'
+import { Link, useSearchParams } from 'react-router-dom'
+import { get, post, put, query, type Row } from '../api'
 import { useAuth } from '../auth'
 import { acceptRecommendation, type Recommendation } from '../replenish'
-import { Badge, Card, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
+import { Badge, Card, ConfirmButton, ErrorBox, Field, Page, Success, Table, fmtQty, useAction, useLoad, useSiteContext, useToast } from '../ui'
+
+/** An item's pick faces at the source (ADR-0028): free, capacity, open replenishment; and its reserve pallets. */
+interface Faces {
+  faces: { location_id: string; capacity: number; on_hand: number; allocated: number; free: number;
+    open_replenishments: { id: string; qty: number; source_location: string; source_lpn: string }[] }[]
+  reserve: { location_id: string; lpn_id: string; qty: number; allocated_qty: number; free: number }[]
+}
 
 /**
  * Predictive store replenishment (ADR-0025): for each store item with a policy, what to send, from where, by when,
@@ -23,18 +30,48 @@ export default function StoreReplenishment() {
   const rowKey = (r: Recommendation) => `${r.siteId}/${r.ownerId}/${r.itemNo}`
   const recs = useLoad(() => get<Recommendation[]>(`/api/v1/network/replenishment${query({ siteId: scope === 'site' ? site : undefined })}`), [site, scope])
   const [done, setDone] = useState<string>()
+  const [toast, showToast] = useToast()
+  // Pick faces of each source/item on the list: Accept is allocated from the face unless a whole pallet covers it.
+  const faceKeys = [...new Set((recs.data ?? []).filter((r) => r.recommended && r.sourceSite)
+    .map((r) => `${String(r.sourceSite)}|${r.ownerId}|${r.itemNo}`))].sort()
+  const faces = useLoad(async () => {
+    const out: Record<string, Faces> = {}
+    for (const k of faceKeys) {
+      const [src, owner, item] = k.split('|')
+      out[k] = await get<Faces>(`/api/v1/sites/${src}/inventory/faces/${owner}/${encodeURIComponent(item)}`)
+    }
+    return out
+  }, [faceKeys.join(',')])
+  const facesOf = (r: Recommendation) => faces.data?.[`${String(r.sourceSite)}|${r.ownerId}|${r.itemNo}`]
   const accept = useAction(async (r: Recommendation) => {
     let no: string
     try {
       no = await acceptRecommendation(r)
     } catch (e) {
-      setRefused((m) => ({ ...m, [rowKey(r)]: e instanceof Error ? e.message : String(e) }))
-      throw e
+      const text = e instanceof Error ? e.message : String(e)
+      setRefused((m) => ({ ...m, [rowKey(r)]: text }))
+      showToast('error', `Accept refused for ${r.siteId} ${r.itemNo}: ${text}`)
+      faces.reload()
+      return undefined
     }
     setRefused((m) => { const n = { ...m }; delete n[rowKey(r)]; return n })
-    setDone(`${no} created: ${fmtQty(r.qty)} ${r.itemNo} from ${String(r.sourceSite)} to ${r.siteId}, needed by ${String(r.requiredDate)}`)
+    const msg = `${no} created and allocated: ${fmtQty(r.qty)} ${r.itemNo} from ${String(r.sourceSite)} to ${r.siteId}, needed by ${String(r.requiredDate)}`
+    setDone(msg)
+    showToast('ok', msg)
     recs.reload()
+    faces.reload()
     return no
+  })
+  // "Create replen to P-01": the face's open replenishment if there is one, else one from a reserve pallet with free stock.
+  const replen = useAction(async (r: Recommendation) => {
+    const res = await post<{ location: string; created: number; alreadyOpen: boolean; open: { qty: number; source_location: string; source_lpn: string }[] }[]>(
+      `/api/v1/sites/${String(r.sourceSite)}/inventory/faces/${r.ownerId}/${encodeURIComponent(r.itemNo)}/replenish`)
+    const text = res.map((f) => (f.open.length
+      ? `${f.alreadyOpen ? 'Replenishment already open' : 'Replenishment created'} to ${f.location}: ${f.open.map((o) => `${fmtQty(o.qty)} from ${o.source_location} (LPN ${o.source_lpn})`).join(', ')}. Confirm the REPLEN task on RF, then Accept.`
+      : `${f.location} is at capacity: nothing to replenish`)).join(' ')
+    showToast('ok', text)
+    faces.reload()
+    return text
   })
   const canAccept = hasRole('SUPERVISOR', 'INV_MANAGER')
   const recommended = (recs.data ?? []).filter((r) => (shortageOnly ? r.shortage || r.recommended : r.recommended)
@@ -46,7 +83,8 @@ export default function StoreReplenishment() {
         <option value="all">All stores</option><option value="site">{site} only</option>
       </select>
     }>
-      <ErrorBox error={recs.error ?? accept.error} />
+      {toast}
+      <ErrorBox error={recs.error ?? accept.error ?? replen.error ?? faces.error} />
       {unknown && <div className="alert error">Open orders and transfers could not be read from outbound: source availability is
         on hand minus allocated only, and every recommendation is LOW confidence until it answers.</div>}
       {source && <p className="muted">Recommendations sent from {source} <button className="link" onClick={() => setParams({})}>show all</button></p>}
@@ -66,6 +104,18 @@ export default function StoreReplenishment() {
                 <strong> free {fmtQty(r.source.free)}</strong></span>
               <div className="muted small">{r.whySource}{r.alternatives?.length ? `; also: ${r.alternatives.map((a) => `${a.site} (${fmtQty(a.transferable)})`).join(', ')}` : ''}</div>
             </span>) : '—') },
+          { header: 'Pick face', cell: (r) => {
+            const f = facesOf(r)
+            if (!f) return faces.data ? <span className="muted">no pick face</span> : '…'
+            if (f.faces.length === 0) return <span className="muted">no pick face</span>
+            return f.faces.map((x) => (
+              <div key={x.location_id} className="small">
+                <strong>{x.location_id}</strong>: <span className={Number(x.free) < Number(r.qty) ? 'text-late' : ''}>{fmtQty(x.free)} free</span>
+                {' '}of capacity {fmtQty(x.capacity)}
+                {x.open_replenishments.length > 0 && <div className="muted">replen {x.open_replenishments.map((o) => `${fmtQty(o.qty)} from ${o.source_location}`).join(', ')} open: confirm on RF</div>}
+              </div>
+            ))
+          } },
           { header: 'Needed by', cell: (r) => r.requiredDate },
           { header: 'Stockout', cell: (r) => r.stockoutDate ?? <span className="muted">no history</span> },
           { header: 'Confidence', cell: (r) => <Badge value={r.confidence === 'MEDIUM' ? 'MED' : r.confidence} /> },
@@ -74,12 +124,26 @@ export default function StoreReplenishment() {
           { header: 'Why', cell: (r) => (
             <span className="muted small">{r.reason}{r.qtyBasis ? <><br />Quantity: {r.qtyBasis}</> : null}
               {refused[rowKey(r)] && <span className="text-late"><br />Accept refused: {refused[rowKey(r)]}</span>}</span>) },
-          { header: '', cell: (r) => (canAccept ? (
-            <button className="small primary" disabled={accept.busy || !r.source || Number(r.source.free) < Number(r.qty)}
-                    title={r.source && Number(r.source.free) < Number(r.qty) ? `${r.source.site} has only ${fmtQty(r.source.free)} free` : undefined}
-                    onClick={() => { if (window.confirm(`Create a transfer of ${fmtQty(r.qty)} ${r.itemNo} from ${String(r.sourceSite)} to ${r.siteId}? It is allocated at ${String(r.sourceSite)} now.`)) void accept.run(r) }}>
-              Accept
-            </button>) : null) },
+          { header: '', cell: (r) => {
+            if (!canAccept) return null
+            const f = facesOf(r)
+            const face = f?.faces[0]
+            const faceShort = face !== undefined && Number(face.free) < Number(r.qty)
+            const replenOpen = (face?.open_replenishments.length ?? 0) > 0
+            return (
+              <div className="row tight">
+                <ConfirmButton label="Accept" className="small primary"
+                               disabled={accept.busy || !r.source || Number(r.source.free) < Number(r.qty)}
+                               title={r.source && Number(r.source.free) < Number(r.qty) ? `${r.source.site} has only ${fmtQty(r.source.free)} free` : undefined}
+                               question={`Transfer ${fmtQty(r.qty)} ${r.itemNo} ${String(r.sourceSite)} → ${r.siteId}, allocated now?`}
+                               onConfirm={() => void accept.run(r)} />
+                {face && (faceShort || refused[rowKey(r)]) && (replenOpen
+                  ? <Link className="button small" to={`/tasks?type=REPLEN&q=${encodeURIComponent(face.location_id)}`}>Replen to {face.location_id} open: confirm on RF</Link>
+                  : <ConfirmButton label={`Create replen to ${face.location_id}`} disabled={replen.busy}
+                                   question={`Replenish ${face.location_id} from reserve now?`} onConfirm={() => void replen.run(r)} />)}
+              </div>
+            )
+          } },
         ]} />
       </Card>
       <Card title="All policies">

@@ -170,6 +170,42 @@ export function ErrorBox({ error }: { error: unknown }) {
   return <div className="alert error" role="alert">{error instanceof Error ? error.message : String(error)}</div>
 }
 
+/**
+ * A button that asks on itself before acting (ADR-0028): first click shows the question and Confirm / Cancel. No
+ * browser dialog, which some browsers and automation dismiss without a trace.
+ */
+export function ConfirmButton({ label, question, onConfirm, disabled, className = 'small', title }: {
+  label: string; question: string; onConfirm: () => void; disabled?: boolean; className?: string; title?: string
+}) {
+  const [asking, setAsking] = useState(false)
+  if (!asking) {
+    return <button type="button" className={className} disabled={disabled} title={title} onClick={() => setAsking(true)}>{label}</button>
+  }
+  return (
+    <span className="confirm-inline" role="group" aria-label={question}>
+      <span className="small">{question}</span>{' '}
+      <button type="button" className={`${className} primary`} onClick={() => { setAsking(false); onConfirm() }}>Confirm</button>{' '}
+      <button type="button" className={className} onClick={() => setAsking(false)}>Cancel</button>
+    </span>
+  )
+}
+
+/** A message that appears at the bottom of the screen for a few seconds (and stays readable in the page as well). */
+export function useToast(): [ReactNode, (kind: 'ok' | 'error', text: string) => void] {
+  const [toast, setToast] = useState<{ kind: 'ok' | 'error'; text: string; at: number }>()
+  useEffect(() => {
+    if (!toast) return
+    const t = window.setTimeout(() => setToast(undefined), 12_000)
+    return () => window.clearTimeout(t)
+  }, [toast])
+  const node = toast ? (
+    <div className={`toast ${toast.kind}`} role={toast.kind === 'error' ? 'alert' : 'status'} onClick={() => setToast(undefined)}>
+      {toast.text}
+    </div>
+  ) : null
+  return [node, (kind, text) => setToast({ kind, text, at: Date.now() })]
+}
+
 export function Success({ children }: { children: ReactNode }) {
   return children ? <div className="alert ok" role="status">{children}</div> : null
 }

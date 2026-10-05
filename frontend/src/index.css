@@ -210,3 +210,7 @@ pre.zpl { font-size: .75rem; overflow-x: auto; background: var(--neutral-bg); pa
 a.button { display: inline-block; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); text-decoration: none; }
 .site-detail { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .site-detail .facts { display: flex; flex-wrap: wrap; gap: 10px; margin: 6px 0; font-size: .85rem; }
+.toast { position: fixed; right: 16px; bottom: 16px; max-width: min(520px, calc(100vw - 32px)); z-index: 50; padding: 12px 14px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.25); cursor: pointer; }
+.toast.ok { background: var(--good-bg); color: var(--good); border: 1px solid var(--good); }
+.toast.error { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad); }
+.confirm-inline { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }

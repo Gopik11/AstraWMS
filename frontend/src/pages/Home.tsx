@@ -6,7 +6,7 @@ import { offlineTasks, useOffline } from '../offline'
 import { AskBox } from './Ask'
 import { cutoffForecast } from '../forecast'
 import { acceptRecommendation, type Recommendation } from '../replenish'
-import { Card, ErrorBox, Page, Table, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
+import { Card, ConfirmButton, ErrorBox, Page, Table, fmtQty, useAction, useLoad, useSiteContext } from '../ui'
 
 function countBy<T>(rows: T[] | undefined, key: (r: T) => string): Record<string, number> {
   const out: Record<string, number> = {}
@@ -64,8 +64,7 @@ function TileButton({ action }: { action: TileAction }) {
   const act = useAction(action.run)
   return (
     <div className="tile-action">
-      <button className="small" disabled={act.busy} onClick={() => { if (window.confirm(action.confirm)) void act.run() }}>
-        {action.label}</button>
+      <ConfirmButton label={action.label} question={action.confirm} disabled={act.busy} onConfirm={() => void act.run()} />
       {act.result && <span className="tile-d">{act.result}</span>}
       {act.error ? <span className="tile-d text-late">{act.error instanceof Error ? act.error.message : String(act.error)}</span> : null}
     </div>

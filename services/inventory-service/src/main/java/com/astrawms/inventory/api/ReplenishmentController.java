@@ -88,6 +88,20 @@ public class ReplenishmentController {
         return replenishments.list(siteId, status);
     }
 
+    /** An item's pick faces (free, capacity, open replenishments) and the reserve it is replenished from (ADR-0028). */
+    @GetMapping("/faces/{ownerId}/{itemNo}")
+    public Map<String, Object> faces(@PathVariable String siteId, @PathVariable String ownerId, @PathVariable String itemNo) {
+        return replenishments.faces(siteId, ownerId, itemNo);
+    }
+
+    /** Replenish an item's faces now: an open replenishment is kept (never a second task). */
+    @PreAuthorize("hasAnyRole('SUPERVISOR','INV_MANAGER')")
+    @PostMapping("/faces/{ownerId}/{itemNo}/replenish")
+    public List<Map<String, Object>> replenishFaces(@PathVariable String siteId, @PathVariable String ownerId,
+                                                    @PathVariable String itemNo) {
+        return replenishments.replenishFaces(siteId, ownerId, itemNo);
+    }
+
     /** Top-off run: evaluates every rule of the site now. */
     @PreAuthorize("hasAnyRole('SUPERVISOR','INV_MANAGER','SOLUTION_ADMIN')")
     @PostMapping("/replenishments/evaluate")
