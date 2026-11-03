@@ -24,6 +24,8 @@ export interface RequestOptions {
   /** Commands: a fresh key per user action; a retry of the same action must reuse it (NFR-123). */
   idempotencyKey?: string
   headers?: Record<string, string>
+  /** Gives up after this many milliseconds with an ApiError of code TIMEOUT (status 0). */
+  timeoutMs?: number
 }
 
 export function newIdempotencyKey(prefix = 'ui'): string {
@@ -38,11 +40,25 @@ export async function api<T>(method: string, path: string, options: RequestOptio
   if (options.idempotencyKey) {
     headers['Idempotency-Key'] = options.idempotencyKey
   }
-  const response = await fetch(path, {
-    method,
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  })
+  const controller = options.timeoutMs ? new AbortController() : undefined
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined
+  let response: Response
+  try {
+    response = await fetch(path, {
+      method,
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller?.signal,
+    })
+  } catch (e) {
+    if (controller?.signal.aborted) {
+      throw new ApiError(0, { code: 'TIMEOUT', title: 'Timed out',
+        detail: `No answer within ${Math.round((options.timeoutMs ?? 0) / 1000)} s` })
+    }
+    throw e
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
   if (response.status === 204) {
     return undefined as T
   }
@@ -68,10 +84,10 @@ const RETRYABLE = new Set([502, 503, 504])
  * deployment, so a page does not show a half-loaded state. Commands are never retried here: they carry their own
  * idempotency keys and the user decides.
  */
-export async function get<T>(path: string): Promise<T> {
+export async function get<T>(path: string, options: Pick<RequestOptions, 'timeoutMs'> = {}): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await api<T>('GET', path)
+      return await api<T>('GET', path, options)
     } catch (e) {
       if (attempt >= 2 || !(e instanceof ApiError) || !RETRYABLE.has(e.status)) throw e
       await new Promise((r) => setTimeout(r, attempt === 0 ? 800 : 2000))

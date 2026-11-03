@@ -84,4 +84,39 @@ class TenancyAndConcurrencyIT extends IntegrationTest {
                 "select count(*) from inventory_txn where txn_type = 'ADJUST_NEG'").query(Integer.class).single());
         assertThat(ledgerLines).isEqualTo(10);
     }
+
+    /**
+     * Review validation plan (ADR-0029): many concurrent retries of one command with one idempotency key have exactly
+     * one effect; every other answer is the original result replayed or a retryable conflict, never a second posting.
+     */
+    @Test
+    void concurrentRetriesOfOneCommandHaveExactlyOneEffect() throws Exception {
+        String body = """
+                {"ownerId":"ACME","itemNo":"SKU-EA","qty":7,"uom":"EA","locationId":"A-01-02","lpnId":"LPN-IDEM"}""";
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        List<Callable<Integer>> calls = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            calls.add(() -> postAs("op", "/receipts", "rf-retry-1", body).andReturn().getResponse().getStatus());
+        }
+        List<Integer> statuses = new ArrayList<>();
+        for (Future<Integer> f : pool.invokeAll(calls)) {
+            statuses.add(f.get());
+        }
+        pool.shutdown();
+
+        assertThat(statuses.stream().filter(s -> s == 201).count()).isEqualTo(1);
+        assertThat(statuses).allMatch(s -> s == 201 || s == 200 || s == 409);
+        assertThat(onHand("SKU-EA", "A-01-02", "AVAILABLE")).isEqualByComparingTo("7");
+        assertThat(queryAsTenant(() -> jdbc.sql("select count(*) from inventory_operation where idempotency_key = 'rf-retry-1'")
+                .query(Integer.class).single())).isEqualTo(1);
+        assertThat(queryAsTenant(() -> jdbc.sql("select count(*) from inventory_txn where lpn_id = 'LPN-IDEM'")
+                .query(Integer.class).single())).isEqualTo(1);
+        // one event for the one change (a receipt reaches the ERP through inbound's confirmation, not a movement)
+        assertThat(outboxTypes().stream().filter("InventoryChanged"::equals).count()).isEqualTo(1);
+
+        // the same key with another body is refused, not applied
+        postAs("op", "/receipts", "rf-retry-1", body.replace("\"qty\":7", "\"qty\":8"))
+                .andExpect(status().isUnprocessableContent());
+        assertThat(onHand("SKU-EA", "A-01-02", "AVAILABLE")).isEqualByComparingTo("7");
+    }
 }

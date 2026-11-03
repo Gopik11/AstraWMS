@@ -7,18 +7,18 @@ import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.contracts.OutboundContracts.ShipmentConfirmation;
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.EventEnvelope;
-import com.astrawms.common.tenancy.TenantContext;
+import com.astrawms.common.messaging.InboxProcessing;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Turns WMS events into webhook deliveries (ADR-0025). Its own consumer groups: a webhook never delays or blocks the
- * SAP postings of the same events. A redelivered message is queued once per subscription (message id).
+ * SAP postings of the same events. Each group has its own inbox record (ADR-0029), and a delivery is queued once per
+ * subscription and message id.
  */
 @Component
 public class WebhookListeners {
@@ -28,12 +28,12 @@ public class WebhookListeners {
 
     private final EnvelopeCodec codec;
     private final Webhooks webhooks;
-    private final TransactionTemplate tx;
+    private final InboxProcessing inbox;
 
-    public WebhookListeners(EnvelopeCodec codec, Webhooks webhooks, TransactionTemplate tx) {
+    public WebhookListeners(EnvelopeCodec codec, Webhooks webhooks, InboxProcessing inbox) {
         this.codec = codec;
         this.webhooks = webhooks;
-        this.tx = tx;
+        this.inbox = inbox;
     }
 
     @KafkaListener(topics = OutboundContracts.TOPIC_SHIPMENT_CONFIRMATIONS, groupId = "webhooks.shipment-confirmations")
@@ -94,7 +94,6 @@ public class WebhookListeners {
     }
 
     private void publish(EventEnvelope e, String event, Map<String, Object> data) {
-        TenantContext.runAs(new TenantContext.Scope(e.tenantId(), "system:webhooks", "INTEGRATION"),
-                () -> tx.executeWithoutResult(s -> webhooks.publish(event, e.messageId().toString(), data)));
+        inbox.once(e, "system:webhooks", "INTEGRATION", () -> webhooks.publish(event, e.messageId().toString(), data));
     }
 }

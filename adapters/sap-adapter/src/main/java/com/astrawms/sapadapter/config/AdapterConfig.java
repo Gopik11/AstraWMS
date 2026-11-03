@@ -32,13 +32,11 @@ public class AdapterConfig {
     com.astrawms.sapadapter.flow.MasterDataClient masterDataClient(
             JsonMapper json, com.astrawms.common.security.ServiceCallInterceptor serviceCalls,
             @org.springframework.beans.factory.annotation.Value("${astra.master-data.base-url}") String baseUrl,
-            @org.springframework.beans.factory.annotation.Value("${astra.master-data.timeout-ms:5000}") long timeoutMs) {
-        org.springframework.http.client.SimpleClientHttpRequestFactory factory =
-                new org.springframework.http.client.SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(java.time.Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(java.time.Duration.ofMillis(timeoutMs));
-        return new com.astrawms.sapadapter.flow.MasterDataClient.Http(org.springframework.web.client.RestClient.builder()
-                .baseUrl(baseUrl).requestFactory(factory).requestInterceptor(serviceCalls).build(), json);
+            @org.springframework.beans.factory.annotation.Value("${astra.master-data.timeout-ms:5000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new com.astrawms.sapadapter.flow.MasterDataClient.Http(com.astrawms.common.web.ServiceClients.build("master-data", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent), json);
     }
 
     @Bean

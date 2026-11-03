@@ -82,7 +82,15 @@ public final class AllocationDtos {
     public record LotQty(String lotNo, BigDecimal qty) {
     }
 
-    public record ReleaseRequest(@NotBlank String orderRef) {
+    /**
+     * Releases the open allocations of an order; with {@code allocationIds}, only those (ADR-0029: a refused strict
+     * transfer's compensation releases exactly what it reserved, never another order's reservations).
+     */
+    public record ReleaseRequest(@NotBlank String orderRef, java.util.List<java.util.UUID> allocationIds) {
+
+        public ReleaseRequest(String orderRef) {
+            this(orderRef, null);
+        }
     }
 
     /**

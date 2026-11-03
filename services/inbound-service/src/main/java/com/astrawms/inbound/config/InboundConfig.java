@@ -10,11 +10,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.web.client.RestClient;
 import tools.jackson.databind.json.JsonMapper;
 
 @Configuration
@@ -33,12 +31,11 @@ public class InboundConfig {
     @ConditionalOnMissingBean(InventoryClient.class)
     InventoryClient inventoryClient(JsonMapper json, ServiceCallInterceptor serviceCalls,
                                     @Value("${astra.inventory.base-url}") String baseUrl,
-                                    @Value("${astra.inventory.timeout-ms:3000}") long timeoutMs) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        return new HttpInventoryClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
-                .requestInterceptor(serviceCalls).build(), json);
+                                    @Value("${astra.inventory.timeout-ms:3000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new HttpInventoryClient(com.astrawms.common.web.ServiceClients.build("inventory", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent), json);
     }
 
     // Declared for local/dev environments; production topics are provisioned by infrastructure.

@@ -42,6 +42,8 @@ import tools.jackson.databind.json.JsonMapper;
 @Service
 public class OutboundService {
 
+    private final StrictReservations reservations;
+
     private final JdbcClient jdbc;
     private final InventoryClient inventory;
     private final OutboxWriter outbox;
@@ -57,7 +59,9 @@ public class OutboundService {
                            com.astrawms.outbound.packing.PackingService packing, ReleasePolicy policy,
                            @Value("${astra.outbound.staging-location:STAGE-OUT}") String stagingLocation,
                            @Value("${astra.outbound.pick-priority:60}") int pickPriority,
-                           @Value("${astra.outbound.return-priority:70}") int returnPriority) {
+                           @Value("${astra.outbound.return-priority:70}") int returnPriority,
+                           StrictReservations reservations) {
+        this.reservations = reservations;
         this.jdbc = jdbc;
         this.inventory = inventory;
         this.outbox = outbox;
@@ -190,7 +194,7 @@ public class OutboundService {
         if (shorts.isEmpty()) {
             return;
         }
-        inventory.release(siteId, "OUT-STRICT-" + orderId, transferNo);
+        // the rollback releases what this attempt reserved (StrictReservations, ADR-0029)
         throw ApiException.conflict("OUT_NOT_ALLOCABLE", "Nothing was reserved: " + shorts.stream()
                 .map(l -> l.get("item_no") + " short " + strip((BigDecimal) l.get("qty_short")).toPlainString()
                         + (l.get("short_detail") == null ? "" : " (" + l.get("short_detail") + ")"))
@@ -255,6 +259,10 @@ public class OutboundService {
         long seq = jdbc.sql("select count(*) + 1 from outbound_order where site_id = :site and transfer_to_site is not null")
                 .param("site", siteId).query(Long.class).single();
         String no = "TR-" + siteId + "-" + "%06d".formatted(seq);
+        reservations.lockNumber(siteId, no);   // a compensation sweeping this number waits, and vice versa
+        if (Boolean.TRUE.equals(r.strict())) {
+            reservations.begin(siteId, no);    // a refusal or failure releases what this attempt reserves
+        }
         List<OutboundOrder.Line> lines = new ArrayList<>();
         int n = 0;
         for (TransferLine l : r.lines()) {
@@ -397,9 +405,19 @@ public class OutboundService {
         BigDecimal totalAllocated = BigDecimal.ZERO;
         Map<String, InventoryClient.AllocateResult> results = new java.util.LinkedHashMap<>();
         for (Line l : lines) {
-            results.put(l.ref(), inventory.allocate(order.siteId(),
-                    "OUT-" + order.erpDocNo() + "-" + order.revision() + "-" + l.ref() + (attempt == null ? "" : "-" + attempt),
-                    order.erpDocNo(), l.ref(), l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of()));
+            InventoryClient.AllocateResult a;
+            try {
+                a = inventory.allocate(order.siteId(),
+                        "OUT-" + order.erpDocNo() + "-" + order.revision() + "-" + l.ref() + (attempt == null ? "" : "-" + attempt),
+                        order.erpDocNo(), l.ref(), l.owner(), l.item(), l.qty(), l.uom(), l.lot(), List.of());
+            } catch (com.astrawms.common.web.ApiException e) {
+                throw e;                        // inventory answered: nothing was reserved by this call
+            } catch (RuntimeException e) {
+                reservations.uncertain();       // no answer: inventory may have reserved (ADR-0029)
+                throw e;
+            }
+            reservations.record(a);
+            results.put(l.ref(), a);
         }
         String firstShort = results.entrySet().stream().filter(e -> e.getValue().shortQty().signum() > 0)
                 .map(Map.Entry::getKey).findFirst().orElse(null);

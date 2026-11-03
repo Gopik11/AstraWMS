@@ -66,8 +66,9 @@ public class TaskService {
     public TaskService(JdbcClient jdbc, Projections projections, PutawayEngine engine, InventoryClient inventory,
                        OutboxWriter outbox, Clock clock, com.astrawms.task.inbound.InboundClient inbound,
                        tools.jackson.databind.json.JsonMapper json, Labor labor,
-                       com.astrawms.task.labels.LabelClient labels) {
+                       com.astrawms.task.labels.LabelClient labels, com.astrawms.task.labels.LabelChecks labelChecks) {
         this.labels = labels;
+        this.labelChecks = labelChecks;
         this.labor = labor;
         this.inbound = inbound;
         this.json = json;
@@ -80,16 +81,23 @@ public class TaskService {
     }
 
     private final com.astrawms.task.labels.LabelClient labels;
+    private final com.astrawms.task.labels.LabelChecks labelChecks;
 
     /**
      * A label printed by AstraWMS is active only after its verification scan (ADR-0025): a PRINTED label is refused
      * until verified, a VOID one always. Barcodes AstraWMS never printed (vendor SSCCs) pass.
      */
-    private void requireActiveLabel(String siteId, String type, String barcode) {
+    private void requireActiveLabel(String siteId, UUID taskId, String type, String barcode) {
         if (barcode == null || barcode.isBlank()) {
             return;
         }
         String status = labels.status(siteId, type, barcode.trim()).orElse("VERIFIED");
+        if (com.astrawms.task.labels.LabelClient.UNREACHABLE.equals(status)) {
+            labelChecks.unreachable(siteId, taskId, type, barcode.trim());   // fail closed, or record the bypass
+            event(taskId, "LABEL_CHECK_BYPASSED", type + " label " + barcode.trim()
+                    + " accepted unchecked: master data unavailable");
+            return;
+        }
         if ("VOID".equals(status)) {
             throw ApiException.unprocessable("TSK_LABEL_VOID", type.toLowerCase() + " label " + barcode
                     + " is void: take it off and use another one");
@@ -247,7 +255,7 @@ public class TaskService {
         if (loc.checkDigit() == null || s.checkDigit() == null || !loc.checkDigit().equals(s.checkDigit().trim())) {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + s.locationId());
         }
-        requireActiveLabel(siteId, "LPN", s.lpnId());
+        requireActiveLabel(siteId, taskId, "LPN", s.lpnId());
         if (!PutawayEngine.inboundStaging(loc)) {
             throw ApiException.unprocessable("TSK_LOCATION_NOT_ALLOWED",
                     s.locationId() + " is not a dock, receiving or returns location");
@@ -1128,7 +1136,7 @@ public class TaskService {
         if (loc.checkDigit() == null || !loc.checkDigit().equals(checkDigit.trim())) {
             throw ApiException.unprocessable("TSK_CHECK_DIGIT_MISMATCH", "Check digit does not match location " + locationId);
         }
-        requireActiveLabel(siteId, "LOCATION", locationId);
+        requireActiveLabel(siteId, taskId, "LOCATION", locationId);
         String strategy = null;
         String reason = null;
         if (!locationId.equals(t.targetLocation())) {

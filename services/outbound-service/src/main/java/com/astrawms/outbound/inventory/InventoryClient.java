@@ -65,4 +65,13 @@ public interface InventoryClient {
     }
 
     void release(String siteId, String key, String orderRef);
+
+    /** Releases only these open allocations of the order (ADR-0029); an empty list releases all of the order's. */
+    default void release(String siteId, String key, String orderRef, List<java.util.UUID> allocationIds) {
+        if (allocationIds == null || allocationIds.isEmpty()) {
+            release(siteId, key, orderRef);
+            return;
+        }
+        throw new UnsupportedOperationException("release by allocation id");
+    }
 }

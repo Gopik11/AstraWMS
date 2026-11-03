@@ -7,13 +7,11 @@ import com.astrawms.common.contracts.IntegrationContracts.ReceiptConfirmation;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.EventEnvelope;
-import com.astrawms.common.messaging.InboxGuard;
-import com.astrawms.common.tenancy.TenantContext;
+import com.astrawms.common.messaging.InboxProcessing;
 import com.astrawms.sapadapter.config.SapProperties;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Kafka entry points of the adapter. Each message is processed in one transaction together with its inbox record;
@@ -23,20 +21,18 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class AdapterListeners {
 
     private final EnvelopeCodec codec;
-    private final InboxGuard inbox;
+    private final InboxProcessing inbox;
     private final PostingFlows postings;
     private final InboundDeliveryFlow deliveries;
     private final SapProperties sap;
-    private final TransactionTemplate tx;
 
-    public AdapterListeners(EnvelopeCodec codec, InboxGuard inbox, PostingFlows postings,
-                            InboundDeliveryFlow deliveries, SapProperties sap, TransactionTemplate tx) {
+    public AdapterListeners(EnvelopeCodec codec, InboxProcessing inbox, PostingFlows postings,
+                            InboundDeliveryFlow deliveries, SapProperties sap) {
         this.codec = codec;
         this.inbox = inbox;
         this.postings = postings;
         this.deliveries = deliveries;
         this.sap = sap;
-        this.tx = tx;
     }
 
     @KafkaListener(topics = IntegrationContracts.TOPIC_RECEIPT_CONFIRMATIONS, groupId = "sap-adapter.receipt-confirmations")
@@ -75,11 +71,6 @@ public class AdapterListeners {
     }
 
     private void process(EventEnvelope e, Runnable work) {
-        TenantContext.runAs(new TenantContext.Scope(e.tenantId(), "system:sap-adapter", "INTEGRATION"),
-                () -> tx.executeWithoutResult(s -> {
-                    if (inbox.firstDelivery(e.sourceSystem(), e.messageId().toString(), e.messageType())) {
-                        work.run();
-                    }
-                }));
+        inbox.once(e, "system:sap-adapter", "INTEGRATION", work);
     }
 }

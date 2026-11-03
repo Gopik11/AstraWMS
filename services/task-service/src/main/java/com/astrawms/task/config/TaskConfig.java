@@ -11,11 +11,9 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.web.client.RestClient;
 import tools.jackson.databind.json.JsonMapper;
 
 @Configuration
@@ -28,34 +26,31 @@ public class TaskConfig {
 
     @Bean
     InventoryClient inventoryClient(JsonMapper json, ServiceCallInterceptor serviceCalls, @Value("${astra.inventory.base-url}") String baseUrl,
-                                    @Value("${astra.inventory.timeout-ms:3000}") long timeoutMs) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        return new HttpInventoryClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
-                .requestInterceptor(serviceCalls).build(), json);
+                                    @Value("${astra.inventory.timeout-ms:3000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new HttpInventoryClient(com.astrawms.common.web.ServiceClients.build("inventory", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent), json);
     }
 
     @Bean
     com.astrawms.task.inbound.InboundClient inboundClient(JsonMapper json, ServiceCallInterceptor serviceCalls,
                                                           @Value("${astra.inbound.base-url}") String baseUrl,
-                                                          @Value("${astra.inbound.timeout-ms:5000}") long timeoutMs) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        return new com.astrawms.task.inbound.HttpInboundClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
-                .requestInterceptor(serviceCalls).build(), json);
+                                                          @Value("${astra.inbound.timeout-ms:5000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new com.astrawms.task.inbound.HttpInboundClient(com.astrawms.common.web.ServiceClients.build("inbound", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent), json);
     }
 
     @Bean
     com.astrawms.task.labels.LabelClient labelClient(ServiceCallInterceptor serviceCalls,
                                                      @Value("${astra.master-data.base-url}") String baseUrl,
-                                                     @Value("${astra.master-data.timeout-ms:2000}") long timeoutMs) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(Duration.ofMillis(timeoutMs));
-        return new com.astrawms.task.labels.HttpLabelClient(RestClient.builder().baseUrl(baseUrl).requestFactory(factory)
-                .requestInterceptor(serviceCalls).build());
+                                                     @Value("${astra.master-data.timeout-ms:2000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new com.astrawms.task.labels.HttpLabelClient(com.astrawms.common.web.ServiceClients.build("master-data", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent));
     }
 
     // Every service declares the topics it consumes as well as those it produces: if a consumer subscribed first,

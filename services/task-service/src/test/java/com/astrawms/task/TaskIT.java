@@ -328,6 +328,41 @@ class TaskIT {
     }
 
     @Test
+    void anUncheckedLabelIsRecordedForReviewOrRefusedPerSitePolicy_ADR0029() throws Exception {
+        // master data cannot be asked: by default (FAIL_OPEN) the putaway goes on, and the bypass is recorded
+        labels.states.put("LOCATION:A-02", com.astrawms.task.labels.LabelClient.UNREACHABLE);
+        received("LPN-U1", "SKU-1");
+        awaitTask("LPN-U1", "RELEASED");
+        String first = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        tasks(get("/api/v1/sites/DC1/tasks/label-checks/policy")).andExpect(jsonPath("$.mode", is("FAIL_OPEN")));
+        confirm(first, "LPN-U1", "A-02", "22").andExpect(jsonPath("$.status", is("COMPLETED")));
+        String bypasses = body(get("/api/v1/sites/DC1/tasks/label-checks/bypasses"));
+        assertThat(JsonPath.<List<String>>read(bypasses, "$[*].barcode")).containsExactly("A-02");
+        assertThat(JsonPath.<String>read(bypasses, "$[0].task_id")).isEqualTo(first);
+        assertThat(asTenant(() -> jdbc.sql("select count(*) from task_event where task_id = :id and event = 'LABEL_CHECK_BYPASSED'")
+                .param("id", UUID.fromString(first)).query(Integer.class).single())).isEqualTo(1);
+        String bypass = JsonPath.read(bypasses, "$[0].id");
+        tasks(post("/api/v1/sites/DC1/tasks/label-checks/bypasses/" + bypass + "/review"), "{\"note\":\"bin label scanned: VERIFIED\"}")
+                .andExpect(status().isOk());
+        tasks(get("/api/v1/sites/DC1/tasks/label-checks/bypasses")).andExpect(jsonPath("$.length()", is(0)));
+        tasks(post("/api/v1/sites/DC1/tasks/label-checks/bypasses/" + bypass + "/review"), "{}").andExpect(status().isNotFound());
+
+        // FAIL_CLOSED: refused until master data answers
+        tasks(put("/api/v1/sites/DC1/tasks/label-checks/policy"), "{\"mode\":\"FAIL_CLOSED\"}").andExpect(status().isOk());
+        tasks(put("/api/v1/sites/DC1/tasks/label-checks/policy"), "{\"mode\":\"SOMETIMES\"}").andExpect(status().isBadRequest());
+        received("LPN-U2", "SKU-1");
+        awaitTask("LPN-U2", "RELEASED");
+        String second = JsonPath.read(body(post("/api/v1/sites/DC1/tasks/next")), "$.id");
+        String target = JsonPath.read(body(get("/api/v1/sites/DC1/tasks/" + second)), "$.targetLocation");
+        String digit = target.equals("A-02") ? "22" : "33";
+        labels.states.put("LOCATION:" + target, com.astrawms.task.labels.LabelClient.UNREACHABLE);
+        confirm(second, "LPN-U2", target, digit).andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code", is("TSK_LABEL_CHECK_UNAVAILABLE")));
+        labels.states.clear();
+        confirm(second, "LPN-U2", target, digit).andExpect(jsonPath("$.status", is("COMPLETED")));
+    }
+
+    @Test
     void overrideLocationMustPassTheSameConstraints() throws Exception {
         received("LPN-1", "SKU-1");
         awaitTask("LPN-1", "RELEASED");

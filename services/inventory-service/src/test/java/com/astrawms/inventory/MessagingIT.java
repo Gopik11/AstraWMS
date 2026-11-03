@@ -147,6 +147,58 @@ class MessagingIT extends IntegrationTest {
         assertThat(after.get("messages").get(0).get("replayedBy").asString()).isEqualTo("ada");
     }
 
+    @Test
+    void replayIsRefusedWhenUnsafeAndAForcedReplayIsRecorded_ADR0029() throws Exception {
+        var admin = com.astrawms.test.TestTokens.as(tenant, "ada", com.astrawms.common.security.Roles.SOLUTION_ADMIN);
+        var post = (java.util.function.Function<String, org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder>)
+                body -> org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/ops/dlq/replay")
+                        .with(admin).contentType(org.springframework.http.MediaType.APPLICATION_JSON).content(body);
+
+        // older than the inbox retention (30 days): its inbox record may be gone
+        UUID oldId = UUID.randomUUID();
+        String old = itemEvent(oldId, "SKU-OLD", "EA", Instant.now())
+                .replace("\"payload\":{", "\"payload\":\"oops\",\"x\":{")
+                .replaceFirst("\"createdAtUtc\":\"[^\"]+\"", "\"createdAtUtc\":\"" + Instant.now().minus(java.time.Duration.ofDays(40)) + "\"");
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-OLD", old).get();
+        // processed by the group since it was dead-lettered
+        UUID doneId = UUID.randomUUID();
+        String done = itemEvent(doneId, "SKU-DONE", "EA", Instant.now()).replace("\"payload\":{", "\"payload\":\"oops\",\"x\":{");
+        kafka.send("wms.masterdata.events.v1", tenant + ":SKU-DONE", done).get();
+
+        JsonNode listing = awaitDeadLetters(admin, 2);
+        assertThat(listing.get("complete").asBoolean()).isTrue();
+        JsonNode oldMsg = null;
+        JsonNode doneMsg = null;
+        for (JsonNode m : listing.get("messages")) {
+            if (oldId.toString().equals(m.get("messageId").asString())) {
+                oldMsg = m;
+            } else if (doneId.toString().equals(m.get("messageId").asString())) {
+                doneMsg = m;
+            }
+        }
+        assertThat(oldMsg.get("replay").asString()).isEqualTo("TOO_OLD");
+        assertThat(doneMsg.get("replay").asString()).isEqualTo("SAFE");
+
+        String oldReplay = "{\"topic\":\"%s\",\"partition\":%d,\"offset\":%d".formatted(oldMsg.get("dlqTopic").asString(),
+                oldMsg.get("partition").asInt(), oldMsg.get("offset").asLong());
+        mvc.perform(post.apply(oldReplay + "}")).andExpect(status().isUnprocessableContent())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code").value("DLQ_REPLAY_UNSAFE"));
+        mvc.perform(post.apply(oldReplay + ",\"force\":true,\"reason\":\" \"}")).andExpect(status().isUnprocessableContent());
+        mvc.perform(post.apply(oldReplay + ",\"force\":true,\"reason\":\"Item SKU-OLD checked: never projected\"}"))
+                .andExpect(status().isOk());
+        assertThat(queryAsTenant(() -> jdbc.sql("select force_reason from dlq_replay where message_id = :id and forced")
+                .param("id", oldId.toString()).query(String.class).single())).isEqualTo("Item SKU-OLD checked: never projected");
+
+        queryAsTenant(() -> jdbc.sql("""
+                        insert into inbox (source_system, message_id, consumer_group, message_type, processed_at)
+                        values ('ASTRAWMS', :id, 'inventory-service.reference', 'ItemUpserted', now())""")
+                .param("id", doneId.toString()).update());
+        mvc.perform(post.apply("{\"topic\":\"%s\",\"partition\":%d,\"offset\":%d}".formatted(doneMsg.get("dlqTopic").asString(),
+                        doneMsg.get("partition").asInt(), doneMsg.get("offset").asLong())))
+                .andExpect(status().isConflict())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.code").value("DLQ_ALREADY_PROCESSED"));
+    }
+
     private JsonNode awaitDeadLetters(org.springframework.test.web.servlet.request.RequestPostProcessor auth, int count)
             throws Exception {
         Instant deadline = Instant.now().plusSeconds(30);

@@ -72,6 +72,10 @@ class OutboundIT {
         public synchronized AllocateResult allocate(String siteId, String key, String orderRef, String orderLineRef,
                                                     String ownerId, String itemNo, BigDecimal qty, String uom, String lotNo,
                                                     List<String> excludeLocationIds) {
+            if (allocateTimesOut.contains(itemNo)) {
+                allocationLine.put(UUID.randomUUID(), new String[] {orderRef, orderLineRef, itemNo});
+                throw new org.springframework.web.client.ResourceAccessException("Read timed out");
+            }
             exclusionsByKey.putIfAbsent(key, excludeLocationIds);
             if (!excludeLocationIds.isEmpty()) {
                 return allocateByKey.computeIfAbsent(key, k -> {
@@ -112,7 +116,28 @@ class OutboundIT {
 
         @Override
         public void release(String siteId, String key, String orderRef) {
+            if (failRelease) {
+                throw new org.springframework.web.client.ResourceAccessException("inventory unreachable");
+            }
             releases.add(orderRef);
+        }
+
+        /** Allocation ids released one by one (ADR-0029 compensation). */
+        final List<UUID> releasedIds = new CopyOnWriteArrayList<>();
+        volatile boolean failRelease;
+        /** Items whose allocation "commits" in inventory but answers with a timeout. */
+        final java.util.Set<String> allocateTimesOut = ConcurrentHashMap.newKeySet();
+
+        @Override
+        public void release(String siteId, String key, String orderRef, List<UUID> allocationIds) {
+            if (allocationIds == null || allocationIds.isEmpty()) {
+                release(siteId, key, orderRef);
+                return;
+            }
+            if (failRelease) {
+                throw new org.springframework.web.client.ResourceAccessException("inventory unreachable");
+            }
+            releasedIds.addAll(allocationIds);
         }
 
         @Override
@@ -619,6 +644,63 @@ class OutboundIT {
         assertThat(asn.get("lines").get(0).get("lotNo").asString()).isEqualTo("L1");
         call(get("/api/v1/sites/ST01/outbound/transfers?direction=IN"), "")
                 .andExpect(jsonPath("$[0].erp_doc_no", is(doc))).andExpect(jsonPath("$[0].from_site", is("DC1")));
+    }
+
+    @Autowired
+    com.astrawms.outbound.service.StrictReservations reservations;
+
+    private List<UUID> allocationsOf(String orderRef) {
+        return inventory.allocationLine.entrySet().stream().filter(e -> e.getValue()[0].equals(orderRef))
+                .map(Map.Entry::getKey).toList();
+    }
+
+    private int openCompensations(String orderRef) {
+        return jdbc.sql("select count(*) from reservation_compensation where order_ref = :r and tenant_id = :t and done_at is null")
+                .param("r", orderRef).param("t", tenant).query(Integer.class).single();
+    }
+
+    @Test
+    void aRefusedStrictTransferReleasesExactlyWhatItReservedEvenWhenInventoryIsDown_ADR0029() throws Exception {
+        // SKU-Q can be allocated; SKU-R is free only by re-allocation, not now: the transfer is refused after
+        // inventory reserved SKU-Q
+        java.util.function.Function<String, String> transfer = to -> """
+                {"toSiteId":"%s","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-Q","qty":1,"uom":"EA"},
+                                                     {"ownerId":"ACME","itemNo":"SKU-R","qty":1,"uom":"EA"}]}""".formatted(to);
+        inventory.stock.put("SKU-R", BigDecimal.ZERO);
+        inventory.elsewhere.put("SKU-R", BigDecimal.ONE);
+
+        // the rollback releases exactly this attempt's reservations, by id
+        inventory.stock.put("SKU-Q", BigDecimal.ONE);
+        call(post("/api/v1/sites/DC4/outbound/transfers"), transfer.apply("ST01"))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("OUT_NOT_ALLOCABLE")));
+        List<UUID> reserved = allocationsOf("TR-DC4-000001");
+        assertThat(reserved).isNotEmpty();
+        assertThat(inventory.releasedIds).containsExactlyInAnyOrderElementsOf(reserved);
+        assertThat(openCompensations("TR-DC4-000001")).isZero();
+
+        // inventory unreachable when the refusal is compensated: kept, then released by the retrier
+        inventory.stock.put("SKU-Q", BigDecimal.ONE);
+        inventory.failRelease = true;
+        call(post("/api/v1/sites/DC5/outbound/transfers"), transfer.apply("ST02"))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("OUT_NOT_ALLOCABLE")));
+        assertThat(openCompensations("TR-DC5-000001")).isEqualTo(1);
+        inventory.failRelease = false;
+        reservations.retry();
+        assertThat(openCompensations("TR-DC5-000001")).isZero();
+        assertThat(inventory.releasedIds).containsAll(allocationsOf("TR-DC5-000001"));
+
+        // an allocation inventory committed but never answered: swept by order reference while the number is free
+        inventory.stock.put("SKU-T", BigDecimal.ONE);
+        inventory.allocateTimesOut.add("SKU-T");
+        call(post("/api/v1/sites/DC6/outbound/transfers"), """
+                {"toSiteId":"ST03","strict":true,"lines":[{"ownerId":"ACME","itemNo":"SKU-T","qty":1,"uom":"EA"}]}""")
+                .andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code", is("DOWNSTREAM_UNAVAILABLE")));
+        assertThat(jdbc.sql("select sweep_by_ref from reservation_compensation where order_ref = 'TR-DC6-000001' and tenant_id = :t")
+                .param("t", tenant).query(Boolean.class).single()).isTrue();
+        reservations.retry();
+        assertThat(openCompensations("TR-DC6-000001")).isZero();
+        assertThat(inventory.releases).contains("TR-DC6-000001");
+        inventory.allocateTimesOut.clear();
     }
 
     @Test

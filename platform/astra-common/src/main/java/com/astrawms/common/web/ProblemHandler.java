@@ -44,6 +44,19 @@ public class ProblemHandler {
     }
 
     /** {@code @PreAuthorize} denials; authentication failures never reach the controller. */
+    /**
+     * A service this request calls synchronously did not answer (connect or read timeout, connection refused): 503, so
+     * the client retries the same command with the same idempotency key (ADR-0005, ADR-0029). A call that committed
+     * downstream before the timeout is then answered from the downstream idempotency record, not done twice.
+     */
+    @ExceptionHandler(org.springframework.web.client.ResourceAccessException.class)
+    org.springframework.http.ResponseEntity<ProblemDetail> downstream(org.springframework.web.client.ResourceAccessException e) {
+        log.warn("Downstream service did not answer: {}", e.getMessage());
+        return org.springframework.http.ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).header("Retry-After", "2")
+                .body(problem(HttpStatus.SERVICE_UNAVAILABLE, "DOWNSTREAM_UNAVAILABLE",
+                        "A service this request depends on did not answer in time; retry the same request"));
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     ProblemDetail forbidden(AccessDeniedException e) {
         return problem(HttpStatus.FORBIDDEN, "FORBIDDEN", "Your roles do not permit this operation");
