@@ -148,14 +148,18 @@ public class AstraCommonAutoConfiguration {
     @ConditionalOnBean({KafkaTemplate.class, ConsumerFactory.class})
     DeadLetters astraDeadLetters(@Value("${spring.application.name:service}") String service, ConsumerFactory<?, ?> consumers,
                                  KafkaTemplate<String, String> kafka, KafkaListenerEndpointRegistry registry,
-                                 JdbcClient jdbc, PlatformTransactionManager txManager, JsonMapper json, Clock clock) {
-        return new DeadLetters(service, consumers, kafka, registry, jdbc, new TransactionTemplate(txManager), json, clock);
+                                 JdbcClient jdbc, PlatformTransactionManager txManager, JsonMapper json, Clock clock,
+                                 InboxGuard inbox,
+                                 @Value("${astra.housekeeping.inbox-retention:P30D}") Duration inboxRetention) {
+        return new DeadLetters(service, consumers, kafka, registry, jdbc, new TransactionTemplate(txManager), json, clock,
+                inbox, inboxRetention);
     }
 
     @Bean
     @ConditionalOnBean(DeadLetters.class)
-    OpsController astraOpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock) {
-        return new OpsController(deadLetters, jdbc, clock);
+    OpsController astraOpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
+                                     ObjectProvider<OutboxRelay> relay) {
+        return new OpsController(deadLetters, jdbc, clock, relay.getIfAvailable());
     }
 
     @Bean

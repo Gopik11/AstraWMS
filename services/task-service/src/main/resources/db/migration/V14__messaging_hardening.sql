@@ -4,3 +4,8 @@
 alter table inbox add column consumer_group text not null default '';
 alter table inbox drop constraint inbox_pkey;
 alter table inbox add primary key (source_system, message_id, consumer_group);
+
+-- ADR-0029: a dead letter older than the inbox retention may already have been applied and forgotten by the inbox;
+-- replaying it is refused unless forced, and a forced replay records why.
+alter table dlq_replay add column forced boolean not null default false;
+alter table dlq_replay add column force_reason text;
