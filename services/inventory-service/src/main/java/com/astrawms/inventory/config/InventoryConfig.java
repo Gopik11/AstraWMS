@@ -22,12 +22,11 @@ public class InventoryConfig {
     @Bean
     com.astrawms.inventory.outbound.OutboundClient outboundClient(com.astrawms.common.security.ServiceCallInterceptor serviceCalls,
             @org.springframework.beans.factory.annotation.Value("${astra.outbound.base-url}") String baseUrl,
-            @org.springframework.beans.factory.annotation.Value("${astra.outbound.timeout-ms:3000}") long timeoutMs) {
-        org.springframework.http.client.SimpleClientHttpRequestFactory factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(java.time.Duration.ofMillis(timeoutMs));
-        factory.setReadTimeout(java.time.Duration.ofMillis(timeoutMs));
-        return new com.astrawms.inventory.outbound.HttpOutboundClient(org.springframework.web.client.RestClient.builder()
-                .baseUrl(baseUrl).requestFactory(factory).requestInterceptor(serviceCalls).build());
+            @org.springframework.beans.factory.annotation.Value("${astra.outbound.timeout-ms:3000}") long timeoutMs,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.core.instrument.MeterRegistry> meters,
+            @org.springframework.beans.factory.annotation.Value("${astra.downstream.max-concurrent:32}") int maxConcurrent) {
+        return new com.astrawms.inventory.outbound.HttpOutboundClient(com.astrawms.common.web.ServiceClients.build("outbound", baseUrl,
+                java.time.Duration.ofMillis(timeoutMs), serviceCalls, meters.getIfAvailable(), maxConcurrent));
     }
 
     // Topics are declared for local/dev environments; production topics are provisioned by infrastructure.
