@@ -10,8 +10,8 @@ import org.springframework.web.client.RestClientException;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Asks master data for a label's state. Fails open: if master data cannot be reached, RF work goes on (the label check
- * is a quality gate, not an access control) and the miss is logged.
+ * Asks master data for a label's state. When master data cannot be reached it answers {@link LabelClient#UNREACHABLE};
+ * whether RF work goes on is the site's label-check policy (ADR-0029), not this client's decision.
  */
 public class HttpLabelClient implements LabelClient {
 
@@ -33,8 +33,8 @@ public class HttpLabelClient implements LabelClient {
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.empty();
         } catch (RestClientException e) {
-            log.warn("Label check of {} {} at {} skipped: master data unavailable ({})", type, barcode, siteId, e.getMessage());
-            return Optional.empty();
+            log.warn("Label check of {} {} at {}: master data unavailable ({})", type, barcode, siteId, e.getMessage());
+            return Optional.of(UNREACHABLE);
         }
     }
 }
