@@ -26,6 +26,10 @@ jobs:
       - name: Architecture rules
         run: scripts/check-architecture.sh
 
+      # docs/security/permission-matrix.md is generated from the controllers; a change of roles must update it.
+      - name: Permission matrix is current
+        run: python3 scripts/permission_matrix.py --check
+
       # Unit + integration tests (Testcontainers: Postgres 16, Kafka)
       - name: Build and test
         run: mvn -B verify
