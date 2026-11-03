@@ -21,6 +21,11 @@ jobs:
           java-version: "21"
           cache: maven
 
+      # Static rules the platform's guarantees rest on (ADR-0029): inbox on every listener, tenant filters on
+      # platform tables, roles on every state-changing endpoint.
+      - name: Architecture rules
+        run: scripts/check-architecture.sh
+
       # Unit + integration tests (Testcontainers: Postgres 16, Kafka)
       - name: Build and test
         run: mvn -B verify

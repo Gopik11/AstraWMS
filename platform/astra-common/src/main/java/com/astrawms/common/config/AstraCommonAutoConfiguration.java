@@ -2,6 +2,7 @@ package com.astrawms.common.config;
 
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.InboxGuard;
+import com.astrawms.common.messaging.InboxProcessing;
 import com.astrawms.common.messaging.KafkaErrorHandling;
 import com.astrawms.common.messaging.MessagingHousekeeping;
 import com.astrawms.common.messaging.OutboxRelay;
@@ -15,6 +16,8 @@ import com.astrawms.common.web.ProblemHandler;
 import java.time.Clock;
 import java.time.Duration;
 import javax.sql.DataSource;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -89,6 +92,11 @@ public class AstraCommonAutoConfiguration {
     }
 
     @Bean
+    InboxProcessing inboxProcessing(InboxGuard inbox, PlatformTransactionManager txManager) {
+        return new InboxProcessing(inbox, new TransactionTemplate(txManager));
+    }
+
+    @Bean
     EnvelopeCodec envelopeCodec(JsonMapper json) {
         return new EnvelopeCodec(json);
     }
@@ -115,9 +123,17 @@ public class AstraCommonAutoConfiguration {
     @Bean
     @ConditionalOnBean(KafkaTemplate.class)
     @ConditionalOnProperty(name = "astra.outbox.relay-enabled", havingValue = "true", matchIfMissing = true)
-    OutboxRelay outboxRelay(JdbcClient jdbc, PlatformTransactionManager txManager, KafkaTemplate<String, String> kafka,
-                            Clock clock) {
-        return new OutboxRelay(jdbc, new TransactionTemplate(txManager), kafka, clock, 200, Duration.ofSeconds(10));
+    OutboxRelay outboxRelay(DataSource dataSource, KafkaTemplate<String, String> kafka, Clock clock,
+                            ObjectProvider<MeterRegistry> meters,
+                            @Value("${astra.outbox.partitions:8}") int partitions,
+                            @Value("${astra.outbox.batch-size:200}") int batchSize,
+                            @Value("${astra.outbox.send-timeout:PT10S}") Duration sendTimeout,
+                            @Value("${astra.outbox.cycle-budget:PT30S}") Duration cycleBudget,
+                            @Value("${astra.outbox.breaker-open:PT30S}") Duration breakerOpen,
+                            @Value("${astra.outbox.parallelism:2}") int parallelism) {
+        return new OutboxRelay(dataSource, kafka, clock,
+                new OutboxRelay.Settings(partitions, batchSize, sendTimeout, cycleBudget, breakerOpen, parallelism),
+                meters.getIfAvailable());
     }
 
     /** Delivers a replayed dead letter only to the consumer group that failed it (ADR-0018). */

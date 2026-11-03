@@ -8,31 +8,26 @@ import com.astrawms.common.contracts.MasterDataEvents.ItemUpserted;
 import com.astrawms.common.contracts.MasterDataEvents.LocationUpserted;
 import com.astrawms.common.messaging.EnvelopeCodec;
 import com.astrawms.common.messaging.EventEnvelope;
-import com.astrawms.common.messaging.InboxGuard;
-import com.astrawms.common.tenancy.TenantContext;
+import com.astrawms.common.messaging.InboxProcessing;
 import com.astrawms.task.service.TaskService;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionTemplate;
 
 /** Keeps projections current and triggers putaway. Projection update and task reaction share one transaction. */
 @Component
 public class ProjectionListeners {
 
     private final EnvelopeCodec codec;
-    private final InboxGuard inbox;
+    private final InboxProcessing inbox;
     private final Projections projections;
     private final TaskService tasks;
-    private final TransactionTemplate tx;
 
-    public ProjectionListeners(EnvelopeCodec codec, InboxGuard inbox, Projections projections, TaskService tasks,
-                               TransactionTemplate tx) {
+    public ProjectionListeners(EnvelopeCodec codec, InboxProcessing inbox, Projections projections, TaskService tasks) {
         this.codec = codec;
         this.inbox = inbox;
         this.projections = projections;
         this.tasks = tasks;
-        this.tx = tx;
     }
 
     @KafkaListener(topics = MasterDataEvents.TOPIC, groupId = "task-service.reference")
@@ -102,11 +97,6 @@ public class ProjectionListeners {
     }
 
     private void process(EventEnvelope e, Runnable work) {
-        TenantContext.runAs(new TenantContext.Scope(e.tenantId(), "system:task-service", "EVENT"),
-                () -> tx.executeWithoutResult(s -> {
-                    if (inbox.firstDelivery(e.sourceSystem(), e.messageId().toString(), e.messageType())) {
-                        work.run();
-                    }
-                }));
+        inbox.once(e, "system:task-service", "EVENT", work);
     }
 }
