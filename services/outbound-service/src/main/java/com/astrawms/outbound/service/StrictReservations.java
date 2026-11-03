@@ -48,7 +48,9 @@ public class StrictReservations {
     public StrictReservations(InventoryClient inventory, JdbcClient jdbc, TransactionTemplate tx, Clock clock) {
         this.inventory = inventory;
         this.jdbc = jdbc;
-        this.tx = tx;
+        // also used from afterCompletion, where work must not join the completed transaction's resources
+        this.tx = new TransactionTemplate(java.util.Objects.requireNonNull(tx.getTransactionManager()));
+        this.tx.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.clock = clock;
     }
 
