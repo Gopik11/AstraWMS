@@ -66,6 +66,12 @@ public class HttpInventoryClient implements InventoryClient {
     }
 
     @Override
+    public void release(String siteId, String key, String orderRef, List<java.util.UUID> allocationIds) {
+        post("/api/v1/sites/{site}/inventory/allocations/release", siteId, key, Map.of("orderRef", orderRef,
+                "allocationIds", allocationIds == null ? List.of() : allocationIds));
+    }
+
+    @Override
     public Availability availability(String siteId, String ownerId, String itemNo) {
         TenantContext.require(); // ServiceCallInterceptor adds tenant, user and bearer token
         JsonNode s = rest.get().uri("/api/v1/sites/{site}/inventory/items/{owner}/{item}/summary", siteId, ownerId, itemNo)

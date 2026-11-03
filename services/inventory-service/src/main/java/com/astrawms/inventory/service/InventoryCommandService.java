@@ -559,7 +559,12 @@ public class InventoryCommandService {
         return idempotentValue(siteId, idempotencyKey, "RELEASE", r, ReleaseResult.class, ctx -> {
             int count = 0;
             BigDecimal qty = BigDecimal.ZERO;
+            java.util.Set<UUID> only = r.allocationIds() == null || r.allocationIds().isEmpty() ? null
+                    : new java.util.HashSet<>(r.allocationIds());
             for (Allocation a : allocations.lockByOrder(siteId, r.orderRef())) {
+                if (only != null && !only.contains(a.id())) {
+                    continue;
+                }
                 AccessScope.current().requireOwner(a.ownerId());
                 if (!"OPEN".equals(a.status())) {
                     continue;

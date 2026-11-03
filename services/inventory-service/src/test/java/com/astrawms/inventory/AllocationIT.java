@@ -135,6 +135,22 @@ class AllocationIT extends IntegrationTest {
     }
 
     @Test
+    void releaseByIdFreesOnlyTheNamedAllocations_ADR0029() throws Exception {
+        receive("SKU-EA", "10", "EA", "A-01-01", null, null).andExpect(status().isCreated());
+        String first = JsonPath.read(body(allocate("TR-DC1-000009", "000010", "SKU-EA", "2", null)), "$.allocations[0].id");
+        allocate("TR-DC1-000009", "000020", "SKU-EA", "3", null).andExpect(status().isCreated());
+        post("/allocations/release", """
+                {"orderRef":"TR-DC1-000009","allocationIds":["%s"]}""".formatted(first))
+                .andExpect(jsonPath("$.releasedAllocations", is(1)))
+                .andExpect(jsonPath("$.releasedQty", is(2)));
+        getJson("/balances?locationId=A-01-01").andExpect(jsonPath("$.items[0].availableQty", is(7)));
+        // an id of another order releases nothing of this one
+        post("/allocations/release", """
+                {"orderRef":"SO-OTHER","allocationIds":["%s"]}""".formatted(first))
+                .andExpect(jsonPath("$.releasedAllocations", is(0)));
+    }
+
+    @Test
     void reallocationSkipsExcludedLocations_PCK003() throws Exception {
         receive("SKU-EA", "5", "EA", "A-01-01", null, null).andExpect(status().isCreated());
         receive("SKU-EA", "5", "EA", "A-01-02", null, null).andExpect(status().isCreated());
