@@ -15,7 +15,7 @@ chmod 600 .env
 for v in PG_SUPERUSER_PASSWORD DB_OWNER_PASSWORD DB_APP_PASSWORD KC_DB_PASSWORD KC_ADMIN_PASSWORD \
          INBOUND_CLIENT_SECRET TASK_CLIENT_SECRET OUTBOUND_CLIENT_SECRET PROVISIONER_CLIENT_SECRET \
          KAFKA_BROKER_PASSWORD KAFKA_MASTERDATA_PASSWORD KAFKA_INVENTORY_PASSWORD KAFKA_INBOUND_PASSWORD \
-         KAFKA_TASK_PASSWORD KAFKA_OUTBOUND_PASSWORD KAFKA_SAPADAPTER_PASSWORD; do
+         KAFKA_TASK_PASSWORD KAFKA_OUTBOUND_PASSWORD KAFKA_SAPADAPTER_PASSWORD BACKUP_PASSPHRASE; do
   grep -q "^$v=" .env || { echo "$v=$(openssl rand -hex 24)" >> .env; echo "Generated $v"; }
 done
 # Deployment parameters (not secrets) are refreshed on every run.
@@ -89,6 +89,24 @@ dc pull -q postgres kafka keycloak prometheus
 say "Stage 1: Postgres and Kafka"
 dc up -d postgres kafka
 wait_healthy postgres 120
+
+say "Kafka ACLs per service account (ADR-0029)"
+KAFKA_NETWORK="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$(dc ps -q kafka)")"
+for attempt in 1 2 3 4 5 6; do
+  KAFKA_NETWORK="$KAFKA_NETWORK" KAFKA_BROKER_PASSWORD="$KAFKA_BROKER_PASSWORD" ./kafka-acls.sh kafka-acls.txt && break
+  [[ $attempt == 6 ]] && { echo "FAILED: could not apply the Kafka ACLs" >&2; exit 1; }
+  echo "Kafka not ready yet; retrying in 10 s"; sleep 10
+done
+
+say "Database backups: nightly, encrypted; weekly restore drill (ADR-0029)"
+mkdir -p backups && chmod 700 backups
+cat > /etc/cron.d/astrawms-backup <<CRON
+# AstraWMS (ADR-0029): encrypted pg_dumpall every night, restore drill every Sunday. Logs in /opt/astrawms/backups.
+17 2 * * * root /opt/astrawms/pg-backup.sh >> /opt/astrawms/backups/cron.log 2>&1
+47 3 * * 0 root /opt/astrawms/pg-restore-drill.sh >> /opt/astrawms/backups/cron.log 2>&1
+CRON
+chmod 644 /etc/cron.d/astrawms-backup
+[[ -n "${BACKUP_REMOTE:-}" ]] || echo "NOTE: BACKUP_REMOTE is not set in .env: backups stay on this server only (no off-host copy)"
 
 say "Stage 2: Keycloak (first start builds its runtime; can take a few minutes on this host)"
 dc up -d keycloak

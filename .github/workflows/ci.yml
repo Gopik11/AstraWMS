@@ -30,6 +30,10 @@ jobs:
       - name: Permission matrix is current
         run: python3 scripts/permission_matrix.py --check
 
+      # deploy/kafka/acls.txt is derived from the listeners and outbox writers: a new topic or consumer must update it.
+      - name: Kafka ACLs are current
+        run: python3 scripts/kafka_acls.py --check
+
       # Unit + integration tests (Testcontainers: Postgres 16, Kafka)
       - name: Build and test
         run: mvn -B verify
