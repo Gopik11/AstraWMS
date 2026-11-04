@@ -40,7 +40,7 @@ for db in $DATABASES; do
   if [[ "$db" == keycloak ]]; then
     check=$(docker exec "$name" psql -U postgres -d "$db" -tAc "select count(*) from realm" 2>/dev/null || echo ERR)
   else
-    check=$(docker exec "$name" psql -U postgres -d "$db" -tAc "select coalesce(max(version::text), 'none') from flyway_schema_history where success" 2>/dev/null || echo ERR)
+    check=$(docker exec "$name" psql -U postgres -d "$db" -tAc "select coalesce((select version from flyway_schema_history where success and version is not null order by installed_rank desc limit 1), 'none')" 2>/dev/null || echo ERR)
   fi
   [[ "$tables" -gt 0 && "$check" != ERR && "$check" != none ]] || failures=$((failures + 1))
   report+=" $db=tables:$tables,check:$check"

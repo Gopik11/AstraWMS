@@ -11,3 +11,6 @@ target/
 
 # Local development credentials written by scripts/dev-user.sh
 deploy/keycloak/.dev-user
+# Python bytecode caches
+__pycache__/
+*.pyc
