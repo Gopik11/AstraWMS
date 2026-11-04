@@ -202,6 +202,7 @@ public class OutboxRelay implements AutoCloseable {
                 continue;
             }
             sendTimer(row.topic(), "ok").record(System.nanoTime() - sent, TimeUnit.NANOSECONDS);
+            // cross-tenant: by the primary key of a row read below
             try (PreparedStatement s = c.prepareStatement("update outbox set published_at = ? where id = ?")) {
                 s.setTimestamp(1, Timestamp.from(clock.instant()));
                 s.setLong(2, row.id());
@@ -214,6 +215,7 @@ public class OutboxRelay implements AutoCloseable {
 
     private List<Row> pending(Connection c, int partition) throws SQLException {
         List<Row> rows = new ArrayList<>();
+        // cross-tenant: the relay publishes every tenant's messages (ADR-0002, ADR-0029)
         try (PreparedStatement s = c.prepareStatement("""
                 select id, message_id, topic, message_key, message_type, tenant_id,
                        envelope->>'sourceSystem' as source_system, envelope::text as envelope

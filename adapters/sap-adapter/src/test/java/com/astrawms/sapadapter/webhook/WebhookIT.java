@@ -116,6 +116,11 @@ class WebhookIT {
 
         mvc.perform(get("/api/v1/integration/webhooks/" + id + "/deliveries").with(TestTokens.as(tenant, "int", Roles.ERP_INTEGRATION)))
                 .andExpect(jsonPath("$[0].status", is("DELIVERED"))).andExpect(jsonPath("$[0].last_status", is(204)));
+        // The subscription's own list counts its one delivery: delivered, so neither pending nor failed.
+        mvc.perform(get("/api/v1/integration/webhooks").with(TestTokens.as(tenant, "int", Roles.ERP_INTEGRATION)))
+                .andExpect(jsonPath("$.subscriptions[0].pending", is(0)))
+                .andExpect(jsonPath("$.subscriptions[0].failed", is(0)))
+                .andExpect(jsonPath("$.subscriptions[0].last_delivered_at").isNotEmpty());
         // Another tenant sees nothing of it.
         mvc.perform(get("/api/v1/integration/webhooks").with(TestTokens.as("other-" + tenant, "int", Roles.ERP_INTEGRATION)))
                 .andExpect(jsonPath("$.subscriptions.length()", is(0)));

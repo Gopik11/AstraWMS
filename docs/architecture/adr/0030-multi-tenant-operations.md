@@ -30,7 +30,7 @@ on 4 November 2026 found what is still missing to run many customers on one depl
 | G4 | **Backup and restore cover the whole deployment.** One tenant cannot be restored without rolling back every tenant. There is no export or deletion of one tenant's data. | `pg_dumpall` in `deploy/vps/pg-backup.sh` |
 | G5 | **One tenant can slow the others.** The gateway limits requests per client address, not per tenant. Relay partitions, consumers and the downstream bulkhead are shared, so one tenant's backlog delays every tenant. | `deploy/gateway/nginx.conf`; `OutboxRelay`; `ServiceClients` |
 | G6 | **Staff who serve several tenants.** A token holds one tenant, and switching is not built. | ADR-0010 |
-| G7 | **Tables without RLS are protected by convention.** The CI rule that requires a `tenant_id` filter covers `outbox` and `dlq_replay`, but not `reservation_compensation` or `webhook_delivery`. Nothing stops a new table from missing RLS. | `scripts/check-architecture.sh` rule 4 |
+| G7 | **Tables without RLS are protected by convention.** The CI rule that requires a `tenant_id` filter covers `outbox` and `dlq_replay`, but not `reservation_compensation` or `webhook_delivery`. Nothing stops a new table from missing RLS. | `scripts/check-architecture.sh` rule 3 |
 | G8 | **No tooling to move a tenant to its own database cell.** ADR-0003 says this needs no code change, which is true, but nothing copies one tenant's data out. | (none) |
 
 ## Decision
@@ -126,9 +126,13 @@ Each one is independent, and the plan at the end orders them.
 - **Import.** `tenant-import.sh <archive>` loads an archive into a deployment where the tenant does not exist. It
   checks the counts against the manifest.
   - Most ids are UUIDs or are scoped by tenant, so those rows do not collide.
-  - Three append-only tables use a database sequence for their id: `expectation_change_log` (inbound), `task_event`
-    (task) and `billing_event` (inventory). The import leaves their ids out and lets the target assign new ones.
-    Nothing refers to these ids from another table; the data map checks that.
+  - Eight tables use a database sequence for their id; the data map lists them under "Sequence id". They include the
+    stock ledger (`inventory_balance`, `inventory_txn`), `stock_in_transit`, `billing_event` and `task_event`.
+    - The import leaves these ids out and lets the target assign new ones.
+    - It inserts each such table's rows in id order, so the new ids keep the order the code relies on (for example
+      the oldest transit line first).
+    - No table refers to these ids, and the data map fails CI if one starts to. The code uses them only within a
+      transaction, never in an API path.
   - The outbox is not exported. A tenant is exported only after its outbox has drained.
 - **Point restore of one tenant.**
   1. Restore the backup into a throwaway container. The restore drill already does this.

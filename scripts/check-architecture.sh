@@ -28,20 +28,35 @@ while IFS= read -r f; do
   fi
 done < <(main_sources)
 
-# 3. Platform tables have no row-level security (they are read across tenants by the relay and housekeeping). Any
-#    other read of them must filter by tenant: outbox and dlq_replay carry tenant_id.
+# 3. Tenant tables without row-level security (ADR-0030 G): the list comes from the migrations
+#    (scripts/tenant_tables.py --rls-free), so a new one is covered without editing this script. Nothing in the database
+#    keeps one tenant from another's rows there, so every statement that reads or changes them must filter by tenant_id
+#    within its first lines (an insert must list it), or say why it works across tenants in a "cross-tenant: <reason>"
+#    comment at most six lines above (the relay, housekeeping, metrics, the retriers, the webhook dispatcher).
+rls_free="$(python3 scripts/tenant_tables.py --rls-free | paste -sd'|' -)"
+[[ -n "$rls_free" ]] || fail "scripts/tenant_tables.py --rls-free listed no table; the tenancy rule would check nothing"
+tenant_sql="\b(from|join|update|into)[[:space:]]+(${rls_free})\b"
 while IFS= read -r f; do
-  case "$f" in
-    */com/astrawms/common/messaging/*|*/com/astrawms/common/ops/MessagingMetrics.java) continue ;;
-  esac
-  # SQL text blocks / strings that read the outbox or the replay log
-  if grep -Eq 'from (outbox|dlq_replay)\b' "$f"; then
-    while IFS= read -r line; do
-      n="${line%%:*}"
-      window="$(sed -n "${n},$((n + 3))p" "$f")"
-      grep -q 'tenant_id' <<<"$window" || fail "$f:$n reads a platform table without a tenant_id filter"
-    done < <(grep -nE 'from (outbox|dlq_replay)\b' "$f")
-  fi
+  grep -Eiq "$tenant_sql" "$f" || continue
+  mapfile -t hits < <(grep -Ein "$tenant_sql" "$f")
+  for i in "${!hits[@]}"; do
+    line="${hits[$i]}"
+    n="${line%%:*}"
+    # a statement's lines: up to 3 more, but never into the next statement on such a table (its filter is not ours)
+    end=$((n + 3))
+    if (( i + 1 < ${#hits[@]} )); then
+      next="${hits[$((i + 1))]%%:*}"
+      (( next - 1 < end )) && end=$((next - 1))
+    fi
+    # an insert lists tenant_id among its columns; any other statement filters by it (selecting it is not enough)
+    if grep -Eiq "\binto[[:space:]]+(${rls_free})\b" <<<"${line#*:}"; then
+      sed -n "${n},${end}p" "$f" | grep -q 'tenant_id' && continue
+    else
+      sed -n "${n},${end}p" "$f" | grep -Eiq 'tenant_id[[:space:]]*(=|in[[:space:]]*\()' && continue
+    fi
+    sed -n "$(( n > 6 ? n - 6 : 1 )),$((n + 1))p" "$f" | grep -Eq 'cross-tenant: [^[:space:]]' && continue
+    fail "$f:$n uses a tenant table without row-level security, without a tenant_id filter or a cross-tenant: reason"
+  done
 done < <(main_sources)
 
 # 4. State-changing endpoints declare roles. Also enforced at start-up (SecuredEndpointsVerifier); this catches it

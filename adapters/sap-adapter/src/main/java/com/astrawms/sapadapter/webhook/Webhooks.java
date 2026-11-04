@@ -107,9 +107,9 @@ public class Webhooks {
     public List<Map<String, Object>> list() {
         return jdbc.sql("""
                         select s.id, s.name, s.url, s.events, s.active, s.created_by, s.created_at,
-                               (select count(*) from webhook_delivery d where d.subscription_id = s.id and d.status = 'PENDING') as pending,
-                               (select count(*) from webhook_delivery d where d.subscription_id = s.id and d.status = 'FAILED') as failed,
-                               (select max(d.delivered_at) from webhook_delivery d where d.subscription_id = s.id) as last_delivered_at
+                               (select count(*) from webhook_delivery d where d.subscription_id = s.id and d.tenant_id = s.tenant_id and d.status = 'PENDING') as pending,
+                               (select count(*) from webhook_delivery d where d.subscription_id = s.id and d.tenant_id = s.tenant_id and d.status = 'FAILED') as failed,
+                               (select max(d.delivered_at) from webhook_delivery d where d.subscription_id = s.id and d.tenant_id = s.tenant_id) as last_delivered_at
                         from webhook_subscription s order by s.created_at""")
                 .query().listOfRows().stream().map(Webhooks::arrays).toList();
     }
@@ -207,6 +207,7 @@ public class Webhooks {
     /** Sends the deliveries that are due; returns how many were attempted. */
     public int dispatchOnce() {
         List<Due> due = tx.execute(s -> {
+            // cross-tenant: the dispatcher sends every tenant's deliveries; bodies were signed when queued
             List<Due> rows = jdbc.sql("""
                             select id, url, body, signature, signed_at, event, attempts from webhook_delivery
                             where status = 'PENDING' and next_attempt_at <= :now order by next_attempt_at limit 20
@@ -215,6 +216,7 @@ public class Webhooks {
                     .query((rs, n) -> new Due(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4),
                             rs.getLong(5), rs.getString(6), rs.getInt(7))).list();
             // Claim them for a minute so a parallel dispatcher does not send them too.
+            // cross-tenant: by the primary keys of the rows read above
             rows.forEach(d -> jdbc.sql("update webhook_delivery set next_attempt_at = :later where id = :id")
                     .param("later", Timestamp.from(clock.instant().plusSeconds(60))).param("id", d.id()).update());
             return rows;
@@ -256,6 +258,7 @@ public class Webhooks {
         Instant now = clock.instant();
         int attempts = d.attempts() + 1;
         String state = error == null ? "DELIVERED" : attempts >= MAX_ATTEMPTS ? "FAILED" : "PENDING";
+        // cross-tenant: by the primary key of a delivery the dispatcher read
         tx.executeWithoutResult(s -> jdbc.sql("""
                         update webhook_delivery set status = :state, attempts = :a, last_status = :code, last_error = :err,
                             next_attempt_at = :next, delivered_at = cast(:delivered as timestamptz)

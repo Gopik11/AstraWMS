@@ -139,6 +139,7 @@ public class StrictReservations {
     @Scheduled(fixedDelayString = "${astra.outbound.compensation-interval-ms:30000}",
                initialDelayString = "${astra.outbound.compensation-initial-delay-ms:30000}")
     public int retry() {
+        // cross-tenant: the retrier releases every tenant's reservations, each under its own tenant below
         List<Pending> pending = jdbc.sql("""
                         select id, tenant_id, site_id, order_ref, allocation_ids, sweep_by_ref from reservation_compensation
                         where done_at is null and created_at > :since order by created_at limit 50""")
@@ -167,10 +168,12 @@ public class StrictReservations {
                         });
                     }
                 });
+                // cross-tenant: by the primary key of a row read above
                 jdbc.sql("update reservation_compensation set done_at = :now, attempts = attempts + 1 where id = :id")
                         .param("now", Timestamp.from(clock.instant())).param("id", p.id()).update();
                 done++;
             } catch (RuntimeException e) {
+                // cross-tenant: by the primary key of a row read above
                 jdbc.sql("update reservation_compensation set attempts = attempts + 1, last_error = :e where id = :id")
                         .param("e", truncate(e.getMessage())).param("id", p.id()).update();
             }
