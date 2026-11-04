@@ -166,6 +166,8 @@ authority.
   - `pg_dumpall`, gzip, then AES-256 (PBKDF2) with the generated `BACKUP_PASSPHRASE`;
   - 14 days kept;
   - an off-host copy when `BACKUP_REMOTE` is set (rsync target or `rclone:` remote).
+  - on an `rclone:` remote (for example Google Drive), copies older than `BACKUP_REMOTE_KEEP_DAYS` (30) are deleted
+    after each successful upload; an rsync target keeps its own retention.
 - **Restore drill.** `deploy/vps/pg-restore-drill.sh` runs weekly. It restores the newest backup into a throwaway
   container, checks every database, and appends the recovery point and recovery time to `backups/drills.log`. A
   failing drill exits non-zero, so cron mails root.
