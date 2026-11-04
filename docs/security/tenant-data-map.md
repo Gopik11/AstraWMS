@@ -6,21 +6,23 @@ not reviewed as global, or when a table with `tenant_id` has no forced row-level
 reviewed as RLS-free.
 
 - **RLS**: row-level security enabled, forced, with a policy (ADR-0003).
+- **Owner RLS**: a restrictive `owner_isolation` policy limits rows to the session's owners (ADR-0030 C);
+  checks that must see every owner go through `OwnerVisibility.allOwners`.
 - **Sequence id**: a column the database numbers. A tenant import leaves it out and inserts the rows in id
   order, so the target assigns new values in the same order. No table may refer to such a column.
 - **Load order**: the order in which a tenant's rows are imported, parents first (ADR-0030 D).
 
 ## Summary
 
-| Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 |
-| `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 |
-| `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 |
-| `tasks` | `services/task-service` | 18 | 14 | 2 | 2 |
-| `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 |
-| `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 |
-| **All** | | **111** | **84** | **14** | **13** |
+| Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) | With owner_id | Owner RLS |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 | 3 | 0 |
+| `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 4 |
+| `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 0 |
+| `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 0 |
+| `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 0 |
+| `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 | 0 | 0 |
+| **All** | | **111** | **84** | **14** | **13** | **34** | **4** |
 
 ## Reviewed exceptions
 
@@ -36,153 +38,153 @@ reviewed as RLS-free.
 
 ## `masterdata` (services/master-data-service)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `dlq_replay` | yes |  |  |  |  |
-| `inbox` |  |  |  |  |  |
-| `item` | yes | yes | yes |  | `uom_catalogue` |
-| `item_site` | yes | yes | yes |  | `item` |
-| `item_uom` | yes | yes | yes |  | `item`, `uom_catalogue` |
-| `label_printer` | yes | yes |  |  |  |
-| `location` | yes | yes |  |  | `zone` |
-| `lpn_series` | yes | yes |  |  |  |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `printed_label` | yes | yes |  |  |  |
-| `site` | yes | yes |  |  |  |
-| `uom_catalogue` |  |  |  |  |  |
-| `zone` | yes | yes |  |  | `site` |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `inbox` |  |  |  |  |  |  |
+| `item` | yes | yes | yes |  |  | `uom_catalogue` |
+| `item_site` | yes | yes | yes |  |  | `item` |
+| `item_uom` | yes | yes | yes |  |  | `item`, `uom_catalogue` |
+| `label_printer` | yes | yes |  |  |  |  |
+| `location` | yes | yes |  |  |  | `zone` |
+| `lpn_series` | yes | yes |  |  |  |  |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `printed_label` | yes | yes |  |  |  |  |
+| `site` | yes | yes |  |  |  |  |
+| `uom_catalogue` |  |  |  |  |  |  |
+| `zone` | yes | yes |  |  |  | `site` |
 
 Load order: `dlq_replay`, `label_printer`, `lpn_series`, `outbox`, `printed_label`, `site`, `item`, `item_site`, `item_uom`, `zone`, `location`.
 
 ## `inventory` (services/inventory-service)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `allocation` | yes | yes | yes |  |  |
-| `allocation_policy` | yes | yes | yes |  |  |
-| `billing_capture` | yes | yes |  |  |  |
-| `billing_event` | yes | yes | yes | `id` |  |
-| `billing_rate` | yes | yes | yes |  |  |
-| `cost_object` | yes | yes |  |  |  |
-| `count_frequency` | yes | yes |  |  |  |
-| `dlq_replay` | yes |  |  |  |  |
-| `erp_movement` | yes | yes |  |  | `inventory_operation` |
-| `inbox` |  |  |  |  |  |
-| `inventory_balance` | yes | yes | yes | `id` |  |
-| `inventory_operation` | yes | yes |  |  |  |
-| `inventory_txn` | yes | yes | yes | `id` | `inventory_operation` |
-| `item_slotting` | yes | yes | yes |  |  |
-| `location_freeze` | yes | yes |  |  | `physical_inventory` |
-| `lpn` | yes | yes | yes |  |  |
-| `material_issue` | yes | yes | yes |  |  |
-| `material_issue_line` | yes | yes |  |  | `material_issue` |
-| `material_issue_move` | yes | yes |  | `id` | `material_issue` |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `owner_profile` | yes | yes | yes |  |  |
-| `physical_inventory` | yes | yes |  |  |  |
-| `reason_code` | yes | yes |  |  |  |
-| `ref_item` | yes | yes | yes |  |  |
-| `ref_item_uom` | yes | yes | yes |  |  |
-| `ref_location` | yes | yes |  |  |  |
-| `replen_rule` | yes | yes | yes |  |  |
-| `replenishment` | yes | yes | yes |  | `allocation` |
-| `rfid_tag` | yes | yes | yes |  |  |
-| `serial_number` | yes | yes | yes |  | `inventory_operation` |
-| `stock_count` | yes | yes |  |  | `physical_inventory` |
-| `stock_count_result` | yes | yes |  |  | `stock_count` |
-| `stock_count_variance` | yes | yes | yes |  | `stock_count` |
-| `stock_in_transit` | yes | yes | yes | `id` |  |
-| `store_replenishment` | yes | yes | yes |  |  |
-| `store_site_setting` | yes | yes |  |  |  |
-| `store_stock_policy` | yes | yes | yes |  |  |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `allocation` | yes | yes | yes | yes |  |  |
+| `allocation_policy` | yes | yes | yes |  |  |  |
+| `billing_capture` | yes | yes |  |  |  |  |
+| `billing_event` | yes | yes | yes |  | `id` |  |
+| `billing_rate` | yes | yes | yes |  |  |  |
+| `cost_object` | yes | yes |  |  |  |  |
+| `count_frequency` | yes | yes |  |  |  |  |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `erp_movement` | yes | yes |  |  |  | `inventory_operation` |
+| `inbox` |  |  |  |  |  |  |
+| `inventory_balance` | yes | yes | yes | yes | `id` |  |
+| `inventory_operation` | yes | yes |  |  |  |  |
+| `inventory_txn` | yes | yes | yes | yes | `id` | `inventory_operation` |
+| `item_slotting` | yes | yes | yes |  |  |  |
+| `location_freeze` | yes | yes |  |  |  | `physical_inventory` |
+| `lpn` | yes | yes | yes | yes |  |  |
+| `material_issue` | yes | yes | yes |  |  |  |
+| `material_issue_line` | yes | yes |  |  |  | `material_issue` |
+| `material_issue_move` | yes | yes |  |  | `id` | `material_issue` |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `owner_profile` | yes | yes | yes |  |  |  |
+| `physical_inventory` | yes | yes |  |  |  |  |
+| `reason_code` | yes | yes |  |  |  |  |
+| `ref_item` | yes | yes | yes |  |  |  |
+| `ref_item_uom` | yes | yes | yes |  |  |  |
+| `ref_location` | yes | yes |  |  |  |  |
+| `replen_rule` | yes | yes | yes |  |  |  |
+| `replenishment` | yes | yes | yes |  |  | `allocation` |
+| `rfid_tag` | yes | yes | yes |  |  |  |
+| `serial_number` | yes | yes | yes |  |  | `inventory_operation` |
+| `stock_count` | yes | yes |  |  |  | `physical_inventory` |
+| `stock_count_result` | yes | yes |  |  |  | `stock_count` |
+| `stock_count_variance` | yes | yes | yes |  |  | `stock_count` |
+| `stock_in_transit` | yes | yes | yes |  | `id` |  |
+| `store_replenishment` | yes | yes | yes |  |  |  |
+| `store_site_setting` | yes | yes |  |  |  |  |
+| `store_stock_policy` | yes | yes | yes |  |  |  |
 
 Load order: `allocation`, `allocation_policy`, `billing_capture`, `billing_event`, `billing_rate`, `cost_object`, `count_frequency`, `dlq_replay`, `inventory_balance`, `inventory_operation`, `erp_movement`, `inventory_txn`, `item_slotting`, `lpn`, `material_issue`, `material_issue_line`, `material_issue_move`, `outbox`, `owner_profile`, `physical_inventory`, `location_freeze`, `reason_code`, `ref_item`, `ref_item_uom`, `ref_location`, `replen_rule`, `replenishment`, `rfid_tag`, `serial_number`, `stock_count`, `stock_count_result`, `stock_count_variance`, `stock_in_transit`, `store_replenishment`, `store_site_setting`, `store_stock_policy`.
 
 ## `inbound` (services/inbound-service)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `dlq_replay` | yes |  |  |  |  |
-| `dock_appointment` | yes | yes |  |  |  |
-| `expectation_change_log` | yes | yes |  | `id` | `receipt_expectation` |
-| `expected_hu` | yes | yes |  |  | `receipt_expectation` |
-| `inbox` |  |  |  |  |  |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `receipt_damage` | yes | yes |  |  |  |
-| `receipt_expectation` | yes | yes |  |  |  |
-| `receipt_expectation_line` | yes | yes | yes |  | `receipt_expectation` |
-| `receipt_txn` | yes | yes |  |  | `receipt_expectation` |
-| `receive_request` | yes | yes |  |  |  |
-| `return_line` | yes | yes | yes |  | `return_order` |
-| `return_order` | yes | yes |  |  |  |
-| `return_unit` | yes | yes | yes |  | `return_order` |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `dock_appointment` | yes | yes |  |  |  |  |
+| `expectation_change_log` | yes | yes |  |  | `id` | `receipt_expectation` |
+| `expected_hu` | yes | yes |  |  |  | `receipt_expectation` |
+| `inbox` |  |  |  |  |  |  |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `receipt_damage` | yes | yes |  |  |  |  |
+| `receipt_expectation` | yes | yes |  |  |  |  |
+| `receipt_expectation_line` | yes | yes | yes |  |  | `receipt_expectation` |
+| `receipt_txn` | yes | yes |  |  |  | `receipt_expectation` |
+| `receive_request` | yes | yes |  |  |  |  |
+| `return_line` | yes | yes | yes |  |  | `return_order` |
+| `return_order` | yes | yes |  |  |  |  |
+| `return_unit` | yes | yes | yes |  |  | `return_order` |
 
 Load order: `dlq_replay`, `dock_appointment`, `outbox`, `receipt_damage`, `receipt_expectation`, `expectation_change_log`, `expected_hu`, `receipt_expectation_line`, `receipt_txn`, `receive_request`, `return_order`, `return_line`, `return_unit`.
 
 ## `tasks` (services/task-service)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `automation_zone` | yes | yes |  |  |  |
-| `dlq_replay` | yes |  |  |  |  |
-| `inbox` |  |  |  |  |  |
-| `label_check_bypass` | yes | yes |  |  |  |
-| `label_check_policy` | yes | yes |  |  |  |
-| `operator_profile` | yes | yes |  |  |  |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `ref_item` | yes | yes | yes |  |  |
-| `ref_item_gtin` | yes | yes | yes |  |  |
-| `ref_item_slotting` | yes | yes | yes |  |  |
-| `ref_location` | yes | yes |  |  |  |
-| `ref_pick_face` | yes | yes | yes |  |  |
-| `stock_projection` | yes | yes | yes |  |  |
-| `task` | yes | yes | yes |  |  |
-| `task_event` | yes | yes |  | `id` | `task` |
-| `task_standard` | yes | yes |  |  |  |
-| `zone_equipment` | yes | yes |  |  |  |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `automation_zone` | yes | yes |  |  |  |  |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `inbox` |  |  |  |  |  |  |
+| `label_check_bypass` | yes | yes |  |  |  |  |
+| `label_check_policy` | yes | yes |  |  |  |  |
+| `operator_profile` | yes | yes |  |  |  |  |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `ref_item` | yes | yes | yes |  |  |  |
+| `ref_item_gtin` | yes | yes | yes |  |  |  |
+| `ref_item_slotting` | yes | yes | yes |  |  |  |
+| `ref_location` | yes | yes |  |  |  |  |
+| `ref_pick_face` | yes | yes | yes |  |  |  |
+| `stock_projection` | yes | yes | yes |  |  |  |
+| `task` | yes | yes | yes |  |  |  |
+| `task_event` | yes | yes |  |  | `id` | `task` |
+| `task_standard` | yes | yes |  |  |  |  |
+| `zone_equipment` | yes | yes |  |  |  |  |
 
 Load order: `automation_zone`, `dlq_replay`, `label_check_bypass`, `label_check_policy`, `operator_profile`, `outbox`, `ref_item`, `ref_item_gtin`, `ref_item_slotting`, `ref_location`, `ref_pick_face`, `stock_projection`, `task`, `task_event`, `task_standard`, `zone_equipment`.
 
 ## `outbound` (services/outbound-service)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `carton` | yes | yes |  |  | `outbound_order` |
-| `carton_item` | yes | yes |  |  | `carton` |
-| `dlq_replay` | yes |  |  |  |  |
-| `inbox` |  |  |  |  |  |
-| `outbound_allocation` | yes | yes |  |  | `outbound_order` |
-| `outbound_carrier_cutoff` | yes | yes |  |  |  |
-| `outbound_line` | yes | yes | yes |  | `outbound_order` |
-| `outbound_order` | yes | yes |  |  | `outbound_wave`, `shipment_load` |
-| `outbound_owner_policy` | yes | yes | yes |  |  |
-| `outbound_recovery` | yes | yes |  | `id` | `outbound_order` |
-| `outbound_site_config` | yes | yes |  |  |  |
-| `outbound_wave` | yes | yes |  |  |  |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `reservation_compensation` | yes |  |  |  |  |
-| `shipment_load` | yes | yes |  |  |  |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `carton` | yes | yes |  |  |  | `outbound_order` |
+| `carton_item` | yes | yes |  |  |  | `carton` |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `inbox` |  |  |  |  |  |  |
+| `outbound_allocation` | yes | yes |  |  |  | `outbound_order` |
+| `outbound_carrier_cutoff` | yes | yes |  |  |  |  |
+| `outbound_line` | yes | yes | yes |  |  | `outbound_order` |
+| `outbound_order` | yes | yes |  |  |  | `outbound_wave`, `shipment_load` |
+| `outbound_owner_policy` | yes | yes | yes |  |  |  |
+| `outbound_recovery` | yes | yes |  |  | `id` | `outbound_order` |
+| `outbound_site_config` | yes | yes |  |  |  |  |
+| `outbound_wave` | yes | yes |  |  |  |  |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `reservation_compensation` | yes |  |  |  |  |  |
+| `shipment_load` | yes | yes |  |  |  |  |
 
 Load order: `dlq_replay`, `outbound_carrier_cutoff`, `outbound_owner_policy`, `outbound_site_config`, `outbound_wave`, `outbox`, `reservation_compensation`, `shipment_load`, `outbound_order`, `carton`, `carton_item`, `outbound_allocation`, `outbound_line`, `outbound_recovery`.
 
 ## `sapadapter` (adapters/sap-adapter)
 
-| Table | tenant_id | RLS | owner_id | Sequence id | References |
-| --- | --- | --- | --- | --- | --- |
-| `dlq_replay` | yes |  |  |  |  |
-| `idoc_status` | yes | yes |  |  |  |
-| `inbox` |  |  |  |  |  |
-| `mock_sap_document` | yes | yes |  |  |  |
-| `mock_sap_fault` | yes | yes |  |  |  |
-| `outbox` | yes |  |  | `id` |  |
-| `outbox_key_sequence` |  |  |  |  |  |
-| `site_map` | yes | yes |  |  |  |
-| `webhook_delivery` | yes |  |  |  | `webhook_subscription` |
-| `webhook_subscription` | yes | yes |  |  |  |
+| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dlq_replay` | yes |  |  |  |  |  |
+| `idoc_status` | yes | yes |  |  |  |  |
+| `inbox` |  |  |  |  |  |  |
+| `mock_sap_document` | yes | yes |  |  |  |  |
+| `mock_sap_fault` | yes | yes |  |  |  |  |
+| `outbox` | yes |  |  |  | `id` |  |
+| `outbox_key_sequence` |  |  |  |  |  |  |
+| `site_map` | yes | yes |  |  |  |  |
+| `webhook_delivery` | yes |  |  |  |  | `webhook_subscription` |
+| `webhook_subscription` | yes | yes |  |  |  |  |
 
 Load order: `dlq_replay`, `idoc_status`, `mock_sap_document`, `mock_sap_fault`, `outbox`, `site_map`, `webhook_subscription`, `webhook_delivery`.

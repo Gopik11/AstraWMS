@@ -3,7 +3,8 @@
 
 For every service database, lists each table with:
   - whether it carries tenant_id and owner_id;
-  - whether row-level security is enabled, forced and has a policy (ADR-0003);
+  - whether row-level security is enabled, forced and has a policy (ADR-0003), and whether a restrictive
+    owner_isolation policy separates owners within the tenant (ADR-0030 C);
   - a sequence-generated id (an export cannot keep those ids, so nothing may refer to them);
   - the tables it references, and the order in which a tenant's rows load (parents first).
 
@@ -12,7 +13,9 @@ It fails (--check) when:
   - a table without tenant_id is not on the reviewed list of global tables (GLOBAL below);
   - a table with tenant_id lacks forced RLS and is not on the reviewed list of RLS-free tables (RLS_FREE below);
   - a reviewed entry no longer matches a table (stale list);
-  - a table refers to another table's sequence-generated id.
+  - a table refers to another table's sequence-generated id;
+  - a table has more than one permissive policy (permissive policies are combined with OR, so a second one widens
+    access beyond the tenant), or an owner_isolation policy is permissive or on a table without owner_id.
 
   python3 scripts/tenant_tables.py            # regenerate the map
   python3 scripts/tenant_tables.py --check    # CI
@@ -55,7 +58,16 @@ class Table:
         self.columns = set()
         self.sequence_columns = set()
         self.references = set()
-        self.rls_enabled = self.rls_forced = self.policy = False
+        self.rls_enabled = self.rls_forced = False
+        self.policies = {}  # name -> restrictive
+
+    @property
+    def policy(self):
+        return any(not restrictive for restrictive in self.policies.values())
+
+    @property
+    def owner_rls(self):
+        return self.policies.get("owner_isolation") is True
 
     @property
     def tenant(self):
@@ -137,9 +149,12 @@ def apply(tables, sql):
             table.rls_enabled = True
         if re.search(r"\bforce\s+row\s+level\s+security", action):
             table.rls_forced = True
-    for m in re.finditer(rf"create\s+policy\s+{IDENT}\s+on\s+({IDENT})", sql):
-        if m.group(1) in tables:
-            tables[m.group(1)].policy = True
+    for m in re.finditer(rf"create\s+policy\s+({IDENT})\s+on\s+({IDENT})(\s+as\s+(restrictive|permissive))?", sql):
+        if m.group(2) in tables:
+            tables[m.group(2)].policies[m.group(1)] = m.group(4) == "restrictive"
+    for m in re.finditer(rf"drop\s+policy\s+(?:if\s+exists\s+)?({IDENT})\s+on\s+({IDENT})", sql):
+        if m.group(2) in tables:
+            tables[m.group(2)].policies.pop(m.group(1), None)
     # do $$ ... foreach t in array array['a', 'b'] loop execute format('alter table %I enable ...', t); ... end loop
     for m in re.finditer(r"array\s*\[([^\]]*)\]\s*loop(.*?)end\s+loop", sql, re.S):
         loop = m.group(2)
@@ -149,7 +164,8 @@ def apply(tables, sql):
                 continue
             table.rls_enabled |= bool(re.search(r"enable\s+row\s+level\s+security", loop))
             table.rls_forced |= bool(re.search(r"force\s+row\s+level\s+security", loop))
-            table.policy |= bool(re.search(r"create\s+policy", loop))
+            for pm in re.finditer(rf"create\s+policy\s+({IDENT})\s+on\s+%i(\s+as\s+(restrictive|permissive))?", loop):
+                table.policies[pm.group(1)] = pm.group(3) == "restrictive"
 
 
 def database_of(module):
@@ -204,6 +220,14 @@ def problems(databases):
                            if not ok]
                 out.append(f"{db}.{t.name} has tenant_id but no complete row-level security (missing: "
                            f"{', '.join(missing)}): add it (ADR-0003), or review it into RLS_FREE with a reason")
+            permissive = sorted(n for n, r in t.policies.items() if not r)
+            if len(permissive) > 1:
+                out.append(f"{db}.{t.name} has {len(permissive)} permissive policies ({', '.join(permissive)}): they are "
+                           f"combined with OR, so all but the tenant policy must be AS RESTRICTIVE")
+            if "owner_isolation" in t.policies and not t.policies["owner_isolation"]:
+                out.append(f"{db}.{t.name}.owner_isolation is permissive: it must be AS RESTRICTIVE (ADR-0030 C)")
+            if "owner_isolation" in t.policies and "owner_id" not in t.columns:
+                out.append(f"{db}.{t.name} has an owner_isolation policy but no owner_id column")
             if t.name in GLOBAL and t.tenant:
                 out.append(f"{db}.{t.name} is listed in GLOBAL but has tenant_id: remove it from GLOBAL")
             if t.name in RLS_FREE and t.rls:
@@ -232,17 +256,20 @@ def render(databases):
              "not reviewed as global, or when a table with `tenant_id` has no forced row-level security and is not",
              "reviewed as RLS-free.", "",
              "- **RLS**: row-level security enabled, forced, with a policy (ADR-0003).",
+             "- **Owner RLS**: a restrictive `owner_isolation` policy limits rows to the session's owners (ADR-0030 C);",
+             "  checks that must see every owner go through `OwnerVisibility.allOwners`.",
              "- **Sequence id**: a column the database numbers. A tenant import leaves it out and inserts the rows in id",
              "  order, so the target assigns new values in the same order. No table may refer to such a column.",
              "- **Load order**: the order in which a tenant's rows are imported, parents first (ADR-0030 D).", "",
              "## Summary", "",
-             "| Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) |",
-             "| --- | --- | ---: | ---: | ---: | ---: |"]
-    totals = [0, 0, 0, 0]
+             "| Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) "
+             "| With owner_id | Owner RLS |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    totals = [0, 0, 0, 0, 0, 0]
     for db, (module, tables) in databases.items():
         ts = tables.values()
         row = [len(tables), sum(t.tenant and t.rls for t in ts), sum(t.tenant and not t.rls for t in ts),
-               sum(not t.tenant for t in ts)]
+               sum(not t.tenant for t in ts), sum("owner_id" in t.columns for t in ts), sum(t.owner_rls for t in ts)]
         totals = [a + b for a, b in zip(totals, row)]
         lines.append(f"| `{db}` | `{module}` | " + " | ".join(map(str, row)) + " |")
     lines.append("| **All** | | " + " | ".join(f"**{n}**" for n in totals) + " |")
@@ -254,13 +281,13 @@ def render(databases):
     for db, (module, tables) in databases.items():
         order, _ = load_order(tables)
         lines += ["", f"## `{db}` ({module})", "",
-                  "| Table | tenant_id | RLS | owner_id | Sequence id | References |",
-                  "| --- | --- | --- | --- | --- | --- |"]
+                  "| Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
         for name in sorted(tables):
             t = tables[name]
             refs = ", ".join(f"`{r}`" for r in sorted(t.references) if r != name)
             seq = ", ".join(f"`{c}`" for c in sorted(t.sequence_columns))
-            lines.append(f"| `{name}` | {yes(t.tenant)} | {yes(t.rls)} | {yes('owner_id' in t.columns)} | {seq} | {refs} |")
+            lines.append(f"| `{name}` | {yes(t.tenant)} | {yes(t.rls)} | {yes('owner_id' in t.columns)} | {yes(t.owner_rls)} | {seq} | {refs} |")
         lines += ["", "Load order: " + ", ".join(f"`{n}`" for n in order if tables[n].tenant) + "."]
     return "\n".join(lines) + "\n"
 

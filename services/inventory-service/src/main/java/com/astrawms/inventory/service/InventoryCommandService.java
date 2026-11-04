@@ -850,15 +850,17 @@ public class InventoryCommandService {
         if (blank(lpnId)) {
             return "";
         }
-        Optional<InventoryRepository.Lpn> existing = repo.lockLpn(siteId, lpnId);
+        Optional<InventoryRepository.Lpn> existing = repo.lockLpnAnyOwner(siteId, lpnId);
         if (existing.isEmpty()) {
             repo.insertLpn(siteId, lpnId, ownerId, locationId);
             return lpnId;
         }
         InventoryRepository.Lpn lpn = existing.get();
         if (!lpn.ownerId().equals(ownerId)) {
+            // name the owner only to a user who may see it: an owner-scoped user learns only that the id is taken
+            String holder = AccessScope.current().allowsOwner(lpn.ownerId()) ? "owner " + lpn.ownerId() : "another owner";
             throw ApiException.unprocessable("INV_LPN_OWNER_MISMATCH",
-                    "LPN " + lpnId + " belongs to owner " + lpn.ownerId() + "; mixed-owner LPNs are not allowed");
+                    "LPN " + lpnId + " belongs to " + holder + "; mixed-owner LPNs are not allowed");
         }
         if (!lpn.locationId().equals(locationId)) {
             throw ApiException.unprocessable("INV_LPN_LOCATION_MISMATCH", "LPN " + lpnId + " is at " + lpn.locationId());

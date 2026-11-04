@@ -83,32 +83,69 @@ Each one is independent, and the plan at the end orders them.
 
 ### C. Owner isolation in the database (G3, MWH-001)
 
-- **Session setting.** `TenantAwareDataSource` also sets `app.owners` on checkout:
+- **Session setting.** `TenantAwareDataSource` sets `app.owners` together with `app.tenant_id`, in one statement on
+  every checkout:
   - the user's owners, comma-separated, from `AccessScope`;
-  - `*` for unrestricted users and service accounts (the trusted-subsystem rule of ADR-0010 is unchanged);
-  - empty when no scope is bound, which shows nothing.
+  - `*` for unrestricted users, service accounts, consumers and jobs (the trusted-subsystem rule of ADR-0010 is
+    unchanged);
+  - empty when the scope allows no owner or no scope is bound, which shows nothing;
+  - an owner id that contains a comma, or is `*`, cannot be expressed and is left out (fail closed).
 - **Policy.** Every table with an `owner_id` gets a second, restrictive policy:
 
   ```sql
   create policy owner_isolation on <table> as restrictive
-    using (current_setting('app.owners', true) = '*'
-           or owner_id = any (string_to_array(current_setting('app.owners', true), ',')))
-    with check (current_setting('app.owners', true) = '*'
-           or owner_id = any (string_to_array(current_setting('app.owners', true), ',')));
+    using ((select current_setting('app.owners', true)) = '*'
+           or owner_id = any ((select string_to_array(current_setting('app.owners', true), ','))::text[]))
+    with check ((select current_setting('app.owners', true)) = '*'
+           or owner_id = any ((select string_to_array(current_setting('app.owners', true), ','))::text[]));
   ```
 
-  A restrictive policy is combined with AND with the tenant policy. A row needs both the right tenant and an allowed
-  owner.
+  - A restrictive policy is combined with AND with the tenant policy. A row needs both the right tenant and an
+    allowed owner.
+  - It must never be permissive: permissive policies are combined with OR, and a second one would widen access
+    beyond the tenant. The tenant data map fails CI on a second permissive policy on any table.
+  - Each setting is read in a scalar subquery, so Postgres evaluates it once per query, not once per row.
+- **Physical checks (`OwnerVisibility.allOwners`).** Some checks are facts about the warehouse, not about one owner's
+  stock, and must see every owner's rows of the tenant:
+  - whether a location that refuses mixed items already holds another owner's item;
+  - whether an LPN id is already in use;
+  - whether a slot is empty.
+
+  `allOwners` sets `app.owners = *` for the duration of the check only, inside the caller's transaction, and then
+  restores the user's owners, also when the check fails. It returns a decision, never another owner's rows. Every
+  call carries an `all-owners: <reason>` comment (`scripts/check-architecture.sh` rule 5).
 - **What stays in the services.**
   - The document rule of ADR-0012 ("visible only if all lines belong to the user's owners") stays in the services.
     RLS on the line tables makes it fail safe: a line the user may not see cannot be read, changed or allocated.
   - Headers without an `owner_id` keep their service checks.
-- **Rollout.** Ledger tables first: `inventory_balance`, `inventory_txn`, `lpn`, `outbound_allocation`. Then
-  documents, then the rest. Before each table:
-  - check that an index leads with `(tenant_id, owner_id)` or covers it;
-  - compare query plans and latency before and after (the metrics of ADR-0029).
-- **Tests.** For each covered table, an owner-scoped user selects with no `WHERE` clause and sees only its owners'
-  rows. An insert for another owner is refused. This is the pattern of `rowLevelSecurityHidesRowsEvenWithoutWhereClause`.
+- **Behaviour an owner-scoped user sees.**
+  - Another owner's LPN reads as unknown: a move of it answers 422 `INV_LPN_UNKNOWN`, no longer 403
+    `SCOPE_OWNER_DENIED`, so its existence is not disclosed (as ADR-0012 already does for reads).
+  - Reusing another owner's LPN id is refused with `INV_LPN_OWNER_MISMATCH`, which names the owner only to a user
+    who may see it ("belongs to another owner").
+- **Rollout.** Table by table. Before each table:
+  - list the reads of the table that a physical check needs across owners, and route them through `allOwners`;
+  - compare latency before and after.
+
+  | Increment | Tables | State |
+  | --- | --- | --- |
+  | 1. Ledger | inventory: `inventory_balance`, `inventory_txn`, `lpn`, `allocation` | Done (inventory V21) |
+  | 2. Inventory, rest | `serial_number`, `rfid_tag`, `stock_in_transit`, `material_issue`, replenishment, slotting, counts, billing and owner settings (16 tables) | Open |
+  | 3. Documents | inbound `receipt_expectation_line`, `return_line`, `return_unit`; outbound `outbound_line`, `outbound_owner_policy` | Open |
+  | 4. Rest | task-service (6 tables, including `task`), master-data `item`, `item_site`, `item_uom` | Open |
+
+  The tenant data map lists every table with `owner_id` and shows which have the policy.
+- **Measured cost (increment 1).** `pgbench` on 340,000 ledger rows of one tenant, with the production indexes:
+
+  | Query | Tenant policy only | With owner policy, unrestricted | With owner policy, one owner |
+  | --- | --- | --- | --- |
+  | An item's balances at a site | 0.22–0.23 ms | 0.23–0.24 ms (+4%) | 0.16 ms (−31%) |
+  | A location's contents | 0.14–0.15 ms | 0.15 ms (+4%) | 0.10 ms (−30%) |
+
+  The same policy with the settings read on every row cost unrestricted sessions 5–13%.
+- **Tests.** For each covered table, an owner-scoped session selects with no `WHERE` clause and sees only its owners'
+  rows; one with no owner sees none. Changing another owner's rows changes nothing, and creating a row for another
+  owner, or handing an own row to one, is refused (`OwnerIsolationIT`). The physical checks still see every owner.
 
 ### D. Per-tenant data lifecycle: export, point restore, purge (G4)
 
@@ -209,7 +246,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
 | **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration, Keycloak provisioning. E: per-tenant quotas, tenant metrics. | L | An unknown or suspended tenant is refused in every service, and its messages are skipped and recorded. One tenant over its quota gets 429 while another continues. The metrics show both. |
-| **2. Data-layer owner isolation** | C, table by table, ledger first. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
+| **2. Data-layer owner isolation** | C, table by table, ledger first (increment 1 done: the four ledger tables). | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
 | **5. Multi-tenant staff** | F. Fair share in the relay and the bulkhead (rest of E). | M | A user with two tenants switches between them in the web and RF clients; a third tenant is refused. A flood from one tenant leaves another tenant's relay latency within its normal range. |

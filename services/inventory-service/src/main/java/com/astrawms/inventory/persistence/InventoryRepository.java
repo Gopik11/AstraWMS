@@ -1,5 +1,6 @@
 package com.astrawms.inventory.persistence;
 
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.inventory.domain.Quantities;
 import com.astrawms.inventory.domain.StockStatus;
@@ -137,13 +138,15 @@ public class InventoryRepository {
                 .param("site", siteId).param("lpn", lpnId).param("to", toLocation).update();
     }
 
+    /** Whether the location holds any other item, of any owner: the no-mixed-items rule is physical (ADR-0030 C). */
     public boolean locationHoldsOtherItem(String siteId, String locationId, String ownerId, String itemNo) {
-        return jdbc.sql("""
+        // all-owners: a location that refuses mixed items refuses them whoever owns the stock already in it
+        return OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select exists (select 1 from inventory_balance
                                        where site_id = :site and location_id = :loc
                                          and (owner_id <> :owner or item_no <> :item))""")
                 .param("site", siteId).param("loc", locationId).param("owner", ownerId).param("item", itemNo)
-                .query(Boolean.class).single();
+                .query(Boolean.class).single());
     }
 
     public boolean locationHoldsOtherLot(String siteId, String locationId, String ownerId, String itemNo, String lotNo) {
@@ -169,6 +172,15 @@ public class InventoryRepository {
                 .query((rs, n) -> new Lpn(rs.getString("site_id"), rs.getString("lpn_id"), rs.getString("owner_id"),
                         rs.getString("location_id"), rs.getString("lpn_type")))
                 .optional();
+    }
+
+    /**
+     * Locks the LPN whatever its owner. Only for deciding whether an LPN id is free: an id belongs to one LPN in the
+     * site, so an id in use by another owner must be refused, not reused (ADR-0030 C).
+     */
+    public Optional<Lpn> lockLpnAnyOwner(String siteId, String lpnId) {
+        // all-owners: an LPN id identifies one physical carrier, whoever owns it; the caller only decides with it
+        return OwnerVisibility.allOwners(jdbc, () -> lockLpn(siteId, lpnId));
     }
 
     public void insertLpn(String siteId, String lpnId, String ownerId, String locationId) {
