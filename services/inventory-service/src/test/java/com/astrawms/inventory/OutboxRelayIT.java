@@ -211,8 +211,12 @@ class OutboxRelayIT {
             other.createStatement().execute("select pg_advisory_unlock_all()");
         }
         assertThat(relay.relayOnce()).isEqualTo(12);
-        // the relay released its own locks: nothing of it is left in pg_locks
-        assertThat(jdbc.sql("select count(*) from pg_locks where locktype = 'advisory'").query(Integer.class).single())
+        // the relay released its own locks: nothing of it is left in pg_locks. pg_locks covers the whole server, where
+        // the relays of other test contexts lock the same keys in their own databases: count this database's only.
+        assertThat(jdbc.sql("""
+                        select count(*) from pg_locks where locktype = 'advisory'
+                          and database = (select oid from pg_database where datname = current_database())""")
+                .query(Integer.class).single())
                 .isZero();
         assertThat(Collections.frequency(kafka.sent.stream().map(ProducerRecord::topic).toList(), "wms.a")).isEqualTo(12);
     }
