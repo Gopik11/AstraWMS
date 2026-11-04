@@ -1,6 +1,7 @@
 package com.astrawms.inventory.service;
 
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.domain.Quantities;
@@ -330,18 +331,32 @@ public class CountService {
         return s == null ? "" : s.trim();
     }
 
-    /** Compares the counted quantities with the stock at the location now (all statuses) and stores the variance. */
+    /**
+     * Compares the counted quantities with the stock at the location now (all statuses) and stores the variance.
+     *
+     * <p>A location count covers everything in the location, whoever owns it (ADR-0030 C), so the system quantities
+     * are read for every owner. Whoever submits or approves the count must then be authorised for every owner it
+     * involves: otherwise another owner's stock, which this user may not count or see, would be judged missing or
+     * posted from a partial view. Such a count is refused for this user, without naming the other owner.
+     */
     private List<Variance> evaluate(Count c, Map<Key, BigDecimal> counted) {
         Map<Key, BigDecimal> system = new HashMap<>();
-        jdbc.sql("""
+        // all-owners: a location count compares with everything in the location; the scope check below decides
+        OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select owner_id, item_no, lot_no, lpn_id, sum(qty) from inventory_balance
                         where site_id = :site and location_id = :loc group by owner_id, item_no, lot_no, lpn_id""")
                 .param("site", c.siteId()).param("loc", c.locationId())
                 .query((rs, n) -> Map.entry(new Key(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)),
                         Quantities.normalize(rs.getBigDecimal(5))))
-                .list().forEach(e -> system.put(e.getKey(), e.getValue()));
+                .list()).forEach(e -> system.put(e.getKey(), e.getValue()));
         Set<Key> keys = new java.util.TreeSet<>(system.keySet());
         keys.addAll(counted.keySet());
+        AccessScope scope = AccessScope.current();
+        if (keys.stream().anyMatch(k -> !scope.allowsOwner(k.ownerId()))) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "INV_COUNT_OWNER_SCOPE",
+                    "Location " + c.locationId() + " holds stock of an owner you are not authorised for: "
+                            + "this count needs a user authorised for every owner in the location", Map.of());
+        }
         List<Variance> out = new ArrayList<>();
         jdbc.sql("delete from stock_count_variance where count_id = :c").param("c", c.id()).update();
         for (Key k : keys) {

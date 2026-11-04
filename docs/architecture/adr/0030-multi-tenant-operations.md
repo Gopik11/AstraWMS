@@ -105,11 +105,22 @@ Each one is independent, and the plan at the end orders them.
   - It must never be permissive: permissive policies are combined with OR, and a second one would widen access
     beyond the tenant. The tenant data map fails CI on a second permissive policy on any table.
   - Each setting is read in a scalar subquery, so Postgres evaluates it once per query, not once per row.
+  - Three forms, by what `owner_id` means in the table:
+
+    | Form | Tables | Reads | Writes |
+    | --- | --- | --- | --- |
+    | Owner rows | most tables | the session's owners | the session's owners |
+    | Shared defaults | `allocation_policy`, `billing_rate` (`owner_id = ''` is the site default) | also `''` | `''` only by a session unrestricted by owner |
+    | Shared tags | `rfid_tag` (null owner for LPN and location tags) | also null | also null |
 - **Physical checks (`OwnerVisibility.allOwners`).** Some checks are facts about the warehouse, not about one owner's
   stock, and must see every owner's rows of the tenant:
   - whether a location that refuses mixed items already holds another owner's item;
   - whether an LPN id is already in use;
-  - whether a slot is empty.
+  - whether a slot is empty, and a pick face's rank on the travel path;
+  - whether a location is already another item's pick face;
+  - the next material issue number, which is unique in the site;
+  - whether an EPC is already commissioned, and whether an LPN being tagged belongs to another owner;
+  - what a location count compares with: everything in the location.
 
   `allOwners` sets `app.owners = *` for the duration of the check only, inside the caller's transaction, and then
   restores the user's owners, also when the check fails. It returns a decision, never another owner's rows. Every
@@ -118,11 +129,20 @@ Each one is independent, and the plan at the end orders them.
   - The document rule of ADR-0012 ("visible only if all lines belong to the user's owners") stays in the services.
     RLS on the line tables makes it fail safe: a line the user may not see cannot be read, changed or allocated.
   - Headers without an `owner_id` keep their service checks.
+- **Counts.** A location count compares the counted lines with everything in the location, whoever owns it. Whoever
+  submits or approves it must be authorised for every owner involved; otherwise it is refused with 403
+  `INV_COUNT_OWNER_SCOPE`, without naming the other owner. Without this, an unrestricted approver deciding a count that
+  an owner-scoped counter submitted would have written off the other owners' stock, which that counter could not count;
+  and before owner RLS, an owner-scoped approver could post another owner's adjustments.
 - **Behaviour an owner-scoped user sees.**
   - Another owner's LPN reads as unknown: a move of it answers 422 `INV_LPN_UNKNOWN`, no longer 403
     `SCOPE_OWNER_DENIED`, so its existence is not disclosed (as ADR-0012 already does for reads).
   - Reusing another owner's LPN id is refused with `INV_LPN_OWNER_MISMATCH`, which names the owner only to a user
-    who may see it ("belongs to another owner").
+    who may see it ("belongs to another owner"). So is tagging another owner's LPN.
+  - An EPC commissioned to another owner is refused with `INV_RFID_TAG_IN_USE`, "already commissioned to another
+    owner".
+  - A location that holds another owner's stock cannot be counted or approved by this user (`INV_COUNT_OWNER_SCOPE`).
+  - Unchanged: an RFID read records sightings only of the tags the user may see, as before owner RLS.
 - **Rollout.** Table by table. Before each table:
   - list the reads of the table that a physical check needs across owners, and route them through `allOwners`;
   - compare latency before and after.
@@ -130,7 +150,7 @@ Each one is independent, and the plan at the end orders them.
   | Increment | Tables | State |
   | --- | --- | --- |
   | 1. Ledger | inventory: `inventory_balance`, `inventory_txn`, `lpn`, `allocation` | Done (inventory V21) |
-  | 2. Inventory, rest | `serial_number`, `rfid_tag`, `stock_in_transit`, `material_issue`, replenishment, slotting, counts, billing and owner settings (16 tables) | Open |
+  | 2. Inventory, rest | `serial_number`, `rfid_tag`, `stock_in_transit`, `material_issue`, replenishment, slotting, counts, billing and owner settings (16 tables) | Done (inventory V22) |
   | 3. Documents | inbound `receipt_expectation_line`, `return_line`, `return_unit`; outbound `outbound_line`, `outbound_owner_policy` | Open |
   | 4. Rest | task-service (6 tables, including `task`), master-data `item`, `item_site`, `item_uom` | Open |
 
@@ -145,7 +165,9 @@ Each one is independent, and the plan at the end orders them.
   The same policy with the settings read on every row cost unrestricted sessions 5–13%.
 - **Tests.** For each covered table, an owner-scoped session selects with no `WHERE` clause and sees only its owners'
   rows; one with no owner sees none. Changing another owner's rows changes nothing, and creating a row for another
-  owner, or handing an own row to one, is refused (`OwnerIsolationIT`). The physical checks still see every owner.
+  owner, or handing an own row to one, is refused (`OwnerIsolationIT`). The physical checks still see every owner
+  (`OwnerIsolationInventoryIT`), and every inventory table with `owner_id` has a restrictive `owner_isolation` policy
+  in the migrated database.
 
 ### D. Per-tenant data lifecycle: export, point restore, purge (G4)
 
@@ -246,7 +268,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
 | **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration, Keycloak provisioning. E: per-tenant quotas, tenant metrics. | L | An unknown or suspended tenant is refused in every service, and its messages are skipped and recorded. One tenant over its quota gets 429 while another continues. The metrics show both. |
-| **2. Data-layer owner isolation** | C, table by table, ledger first (increment 1 done: the four ledger tables). | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
+| **2. Data-layer owner isolation** | C, table by table, ledger first (increments 1 and 2 done: every inventory table). | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
 | **5. Multi-tenant staff** | F. Fair share in the relay and the bulkhead (rest of E). | M | A user with two tenants switches between them in the web and RF clients; a third tenant is refused. A flood from one tenant leaves another tenant's relay latency within its normal range. |
