@@ -78,6 +78,18 @@ while IFS= read -r f; do
   done <<<"$unsecured"
 done < <(main_sources)
 
+# 5. Seeing every owner's rows (ADR-0030 C) is a reviewed exception: each OwnerVisibility.allOwners call says why in
+#    an "all-owners: <reason>" comment at most three lines above it. Such a check returns a decision, never another
+#    owner's rows.
+while IFS= read -r f; do
+  case "$f" in */com/astrawms/common/tenancy/OwnerVisibility.java) continue ;; esac
+  while IFS= read -r line; do
+    n="${line%%:*}"
+    sed -n "$(( n > 3 ? n - 3 : 1 )),${n}p" "$f" | grep -Eq 'all-owners: [^[:space:]]' && continue
+    fail "$f:$n sees every owner's rows without an all-owners: reason"
+  done < <(grep -n 'allOwners(' "$f")
+done < <(main_sources)
+
 if (( failures > 0 )); then
   echo "$failures architecture rule violation(s)" >&2
   exit 1

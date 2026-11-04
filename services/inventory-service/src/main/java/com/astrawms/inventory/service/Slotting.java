@@ -4,6 +4,7 @@ import com.astrawms.common.contracts.InventoryContracts.MoveRequested;
 import com.astrawms.common.contracts.InventoryContracts.SlottingChanged;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.OutboxWriter;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.domain.Quantities;
@@ -187,7 +188,8 @@ public class Slotting {
 
     /** Pick-zone locations without a face and without stock, in travel-path order. */
     private List<Slot> freeGoldenSlots(String siteId) {
-        return jdbc.sql("""
+        // all-owners: a slot holding any owner's stock is not free; only location ids come back
+        return OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select l.location_id, l.pick_seq from ref_location l
                         where l.site_id = :site and l.status = 'ACTIVE' and coalesce(l.zone_type, '') in (:pick)
                           and l.pick_seq is not null
@@ -195,7 +197,7 @@ public class Slotting {
                           and not exists (select 1 from inventory_balance b where b.site_id = l.site_id and b.location_id = l.location_id and b.qty > 0)
                         order by l.pick_seq, l.location_id""")
                 .param("site", siteId).param("pick", AllocationRepository.PICK_ZONES)
-                .query((rs, n) -> new Slot(rs.getString(1), rs.getInt(2))).list();
+                .query((rs, n) -> new Slot(rs.getString(1), rs.getInt(2))).list());
     }
 
     private Map<String, Long> pickCounts(String siteId) {

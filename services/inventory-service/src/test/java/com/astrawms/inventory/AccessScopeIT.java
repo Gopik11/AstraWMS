@@ -74,9 +74,12 @@ class AccessScopeIT extends IntegrationTest {
                 {"ownerId":"ACME","itemNo":"SKU-EA","qty":1,"uom":"EA","locationId":"A-01-01"}""", null)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+        // another owner's LPN is not visible to BETA in the database (ADR-0030 C): it reads as unknown, so its existence
+        // is not disclosed (before owner RLS this was 403 SCOPE_OWNER_DENIED)
         postWith(beta, "/moves", "beta-move", """
                 {"fromLocationId":"A-01-01","lpnId":"LPN-ACME","toLocationId":"A-01-02"}""", null)
-                .andExpect(status().isForbidden());
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code", is("INV_LPN_UNKNOWN")));
         postWith(beta, "/receipts", "beta-own", """
                 {"ownerId":"BETA","itemNo":"SKU-B","qty":1,"uom":"EA","locationId":"A-01-02","lpnId":"LPN-BETA"}""", null)
                 .andExpect(status().isCreated());
