@@ -37,6 +37,7 @@ public class MessagingMetrics implements MeterBinder {
 
     private double snapshot(String what) {
         try {
+            // cross-tenant: one platform-wide backlog gauge
             Map<String, Object> row = jdbc.sql("select count(*) as pending, min(created_at) as oldest from outbox where published_at is null")
                     .query().singleRow();
             if ("pending".equals(what)) {

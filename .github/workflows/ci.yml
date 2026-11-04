@@ -21,14 +21,19 @@ jobs:
           java-version: "21"
           cache: maven
 
-      # Static rules the platform's guarantees rest on (ADR-0029): inbox on every listener, tenant filters on
-      # platform tables, roles on every state-changing endpoint.
+      # Static rules the platform's guarantees rest on (ADR-0029, ADR-0030): inbox on every listener, tenant filters on
+      # tenant tables without row-level security, roles on every state-changing endpoint.
       - name: Architecture rules
         run: scripts/check-architecture.sh
 
       # docs/security/permission-matrix.md is generated from the controllers; a change of roles must update it.
       - name: Permission matrix is current
         run: python3 scripts/permission_matrix.py --check
+
+      # docs/security/tenant-data-map.md is generated from the migrations (ADR-0030): a table without tenant_id, or with
+      # tenant_id but without forced row-level security, fails unless reviewed in scripts/tenant_tables.py.
+      - name: Tenant data map is current
+        run: python3 scripts/tenant_tables.py --check
 
       # deploy/kafka/acls.txt is derived from the listeners and outbox writers: a new topic or consumer must update it.
       - name: Kafka ACLs are current

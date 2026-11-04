@@ -58,6 +58,7 @@ public class MessagingHousekeeping {
         int outbox = 0;
         int n;
         do {
+            // cross-tenant: published messages of every tenant past retention
             n = jdbc.sql("""
                             delete from outbox where id in (
                                 select id from outbox where published_at is not null and published_at < :cutoff
