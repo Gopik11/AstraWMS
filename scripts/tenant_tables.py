@@ -46,6 +46,8 @@ RLS_FREE = {
     "dlq_replay": "Replay log of the dead-letter tools (ADR-0018, ADR-0029); every read filters tenant_id.",
     "reservation_compensation": "The compensation retrier releases reservations of every tenant (ADR-0029 E).",
     "webhook_delivery": "The webhook dispatcher delivers every tenant's signed bodies (ADR-0025).",
+    "tenant": "The tenant registry (ADR-0030 A): the platform API reads and changes every tenant.",
+    "tenant_status_change": "The registry's status history (ADR-0030 A), across tenants like the registry.",
 }
 
 IDENT = r"[a-z_][a-z0-9_]*"

@@ -8,7 +8,9 @@ Each service's SASL account (deploy/vps: one per service, ADR-0018) gets only wh
   - WRITE on `<topic>.dlq` of every consumed topic (dead-lettering) and READ on it (the Operations page), and WRITE on
     the consumed topic itself (a replay goes back to the original topic);
   - DESCRIBE and CREATE on every topic it declares (it creates missing topics at start-up) and ALTER (it may add
-    partitions to match its declaration).
+    partitions to match its declaration);
+  - READ and DESCRIBE on the platform topics (the tenant registry, ADR-0030 A), which every service reads without a
+    consumer group.
 Writes deploy/kafka/acls.txt, applied by deploy/vps/kafka-acls.sh.
 
   python3 scripts/kafka_acls.py          # regenerate
@@ -23,6 +25,8 @@ OUT = ROOT / "deploy" / "kafka" / "acls.txt"
 SERVICES = {"master-data-service": "services/master-data-service", "inventory-service": "services/inventory-service",
             "inbound-service": "services/inbound-service", "task-service": "services/task-service",
             "outbound-service": "services/outbound-service", "sap-adapter": "adapters/sap-adapter"}
+# platform topics every service reads, without a consumer group (TenantRegistry assigns all partitions itself)
+PLATFORM_TOPICS = ["PlatformContracts.TOPIC_TENANTS"]
 # accessor methods of configurable topic names and their defaults (inventory's InventoryEvents.Topics)
 ACCESSORS = {"topics.inventoryEvents()": "InventoryContracts.TOPIC",
              "topics.goodsMovements()": "IntegrationContracts.TOPIC_GOODS_MOVEMENTS",
@@ -66,7 +70,8 @@ def scan(consts):
                 declared.add(resolve(m.group(1), consts))
         prefixes = {svc}
         prefixes.update(g.split(".")[0] + "." for g in groups if not g.startswith(svc))
-        spec[svc] = {"produce": produce, "consume": consume, "groupPrefixes": prefixes, "declared": declared}
+        spec[svc] = {"produce": produce, "consume": consume, "groupPrefixes": prefixes, "declared": declared,
+                     "platform": {resolve(t, consts) for t in PLATFORM_TOPICS}}
     return spec
 
 
@@ -85,6 +90,8 @@ def render(spec):
         for t in s["produce"] | s["consume"] | s["declared"]:
             rows |= {("DESCRIBE", "TOPIC", "LITERAL", t), ("CREATE", "TOPIC", "LITERAL", t),
                      ("ALTER", "TOPIC", "LITERAL", t)}
+        for t in s["platform"]:
+            rows |= {("READ", "TOPIC", "LITERAL", t), ("DESCRIBE", "TOPIC", "LITERAL", t)}
         for g in s["groupPrefixes"]:
             rows.add(("READ", "GROUP", "PREFIXED", g))
         for op, rtype, ptype, name in sorted(rows, key=lambda r: (r[1], r[3], r[0])):

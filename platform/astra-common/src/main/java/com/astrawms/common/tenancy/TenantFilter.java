@@ -27,6 +27,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *       the token's scope claims.</li>
  * </ul>
  * Unauthenticated requests pass through untouched; the authorization rules reject them (or allow health probes).
+ *
+ * <p>Tenant registry (ADR-0030 A): once the tenant is known, {@link TenantRegistry#refusal} decides whether it may
+ * proceed: unknown (403 {@code TENANT_UNKNOWN}), suspended or purged (403 {@code TENANT_SUSPENDED}), offboarding and
+ * writing (403 {@code TENANT_OFFBOARDING}), registry not read yet (503 {@code TENANT_REGISTRY_UNAVAILABLE}). The
+ * platform API ({@value #PLATFORM_PATH}) works across tenants: it binds no tenant and is not checked; its endpoints
+ * require {@link Roles#PLATFORM_ADMIN} (or a service account, to read).
  */
 public class TenantFilter extends OncePerRequestFilter {
 
@@ -34,21 +40,30 @@ public class TenantFilter extends OncePerRequestFilter {
     public static final String USER_HEADER = "X-User-Id";
     public static final String CHANNEL_HEADER = "X-Channel";
 
+    public static final String PLATFORM_PATH = "/api/v1/platform/";
+
     private static final String SERVICE_AUTHORITY = "ROLE_" + Roles.WMS_SERVICE;
 
     private final String tenantClaim;
     private final AstraJwtAuthenticationConverter converter;
+    private final TenantRegistry registry;
 
     public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter) {
+        this(tenantClaim, converter, null);
+    }
+
+    /** @param registry the tenant registry; null where none is configured (no Kafka), then tenants are not checked */
+    public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter, TenantRegistry registry) {
         this.tenantClaim = tenantClaim;
         this.converter = converter;
+        this.registry = registry;
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (!(auth instanceof JwtAuthenticationToken token)) {
+        if (!(auth instanceof JwtAuthenticationToken token) || request.getRequestURI().startsWith(PLATFORM_PATH)) {
             chain.doFilter(request, response);
             return;
         }
@@ -80,12 +95,34 @@ public class TenantFilter extends OncePerRequestFilter {
             user = token.getName();
             access = converter.accessScope(token.getToken());
         }
+        if (registry != null) {
+            boolean write = !("GET".equals(request.getMethod()) || "HEAD".equals(request.getMethod())
+                    || "OPTIONS".equals(request.getMethod()));
+            var refusal = registry.refusal(tenant, write);
+            if (refusal.isPresent()) {
+                refuse(response, tenant, refusal.get());
+                return;
+            }
+        }
         String channel = trimToNull(request.getHeader(CHANNEL_HEADER));
         TenantContext.bind(new TenantContext.Scope(tenant, user, channel == null ? "API" : channel, access));
         try {
             chain.doFilter(request, response);
         } finally {
             TenantContext.clear();
+        }
+    }
+
+    private static void refuse(HttpServletResponse response, String tenant, TenantRegistry.Decision d) throws IOException {
+        switch (d) {
+            case REGISTRY_UNAVAILABLE -> Problems.write(response, HttpStatus.SERVICE_UNAVAILABLE, "TENANT_REGISTRY_UNAVAILABLE",
+                    "The tenant registry has not been read yet; retry shortly");
+            case UNKNOWN -> Problems.write(response, HttpStatus.FORBIDDEN, "TENANT_UNKNOWN",
+                    "Tenant " + tenant + " is not registered");
+            case OFFBOARDING -> Problems.write(response, HttpStatus.FORBIDDEN, "TENANT_OFFBOARDING",
+                    "Tenant " + tenant + " is being offboarded: it can be read, not changed");
+            default -> Problems.write(response, HttpStatus.FORBIDDEN, "TENANT_SUSPENDED",
+                    "Tenant " + tenant + " is " + d.name().toLowerCase());
         }
     }
 

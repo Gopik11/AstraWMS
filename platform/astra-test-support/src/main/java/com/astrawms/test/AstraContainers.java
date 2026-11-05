@@ -36,5 +36,8 @@ public final class AstraContainers {
         r.add("spring.flyway.user", POSTGRES::getUsername);
         r.add("spring.flyway.password", POSTGRES::getPassword);
         r.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        // Tests use a fresh tenant each; the tenant registry only reports (ADR-0030 A). Tests of the registry switch it
+        // to ENFORCE on the bean (TenantRegistry.mode).
+        r.add("astra.tenancy.registry.mode", () -> "REPORT");
     }
 }

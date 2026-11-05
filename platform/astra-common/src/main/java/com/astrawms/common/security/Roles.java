@@ -30,6 +30,12 @@ public final class Roles {
      * only for this role (trusted subsystem, ADR-0010).
      */
     public static final String WMS_SERVICE = "WMS_SERVICE";
+    /**
+     * The operator's platform administrators (ADR-0030 A): manage the tenant registry under {@code /api/v1/platform}.
+     * Not tied to a tenant, and the most powerful role in the system: held only by the operator's accounts (MFA) and
+     * the provisioner, never granted by a tenant administrator.
+     */
+    public static final String PLATFORM_ADMIN = "PLATFORM_ADMIN";
 
     private Roles() {
     }

@@ -14,10 +14,21 @@ public class InboxProcessing {
 
     private final InboxGuard inbox;
     private final TransactionTemplate tx;
+    private final com.astrawms.common.tenancy.TenantRegistry registry;
 
     public InboxProcessing(InboxGuard inbox, TransactionTemplate tx) {
+        this(inbox, tx, null);
+    }
+
+    /**
+     * @param registry the tenant registry (ADR-0030 A); a message of a tenant it refuses is not applied but dead-lettered
+     *                 at once ({@link com.astrawms.common.tenancy.TenantNotActiveException}), for replay after
+     *                 reactivation. Null where there is none.
+     */
+    public InboxProcessing(InboxGuard inbox, TransactionTemplate tx, com.astrawms.common.tenancy.TenantRegistry registry) {
         this.inbox = inbox;
         this.tx = tx;
+        this.registry = registry;
     }
 
     /**
@@ -33,6 +44,16 @@ public class InboxProcessing {
 
     /** As {@link #once(EventEnvelope, String, String, Runnable)} for an explicitly named consumer group. */
     public boolean once(String consumerGroup, EventEnvelope e, String actor, String channel, Runnable work) {
+        if (registry != null) {
+            var refusal = registry.refusal(e.tenantId(), true);
+            if (refusal.isPresent()) {
+                if (refusal.get() == com.astrawms.common.tenancy.TenantRegistry.Decision.REGISTRY_UNAVAILABLE) {
+                    // retried with back-off: the registry is read within seconds of start-up
+                    throw new IllegalStateException("Tenant registry not read yet; retrying " + e.messageId());
+                }
+                throw new com.astrawms.common.tenancy.TenantNotActiveException(e.tenantId(), refusal.get());
+            }
+        }
         boolean[] ran = {false};
         TenantContext.runAs(new TenantContext.Scope(e.tenantId(), actor, channel),
                 () -> tx.executeWithoutResult(s -> {

@@ -91,9 +91,23 @@ public class AstraCommonAutoConfiguration {
         return new InboxGuard(jdbc);
     }
 
+    /**
+     * The tenant registry (ADR-0030 A), read from the compacted tenants topic. {@code astra.tenancy.registry.mode}:
+     * ENFORCE (default) refuses unknown, suspended and purged tenants; REPORT only logs and counts, for a first deploy.
+     */
     @Bean
-    InboxProcessing inboxProcessing(InboxGuard inbox, PlatformTransactionManager txManager) {
-        return new InboxProcessing(inbox, new TransactionTemplate(txManager));
+    @ConditionalOnBean(ConsumerFactory.class)
+    @ConditionalOnMissingBean
+    com.astrawms.common.tenancy.TenantRegistry astraTenantRegistry(
+            ConsumerFactory<?, ?> consumers, JsonMapper json, @Value("${spring.application.name:service}") String service,
+            @Value("${astra.tenancy.registry.mode:ENFORCE}") com.astrawms.common.tenancy.TenantRegistry.Mode mode) {
+        return new com.astrawms.common.tenancy.TenantRegistry(consumers, json, service, mode);
+    }
+
+    @Bean
+    InboxProcessing inboxProcessing(InboxGuard inbox, PlatformTransactionManager txManager,
+                                    org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry) {
+        return new InboxProcessing(inbox, new TransactionTemplate(txManager), registry.getIfAvailable());
     }
 
     @Bean
@@ -158,8 +172,9 @@ public class AstraCommonAutoConfiguration {
     @Bean
     @ConditionalOnBean(DeadLetters.class)
     OpsController astraOpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
-                                     ObjectProvider<OutboxRelay> relay) {
-        return new OpsController(deadLetters, jdbc, clock, relay.getIfAvailable());
+                                     ObjectProvider<OutboxRelay> relay,
+                                     ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry) {
+        return new OpsController(deadLetters, jdbc, clock, relay.getIfAvailable(), registry.getIfAvailable());
     }
 
     @Bean

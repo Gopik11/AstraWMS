@@ -27,13 +27,20 @@ public class OpsController {
     private final JdbcClient jdbc;
     private final Clock clock;
     private final com.astrawms.common.messaging.OutboxRelay relay;
+    private final com.astrawms.common.tenancy.TenantRegistry registry;
 
     public OpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
                          com.astrawms.common.messaging.OutboxRelay relay) {
+        this(deadLetters, jdbc, clock, relay, null);
+    }
+
+    public OpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
+                         com.astrawms.common.messaging.OutboxRelay relay, com.astrawms.common.tenancy.TenantRegistry registry) {
         this.deadLetters = deadLetters;
         this.jdbc = jdbc;
         this.clock = clock;
         this.relay = relay;
+        this.registry = registry;
     }
 
     /** {@code force} and {@code reason}: only for a dead letter older than the inbox retention (ADR-0029). */
@@ -59,6 +66,8 @@ public class OpsController {
         Map<String, Object> out = new LinkedHashMap<>(outbox());
         out.put("pausedTopics", relay == null ? Map.of() : relay.pausedTopics());
         out.put("relayEnabled", relay != null);
+        // ADR-0030 A: whether this service enforces the tenant registry, has read it, and how many tenants per status
+        out.put("tenantRegistry", registry == null ? Map.of("mode", "NONE") : registry.snapshot());
         out.put("at", clock.instant());
         return out;
     }

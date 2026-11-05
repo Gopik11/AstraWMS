@@ -100,7 +100,9 @@ public class AstraSecurityAutoConfiguration {
 
     @Bean
     SecurityFilterChain astraSecurityFilterChain(HttpSecurity http, AstraJwtAuthenticationConverter converter,
-                                                 AstraSecurityProperties properties) throws Exception {
+                                                 AstraSecurityProperties properties,
+                                                 org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry)
+            throws Exception {
         AuthenticationEntryPoint unauthenticated = unauthenticated();
         AccessDeniedHandler forbidden = (request, response, e) -> Problems.write(response, HttpStatus.FORBIDDEN,
                 "FORBIDDEN", "Your roles do not permit this operation");
@@ -120,7 +122,8 @@ public class AstraSecurityAutoConfiguration {
                         .authenticationEntryPoint(unauthenticated)
                         .accessDeniedHandler(forbidden))
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthenticated).accessDeniedHandler(forbidden))
-                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant(), converter), BearerTokenAuthenticationFilter.class);
+                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant(), converter, registry.getIfAvailable()),
+                        BearerTokenAuthenticationFilter.class);
         return http.build();
     }
 

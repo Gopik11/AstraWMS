@@ -6,6 +6,11 @@ User:master-data-service ALTER TOPIC LITERAL wms.masterdata.events.v1
 User:master-data-service CREATE TOPIC LITERAL wms.masterdata.events.v1
 User:master-data-service DESCRIBE TOPIC LITERAL wms.masterdata.events.v1
 User:master-data-service WRITE TOPIC LITERAL wms.masterdata.events.v1
+User:master-data-service ALTER TOPIC LITERAL wms.platform.tenants.v1
+User:master-data-service CREATE TOPIC LITERAL wms.platform.tenants.v1
+User:master-data-service DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:master-data-service READ TOPIC LITERAL wms.platform.tenants.v1
+User:master-data-service WRITE TOPIC LITERAL wms.platform.tenants.v1
 User:inventory-service READ GROUP PREFIXED inventory-service
 User:inventory-service ALTER TOPIC LITERAL wms.integration.outbound.goodsmovement.v1
 User:inventory-service CREATE TOPIC LITERAL wms.integration.outbound.goodsmovement.v1
@@ -24,6 +29,8 @@ User:inventory-service CREATE TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:inventory-service DESCRIBE TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:inventory-service READ TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:inventory-service WRITE TOPIC LITERAL wms.masterdata.events.v1.dlq
+User:inventory-service DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:inventory-service READ TOPIC LITERAL wms.platform.tenants.v1
 User:inventory-service ALTER TOPIC LITERAL wms.task.requests.v1
 User:inventory-service CREATE TOPIC LITERAL wms.task.requests.v1
 User:inventory-service DESCRIBE TOPIC LITERAL wms.task.requests.v1
@@ -68,6 +75,8 @@ User:inbound-service ALTER TOPIC LITERAL wms.integration.outbound.returnconfirma
 User:inbound-service CREATE TOPIC LITERAL wms.integration.outbound.returnconfirmation.v1
 User:inbound-service DESCRIBE TOPIC LITERAL wms.integration.outbound.returnconfirmation.v1
 User:inbound-service WRITE TOPIC LITERAL wms.integration.outbound.returnconfirmation.v1
+User:inbound-service DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:inbound-service READ TOPIC LITERAL wms.platform.tenants.v1
 User:inbound-service ALTER TOPIC LITERAL wms.task.requests.v1
 User:inbound-service CREATE TOPIC LITERAL wms.task.requests.v1
 User:inbound-service DESCRIBE TOPIC LITERAL wms.task.requests.v1
@@ -91,6 +100,8 @@ User:task-service CREATE TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:task-service DESCRIBE TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:task-service READ TOPIC LITERAL wms.masterdata.events.v1.dlq
 User:task-service WRITE TOPIC LITERAL wms.masterdata.events.v1.dlq
+User:task-service DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:task-service READ TOPIC LITERAL wms.platform.tenants.v1
 User:task-service ALTER TOPIC LITERAL wms.task.events.v1
 User:task-service CREATE TOPIC LITERAL wms.task.events.v1
 User:task-service DESCRIBE TOPIC LITERAL wms.task.events.v1
@@ -144,6 +155,8 @@ User:outbound-service CREATE TOPIC LITERAL wms.inventory.events.v1.dlq
 User:outbound-service DESCRIBE TOPIC LITERAL wms.inventory.events.v1.dlq
 User:outbound-service READ TOPIC LITERAL wms.inventory.events.v1.dlq
 User:outbound-service WRITE TOPIC LITERAL wms.inventory.events.v1.dlq
+User:outbound-service DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:outbound-service READ TOPIC LITERAL wms.platform.tenants.v1
 User:outbound-service ALTER TOPIC LITERAL wms.task.events.v1
 User:outbound-service CREATE TOPIC LITERAL wms.task.events.v1
 User:outbound-service DESCRIBE TOPIC LITERAL wms.task.events.v1
@@ -220,3 +233,5 @@ User:sap-adapter CREATE TOPIC LITERAL wms.integration.outbound.shipmentconfirmat
 User:sap-adapter DESCRIBE TOPIC LITERAL wms.integration.outbound.shipmentconfirmation.v1.dlq
 User:sap-adapter READ TOPIC LITERAL wms.integration.outbound.shipmentconfirmation.v1.dlq
 User:sap-adapter WRITE TOPIC LITERAL wms.integration.outbound.shipmentconfirmation.v1.dlq
+User:sap-adapter DESCRIBE TOPIC LITERAL wms.platform.tenants.v1
+User:sap-adapter READ TOPIC LITERAL wms.platform.tenants.v1

@@ -35,6 +35,8 @@ x-service: &service
     SPRING_KAFKA_PROPERTIES_SASL_MECHANISM: PLAIN
     # With ACLs (ADR-0029) a listener keeps retrying after an authorization error instead of stopping for good.
     SPRING_KAFKA_LISTENER_AUTH_EXCEPTION_RETRY_INTERVAL: 10s
+    # ADR-0030 A: REPORT logs and counts tenants that would be refused; ENFORCE refuses them. Set in .env.
+    ASTRA_TENANCY_REGISTRY_MODE: ${TENANT_REGISTRY_MODE:-REPORT}
     OIDC_ISSUER: ${PUBLIC_URL}/realms/astrawms
     OIDC_JWK_SET_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/certs
     OIDC_TOKEN_URI: http://keycloak:8080/realms/astrawms/protocol/openid-connect/token
