@@ -10,12 +10,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -45,16 +47,22 @@ public class TenantDirectory {
     public record StatusRequest(String status, String reason) {
     }
 
+    public record AdminRequest(String username, String email, String firstName, String lastName) {
+    }
+
     private final JdbcClient jdbc;
     private final OutboxWriter outbox;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final IdentityProvisioner identity;
 
-    public TenantDirectory(JdbcClient jdbc, OutboxWriter outbox, TransactionTemplate tx, Clock clock) {
+    public TenantDirectory(JdbcClient jdbc, OutboxWriter outbox, TransactionTemplate tx, Clock clock,
+                           IdentityProvisioner identity) {
         this.jdbc = jdbc;
         this.outbox = outbox;
         this.tx = tx;
         this.clock = clock;
+        this.identity = identity;
     }
 
     // cross-tenant: the registry's view; every use below filters by tenant_id or is itself cross-tenant
@@ -159,6 +167,58 @@ public class TenantDirectory {
     // ------------------------------------------------------------------ publishing
 
     /** Publishes every tenant version not yet published: tenants seeded by the migration, and a safety net. */
+    /**
+     * Creates an administrator of an active tenant in the identity provider: every site, owner and zone of the tenant,
+     * the role SOLUTION_ADMIN, and a temporary password returned here once and never stored. No transaction is held
+     * while the provider is called; the account is recorded once it exists.
+     */
+    public Map<String, Object> createAdmin(String tenantId, AdminRequest r, String user) {
+        String username = r.username() == null ? "" : r.username().trim().toLowerCase(Locale.ROOT);
+        if (!username.matches("[a-z0-9][a-z0-9._@-]{2,63}")) {
+            throw ApiException.badRequest("PLATFORM_USERNAME_INVALID",
+                    "A username is 3-64 lower-case letters, digits, '.', '_', '@' or '-', starting with a letter or digit");
+        }
+        String email = blankToNull(r.email());
+        if (email != null && !email.matches("[^@\\s]+@[^@\\s]+\\.[^@\\s]+")) {
+            throw ApiException.badRequest("PLATFORM_EMAIL_INVALID", "Not an e-mail address: " + email);
+        }
+        Object status = tx.execute(s -> get(tenantId).get("status"));
+        if (!PlatformContracts.ACTIVE.equals(status)) {
+            throw ApiException.conflict("PLATFORM_TENANT_NOT_ACTIVE",
+                    "Tenant " + tenantId + " is " + status + "; administrators are created for active tenants only");
+        }
+        IdentityProvisioner.CreatedAdmin created;
+        try {
+            created = identity.createTenantAdmin(tenantId,
+                    new IdentityProvisioner.NewAdmin(username, email, blankToNull(r.firstName()), blankToNull(r.lastName())));
+        } catch (IdentityProvisioner.UserExists e) {
+            throw ApiException.conflict("PLATFORM_USERNAME_TAKEN", "Username " + username + " is taken");
+        } catch (IdentityProvisioner.Unavailable e) {
+            log.warn("Tenant administrator {} for {} not created: {}", username, tenantId, e.getMessage());
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "PLATFORM_IDENTITY_UNAVAILABLE",
+                    "The identity provider cannot create the account now; nothing was created");
+        }
+        Instant now = clock.instant();
+        tx.executeWithoutResult(s -> jdbc.sql("""
+                        insert into tenant_admin_account (tenant_id, username, identity_user_id, email, created_by, created_at)
+                        values (:t, :u, :id, :email, :user, :now)""")
+                .param("t", tenantId).param("u", created.username()).param("id", created.userId()).param("email", email)
+                .param("user", user).param("now", Timestamp.from(now)).update());
+        log.info("Tenant administrator {} created for {} by {}", created.username(), tenantId, user);
+        return Map.of("tenantId", tenantId, "username", created.username(), "userId", created.userId(),
+                "roles", IdentityProvisioner.GRANTABLE_ROLES, "temporaryPassword", created.temporaryPassword(),
+                "passwordChangeRequired", true);
+    }
+
+    /** The administrators the platform API created for a tenant (never a password). */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> admins(String tenantId) {
+        get(tenantId);
+        return jdbc.sql("""
+                        select username, identity_user_id, email, created_by, created_at from tenant_admin_account
+                        where tenant_id = :t order by created_at, id""").param("t", tenantId).query().listOfRows();
+    }
+
     @EventListener(ApplicationReadyEvent.class)
     @Scheduled(fixedDelayString = "${astra.tenancy.publish-interval-ms:60000}", initialDelayString = "${astra.tenancy.publish-interval-ms:60000}")
     public void publishAllPending() {

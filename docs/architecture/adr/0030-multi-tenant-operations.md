@@ -60,7 +60,19 @@ Each one is independent, and the plan at the end orders them.
   - Status changes through the API: ACTIVE ↔ SUSPENDED, either → OFFBOARDING, OFFBOARDING → ACTIVE. PURGED is set only
     by the purge procedure (D).
   - The provisioning scripts register their tenant first, with the provisioner's token.
-  - Creating a tenant's first administrator in Keycloak from the API is increment 3 below.
+  - **A tenant's first administrator (increment 3).** `POST /api/v1/platform/tenants/{id}/admins` (`PLATFORM_ADMIN`)
+    creates the account in Keycloak, signed in as the provisioner (client credentials; its service account has
+    realm-management `manage-users`):
+    - the account carries `tenant_id` and every site, owner and zone (`*`), and the realm role `SOLUTION_ADMIN` only;
+      the role list is fixed in code (`IdentityProvisioner.GRANTABLE_ROLES`), so the API cannot grant `PLATFORM_ADMIN`;
+    - a generated temporary password (20 characters) is in the response once, with `Cache-Control: no-store`, and is
+      never stored; Keycloak requires a new one at first sign-in (`UPDATE_PASSWORD`);
+    - only an `ACTIVE` tenant gets one (409 `PLATFORM_TENANT_NOT_ACTIVE`); a taken username is 409
+      `PLATFORM_USERNAME_TAKEN` (usernames are unique across the realm); when Keycloak cannot be reached or refuses,
+      503 `PLATFORM_IDENTITY_UNAVAILABLE` and nothing is created: an account whose role mapping fails is deleted again;
+    - no database transaction is held while Keycloak is called; the platform table `tenant_admin_account` (V10,
+      reviewed RLS-free) records who created which account and when, and `GET .../admins` lists them.
+    - Further users of the tenant are created by its administrator in Keycloak, or by the customer's IdP and SCIM.
 - **Distribution: a compacted topic, read in memory.** Every change is published as `TenantChanged` on
   `wms.platform.tenants.v1`, a compacted topic keyed by tenant, so the latest state of every tenant stays on it for
   good. Every service's `TenantRegistry` reads it from the beginning, without a consumer group, and keeps following
@@ -327,7 +339,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | Phase | Work | Size | Done when |
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
-| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2, done); Keycloak provisioning of a tenant's first administrator (increment 3). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
+| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2, done); Keycloak provisioning of a tenant's first administrator (increment 3, done). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
 | **2. Data-layer owner isolation** | C, table by table, ledger first. Done: every table with `owner_id` (34) has the policy. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
