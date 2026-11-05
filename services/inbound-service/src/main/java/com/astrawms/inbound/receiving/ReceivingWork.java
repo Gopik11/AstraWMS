@@ -46,8 +46,8 @@ public class ReceivingWork {
                 .query((rs, n) -> new L(rs.getString(1), new ReceiveRequested.Line(rs.getString(2), rs.getString(3),
                         rs.getBigDecimal(4).stripTrailingZeros(), rs.getString(5), rs.getString(6))))
                 .list();
-        publish(siteId, new ReceiveRequested(ReceivingContracts.KIND_ASN, h.doc(),
-                lines.isEmpty() ? null : lines.getFirst().owner(), h.vendor(),
+        publish(siteId, new ReceiveRequested(ReceivingContracts.KIND_ASN, h.doc(), owner(lines.stream().map(L::owner).toList()),
+                h.vendor(),
                 h.arrival() == null ? null : h.arrival().toInstant(), lines.stream().map(L::line).toList(), priority));
     }
 
@@ -67,9 +67,20 @@ public class ReceivingWork {
                 .query((rs, n) -> new L(rs.getString(1), new ReceiveRequested.Line(rs.getString(2), rs.getString(3),
                         rs.getBigDecimal(4).stripTrailingZeros(), rs.getString(5), null)))
                 .list();
-        publish(siteId, new ReceiveRequested(ReceivingContracts.KIND_RMA, h.rma(),
-                lines.isEmpty() ? null : lines.getFirst().owner(), h.customer(),
+        publish(siteId, new ReceiveRequested(ReceivingContracts.KIND_RMA, h.rma(), owner(lines.stream().map(L::owner).toList()),
+                h.customer(),
                 h.arrival() == null ? null : h.arrival().toInstant(), lines.stream().map(L::line).toList(), priority));
+    }
+
+    /**
+     * The owner of a receive task: its lines' single owner, or {@link ReceivingContracts#SEVERAL_OWNERS} when they have
+     * several (ADR-0030 C). An owner-scoped user never sees such a task, so it cannot be used to receive another
+     * owner's lines through the task service, which calls this service unrestricted. Null without lines (a blind
+     * return: the task service checks the owner of each scanned unit).
+     */
+    static String owner(List<String> lineOwners) {
+        List<String> owners = lineOwners.stream().distinct().toList();
+        return owners.isEmpty() ? null : owners.size() == 1 ? owners.getFirst() : ReceivingContracts.SEVERAL_OWNERS;
     }
 
     public void ended(String siteId, String kind, String docNo, String reason) {

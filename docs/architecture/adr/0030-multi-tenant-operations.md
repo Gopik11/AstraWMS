@@ -143,7 +143,22 @@ Each one is independent, and the plan at the end orders them.
     load close, tracking and removal had no owner check. With line RLS alone they would have acted on part of a wave
     or load: a wave released with another owner's lines never allocated, a load closed into a partial shipment.
   - Wave candidates (plan, create, release by cutoff) are filtered by the same rule, also across owners.
-  - Setting another owner's outbound policy answers 403 `SCOPE_OWNER_DENIED`, not a database error.
+  - Endpoints that name an owner in the path (`{ownerId}`) were already refused with 403 `SCOPE_OWNER_DENIED` by
+    `PathScopeInterceptor` (ADR-0012), before any query: setting another owner's outbound policy or reading another
+    owner's item never reaches a policy. An owner given in the request body is checked where it is read (item labels).
+- **Tasks (increment 4).**
+  - `task` uses the shared form for `owner_id = ''`, which marks a task of no single owner: a location count (the
+    inventory service decides who may count the location) or a blind return. The service already offered those to
+    every scope; they stay readable and workable by every scope.
+  - A receive task now carries its document's single owner, or `*` (`ReceivingContracts.SEVERAL_OWNERS`) when the
+    lines belong to several owners. Before, it carried the first line's owner, so a user scoped to that owner could
+    receive the other owners' lines through RF: the task service calls the inbound service unrestricted. `*` is
+    never in a user's owner list, so only users unrestricted by owner see such a task. Open receive tasks created
+    before this change keep their owner until their document changes.
+  - A unit scanned into a return through RF must be of an owner the RF user may work, checked in the task service,
+    since the inbound service takes the call unrestricted. A blind return has no lines, so its task has no owner.
+  - Putaway planning and validation read every owner's stock and the open tasks reserving locations: capacity,
+    mixing and pick faces are facts about the location.
 - **Counts.** A location count compares the counted lines with everything in the location, whoever owns it. Whoever
   submits or approves it must be authorised for every owner involved; otherwise it is refused with 403
   `INV_COUNT_OWNER_SCOPE`, without naming the other owner. Without this, an unrestricted approver deciding a count that
@@ -167,7 +182,7 @@ Each one is independent, and the plan at the end orders them.
   | 1. Ledger | inventory: `inventory_balance`, `inventory_txn`, `lpn`, `allocation` | Done (inventory V21) |
   | 2. Inventory, rest | `serial_number`, `rfid_tag`, `stock_in_transit`, `material_issue`, replenishment, slotting, counts, billing and owner settings (16 tables) | Done (inventory V22) |
   | 3. Documents | inbound `receipt_expectation_line`, `return_line`, `return_unit`; outbound `outbound_line`, `outbound_owner_policy` | Done (inbound V8, outbound V15, with the document and container gates) |
-  | 4. Rest | task-service (6 tables, including `task`), master-data `item`, `item_site`, `item_uom` | Open |
+  | 4. Rest | task-service (6 tables, including `task`), master-data `item`, `item_site`, `item_uom` | Done (task V16, master-data V8) |
 
   The tenant data map lists every table with `owner_id` and shows which have the policy.
 - **Measured cost (increment 1).** `pgbench` on 340,000 ledger rows of one tenant, with the production indexes:
@@ -283,7 +298,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
 | **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration, Keycloak provisioning. E: per-tenant quotas, tenant metrics. | L | An unknown or suspended tenant is refused in every service, and its messages are skipped and recorded. One tenant over its quota gets 429 while another continues. The metrics show both. |
-| **2. Data-layer owner isolation** | C, table by table, ledger first (increments 1–3 done: inventory, inbound and outbound documents). | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
+| **2. Data-layer owner isolation** | C, table by table, ledger first. Done: every table with `owner_id` (34) has the policy. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
 | **5. Multi-tenant staff** | F. Fair share in the relay and the bulkhead (rest of E). | M | A user with two tenants switches between them in the web and RF clients; a third tenant is refused. A flood from one tenant leaves another tenant's relay latency within its normal range. |

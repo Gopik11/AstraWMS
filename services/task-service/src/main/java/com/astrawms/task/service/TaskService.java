@@ -4,6 +4,7 @@ import com.astrawms.common.contracts.InventoryContracts.InventoryChanged;
 import com.astrawms.common.contracts.OutboundContracts;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.task.api.TaskDtos.Content;
@@ -278,6 +279,11 @@ public class TaskService {
             body.put("photo", s.photo());
             result = inbound.receiveAsnItem(siteId, t.docNo(), key, body);
         } else {
+            // the inbound service takes this call as the task service (unrestricted): the RF user's owner scope applies
+            // here, or a scoped user could receive another owner's units into a blind return (ADR-0030 C)
+            if (s.ownerId() != null && !s.ownerId().isBlank()) {
+                AccessScope.current().requireOwner(s.ownerId().trim());
+            }
             body.put("ownerId", s.ownerId());
             body.put("conditionGrade", s.conditionGrade());
             body.put("disposition", s.disposition());
@@ -898,7 +904,10 @@ public class TaskService {
         jdbc.sql("select 1 from pg_advisory_xact_lock(hashtext(:k))")
                 .param("k", TenantContext.tenantId() + "|" + t.siteId() + "|putaway").query(Integer.class).single();
         List<Stock> contents = projections.lpnContents(t.siteId(), t.lpnId(), t.fromLocation());
-        Optional<PutawayEngine.Plan> plan = engine.plan(t.siteId(), contents, t.excluded(), reservations(t.siteId(), t.id()));
+        // all-owners: a target is chosen by what the locations hold and which open tasks reserve them, whoever owns
+        // that stock (capacity, mixing, pick faces); only the chosen location comes back
+        Optional<PutawayEngine.Plan> plan = OwnerVisibility.allOwners(jdbc,
+                () -> engine.plan(t.siteId(), contents, t.excluded(), reservations(t.siteId(), t.id())));
         if (plan.isPresent()) {
             jdbc.sql("""
                             update task set status = 'RELEASED', target_location = :target, suggested_location = :target,
@@ -1141,8 +1150,9 @@ public class TaskService {
         String reason = null;
         if (!locationId.equals(t.targetLocation())) {
             List<Stock> contents = projections.lpnContents(siteId, t.lpnId(), t.fromLocation());
-            int reservedThere = reservations(siteId, t.id()).getOrDefault(locationId, 0);
-            Optional<PutawayEngine.Rejection> rejection = engine.validate(siteId, contents, locationId, reservedThere);
+            // all-owners: whether the location can take this LPN depends on everything in it and reserved for it
+            Optional<PutawayEngine.Rejection> rejection = OwnerVisibility.allOwners(jdbc, () -> engine.validate(siteId,
+                    contents, locationId, reservations(siteId, t.id()).getOrDefault(locationId, 0)));
             if (rejection.isPresent()) {
                 throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, rejection.get().code(), rejection.get().reason());
             }

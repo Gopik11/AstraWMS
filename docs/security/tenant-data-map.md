@@ -16,13 +16,13 @@ reviewed as RLS-free.
 
 | Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) | With owner_id | Owner RLS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 | 3 | 0 |
+| `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 | 3 | 3 |
 | `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 20 |
 | `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 3 |
-| `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 0 |
+| `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 6 |
 | `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 2 |
 | `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 | 0 | 0 |
-| **All** | | **111** | **84** | **14** | **13** | **34** | **25** |
+| **All** | | **111** | **84** | **14** | **13** | **34** | **34** |
 
 ## Reviewed exceptions
 
@@ -42,9 +42,9 @@ reviewed as RLS-free.
 | --- | --- | --- | --- | --- | --- | --- |
 | `dlq_replay` | yes |  |  |  |  |  |
 | `inbox` |  |  |  |  |  |  |
-| `item` | yes | yes | yes |  |  | `uom_catalogue` |
-| `item_site` | yes | yes | yes |  |  | `item` |
-| `item_uom` | yes | yes | yes |  |  | `item`, `uom_catalogue` |
+| `item` | yes | yes | yes | yes |  | `uom_catalogue` |
+| `item_site` | yes | yes | yes | yes |  | `item` |
+| `item_uom` | yes | yes | yes | yes |  | `item`, `uom_catalogue` |
 | `label_printer` | yes | yes |  |  |  |  |
 | `location` | yes | yes |  |  |  | `zone` |
 | `lpn_series` | yes | yes |  |  |  |  |
@@ -136,13 +136,13 @@ Load order: `dlq_replay`, `dock_appointment`, `outbox`, `receipt_damage`, `recei
 | `operator_profile` | yes | yes |  |  |  |  |
 | `outbox` | yes |  |  |  | `id` |  |
 | `outbox_key_sequence` |  |  |  |  |  |  |
-| `ref_item` | yes | yes | yes |  |  |  |
-| `ref_item_gtin` | yes | yes | yes |  |  |  |
-| `ref_item_slotting` | yes | yes | yes |  |  |  |
+| `ref_item` | yes | yes | yes | yes |  |  |
+| `ref_item_gtin` | yes | yes | yes | yes |  |  |
+| `ref_item_slotting` | yes | yes | yes | yes |  |  |
 | `ref_location` | yes | yes |  |  |  |  |
-| `ref_pick_face` | yes | yes | yes |  |  |  |
-| `stock_projection` | yes | yes | yes |  |  |  |
-| `task` | yes | yes | yes |  |  |  |
+| `ref_pick_face` | yes | yes | yes | yes |  |  |
+| `stock_projection` | yes | yes | yes | yes |  |  |
+| `task` | yes | yes | yes | yes |  |  |
 | `task_event` | yes | yes |  |  | `id` | `task` |
 | `task_standard` | yes | yes |  |  |  |  |
 | `zone_equipment` | yes | yes |  |  |  |  |

@@ -13,12 +13,18 @@ public final class ReceivingContracts {
 
     public static final String KIND_ASN = "ASN";
     public static final String KIND_RMA = "RMA";
+    /**
+     * {@code ownerId} of a document whose lines belong to several owners (ADR-0030 C). It is never one of a user's
+     * owners (the session's owner list leaves {@code *} out), so only users unrestricted by owner see such a task.
+     */
+    public static final String SEVERAL_OWNERS = "*";
 
     private ReceivingContracts() {
     }
 
     /**
      * @param kind {@link #KIND_ASN} or {@link #KIND_RMA}
+     * @param ownerId the lines' single owner, {@link #SEVERAL_OWNERS} when they have several, null without lines
      * @param partner vendor ID (ASN) or customer name (RMA), for the RF screen
      * @param lines what is expected; empty for a blind return
      */
