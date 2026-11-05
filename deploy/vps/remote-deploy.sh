@@ -18,6 +18,8 @@ for v in PG_SUPERUSER_PASSWORD DB_OWNER_PASSWORD DB_APP_PASSWORD KC_DB_PASSWORD 
          KAFKA_TASK_PASSWORD KAFKA_OUTBOUND_PASSWORD KAFKA_SAPADAPTER_PASSWORD BACKUP_PASSPHRASE; do
   grep -q "^$v=" .env || { echo "$v=$(openssl rand -hex 24)" >> .env; echo "Generated $v"; }
 done
+# ADR-0030 A: the tenant registry reports first; switch to ENFORCE in .env once every tenant in use is registered.
+grep -q '^TENANT_REGISTRY_MODE=' .env || { echo 'TENANT_REGISTRY_MODE=REPORT' >> .env; echo "Set TENANT_REGISTRY_MODE=REPORT"; }
 # Deployment parameters (not secrets) are refreshed on every run.
 sed -i '/^IMAGE_TAG=/d;/^PUBLIC_URL=/d;/^PUBLIC_PORT=/d;/^PUBLIC_BIND=/d' .env
 printf 'IMAGE_TAG=%s\nPUBLIC_URL=%s\nPUBLIC_PORT=%s\nPUBLIC_BIND=%s\n' "$TAG" "$PUBLIC_URL" "$PUBLIC_PORT" "$PUBLIC_BIND" >> .env
@@ -136,6 +138,21 @@ docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
   if $K get clients -r astrawms -q clientId=astra-mobile --fields id $C | grep -q "[0-9a-f-]\{36\}"; then rc=0;
   else $K create clients -r astrawms -f /tmp/astra-mobile.json $C; rc=$?; fi
   rm -f /tmp/kcadm.cfg /tmp/astra-mobile.json; exit $rc' || { echo "FAILED: could not create the astra-mobile client" >&2; exit 1; }
+
+# ADR-0030 A: the PLATFORM_ADMIN role, and the provisioner's audience and role so the provisioning scripts can register
+# tenants through the platform API (realms imported before this release lack them).
+docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
+  K=/opt/keycloak/bin/kcadm.sh; C="--config /tmp/kcadm.cfg"
+  $K config credentials --server http://localhost:8080 --realm master --user admin --password "$KCPW" $C >/dev/null 2>&1 &&
+  { $K get roles/PLATFORM_ADMIN -r astrawms $C >/dev/null 2>&1 ||
+    $K create roles -r astrawms -s name=PLATFORM_ADMIN -s "description=Operator: manages the tenant registry (ADR-0030)" $C; } &&
+  $K add-roles -r astrawms --uusername service-account-astra-provisioner --rolename PLATFORM_ADMIN $C &&
+  id=$($K get clients -r astrawms -q clientId=astra-provisioner --fields id $C | grep -o "[0-9a-f-]\{36\}") &&
+  { $K get clients/$id/protocol-mappers/models -r astrawms $C | grep -q "audience astrawms-api" ||
+    $K create clients/$id/protocol-mappers/models -r astrawms -s "name=audience astrawms-api" -s protocol=openid-connect \
+      -s protocolMapper=oidc-audience-mapper -s "config.\"included.custom.audience\"=astrawms-api" \
+      -s "config.\"access.token.claim\"=true" -s "config.\"id.token.claim\"=false" $C; }
+  rc=$?; rm -f /tmp/kcadm.cfg; exit $rc' || { echo "FAILED: could not set up PLATFORM_ADMIN for the provisioner" >&2; exit 1; }
 
 say "Stage 3: gateway, then the services one at a time"
 dc up -d gateway

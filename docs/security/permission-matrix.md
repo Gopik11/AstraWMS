@@ -163,6 +163,12 @@ Generated from the source by `scripts/permission_matrix.py`; CI fails when it is
 | `/api/v1/items/{ownerId}` | GET | any user of the tenant | MasterDataController |
 | `/api/v1/items/{ownerId}/{itemNo}` | GET | any user of the tenant | MasterDataController |
 | `/api/v1/items/{ownerId}/{itemNo}` | PUT | SOLUTION_ADMIN, ERP_INTEGRATION | MasterDataController |
+| `/api/v1/platform/tenants` | GET | WMS_SERVICE, PLATFORM_ADMIN | PlatformController |
+| `/api/v1/platform/tenants` | POST | PLATFORM_ADMIN | PlatformController |
+| `/api/v1/platform/tenants/{tenantId}` | GET | PLATFORM_ADMIN | PlatformController |
+| `/api/v1/platform/tenants/{tenantId}` | PUT | PLATFORM_ADMIN | PlatformController |
+| `/api/v1/platform/tenants/{tenantId}/history` | GET | PLATFORM_ADMIN | PlatformController |
+| `/api/v1/platform/tenants/{tenantId}/status` | POST | PLATFORM_ADMIN | PlatformController |
 | `/api/v1/sites` | GET | any user of the tenant | MasterDataController |
 | `/api/v1/sites/{siteId}` | GET | any user of the tenant | MasterDataController |
 | `/api/v1/sites/{siteId}` | PUT | SOLUTION_ADMIN | MasterDataController |

@@ -40,7 +40,8 @@ public final class KafkaErrorHandling {
         backOff.setMaxInterval(maxIntervalMs);
         backOff.setMaxElapsedTime(maxElapsedMs);
         DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
-        handler.addNotRetryableExceptions(PoisonMessageException.class, JacksonException.class);
+        handler.addNotRetryableExceptions(PoisonMessageException.class, JacksonException.class,
+                com.astrawms.common.tenancy.TenantNotActiveException.class);
         return handler;
     }
 

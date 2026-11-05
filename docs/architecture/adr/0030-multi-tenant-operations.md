@@ -52,19 +52,39 @@ Each one is independent, and the plan at the end orders them.
   - `SUSPENDED`: sign-in and API refused; background work for the tenant pauses; data kept.
   - `OFFBOARDING`: read-only for the tenant's administrators, for an export.
   - `PURGED`: data deleted, row kept as a tombstone so the id is never reused.
-- **API.** `/api/v1/platform/tenants`, with a new role `PLATFORM_ADMIN`. This role is not tied to a tenant and is
-  held only by the operator's accounts, through a separate client scope that a tenant administrator cannot grant.
-  - Creating a tenant also creates its first administrator in Keycloak, through the provisioner account. This
-    replaces the hand-typed attribute.
-  - Changes publish `TenantChanged` on `wms.masterdata.events.v1`.
-- **Enforcement without a synchronous dependency.**
-  - Every service keeps a `tenant_status` projection from `TenantChanged`. `TenantFilter` refuses unknown tenants
-    with 403 `TENANT_UNKNOWN`, and suspended or purged ones with 403 `TENANT_SUSPENDED`, from a local cache.
-  - It fails closed for an unknown tenant. Before the projection has synchronized at start-up, it answers 503.
-  - Consumers skip, and record, messages of a suspended tenant through `InboxProcessing`. They do not dead-letter
-    them.
-- **Migration.** A migration seeds the registry from the tenant ids in use (`select distinct tenant_id from site`,
-  plus each service's own tables, reconciled by a one-off script), all `ACTIVE`.
+- **API.** `/api/v1/platform/tenants` (master data, behind the gateway), with a new role `PLATFORM_ADMIN`. This role
+  is not tied to a tenant and is held only by the operator's accounts and the provisioner, never granted by a tenant
+  administrator.
+  - Create, read, update (name, plan, time zone, reporting currency), status changes with a required reason, and the
+    status history (who, when, why). Services may read the list; everything else needs `PLATFORM_ADMIN`.
+  - Status changes through the API: ACTIVE ↔ SUSPENDED, either → OFFBOARDING, OFFBOARDING → ACTIVE. PURGED is set only
+    by the purge procedure (D).
+  - The provisioning scripts register their tenant first, with the provisioner's token.
+  - Creating a tenant's first administrator in Keycloak from the API is increment 3 below.
+- **Distribution: a compacted topic, read in memory.** Every change is published as `TenantChanged` on
+  `wms.platform.tenants.v1`, a compacted topic keyed by tenant, so the latest state of every tenant stays on it for
+  good. Every service's `TenantRegistry` reads it from the beginning, without a consumer group, and keeps following
+  it.
+  - This replaces a `tenant_status` table per service. A projection fed by the ordinary events topic would miss
+    tenants created before the topic's retention; the compacted topic does not. It needs no table, migration or
+    service account in the other services.
+  - Kafka ACLs: every service may read and describe the platform topics; master data writes them.
+- **Enforcement.**
+  - `TenantFilter`, once the tenant is known (user or service call): unknown → 403 `TENANT_UNKNOWN`; suspended or
+    purged → 403 `TENANT_SUSPENDED`; offboarding and writing → 403 `TENANT_OFFBOARDING`; registry not read yet →
+    503 `TENANT_REGISTRY_UNAVAILABLE` (fail closed). The platform API binds no tenant and is not checked.
+  - Listeners (`InboxProcessing`): a message of a tenant the registry refuses is not applied. It goes to the
+    dead-letter topic at once (not retried), with the reason in its exception header, and an operator replays it after
+    reactivation with the existing replay tools. Nothing the ERP sent is lost while a tenant is suspended. (Decided
+    instead of skipping and recording, which would lose those messages.)
+  - **Rollout modes.** `astra.tenancy.registry.mode`: `ENFORCE` (the default) or `REPORT`, where would-be refusals
+    are only logged (once per tenant and reason every ten minutes) and counted in `astra_tenant_refusals_total`. The
+    VPS starts in REPORT (`TENANT_REGISTRY_MODE` in `.env`): register what the log names, then switch to ENFORCE.
+    The Operations status shows each service's mode, whether it has read the registry, and tenants per status.
+- **Migration.** Master data V9 creates the registry and registers every tenant master data already holds, `ACTIVE`.
+  It runs as the schema owner, which forced RLS filters like any role, so it lifts the force on the tables it reads
+  for that transaction only. Tenants used only in other services are found by REPORT mode and registered by hand.
+  The seeded tenants are published when master data starts.
 
 ### B. ERP connection per tenant (G2)
 
@@ -297,7 +317,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | Phase | Work | Size | Done when |
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
-| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration, Keycloak provisioning. E: per-tenant quotas, tenant metrics. | L | An unknown or suspended tenant is refused in every service, and its messages are skipped and recorded. One tenant over its quota gets 429 while another continues. The metrics show both. |
+| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2); Keycloak provisioning of a tenant's first administrator (increment 3). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
 | **2. Data-layer owner isolation** | C, table by table, ledger first. Done: every table with `owner_id` (34) has the policy. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |

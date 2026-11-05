@@ -1,7 +1,10 @@
 # Sourced by the smoke tests. Provisions users of a fresh tenant in the local Keycloak (development realm only) and
 # signs them in, the way a customer IdP + SCIM provisioning would in a real environment (NFR-100).
-#   provision <tenant> <username> <role...>   creates the user with tenant_id and realm roles; access scope from
-#                                             SCOPE_SITES / SCOPE_OWNERS / SCOPE_ZONES (default *) and APPROVAL_LIMIT
+#   provision <tenant> <username> <role...>   registers the tenant (once), creates the user with tenant_id and realm
+#                                             roles; access scope from SCOPE_SITES / SCOPE_OWNERS / SCOPE_ZONES
+#                                             (default *) and APPROVAL_LIMIT
+#   register_tenant <tenant>                  registers the tenant in the tenant registry (ADR-0030), once; one that
+#                                             exists already is fine
 #   bearer <username>                         sets AUTH=(-H "Authorization: Bearer <token>")
 
 KC="${KC_URL:-http://localhost:8180}"
@@ -28,9 +31,24 @@ wait_for_keycloak() {
   echo "FAILED: Keycloak realm astrawms not reachable at $REALM" >&2; exit 1
 }
 
+_REGISTERED_TENANTS=" "
+register_tenant() { # register_tenant <tenant>: every service refuses a tenant the registry does not know (ADR-0030)
+  local tenant="$1" code
+  [[ "$_REGISTERED_TENANTS" == *" $tenant "* ]] && return 0
+  # the provisioner holds PLATFORM_ADMIN; the platform API is master data's, behind the gateway
+  code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${GATEWAY_URL:-http://localhost:8080}/api/v1/platform/tenants" \
+    -H "Authorization: Bearer $(_kc_admin_token)" -H "Content-Type: application/json" \
+    -d "{\"tenantId\":\"$tenant\",\"displayName\":\"$tenant\"}")"
+  case "$code" in
+    201|409) _REGISTERED_TENANTS="$_REGISTERED_TENANTS$tenant " ;;
+    *) echo "FAILED: could not register tenant $tenant in the tenant registry (HTTP $code)" >&2; exit 1 ;;
+  esac
+}
+
 provision() { # provision <tenant> <username> <role...>
   local tenant="$1" user="$2"; shift 2
   local admin location id roles
+  register_tenant "$tenant"
   admin="$(_kc_admin_token)"
   location="$(curl -s -D - -o /dev/null -X POST "$KC/admin/realms/astrawms/users" \
     -H "Authorization: Bearer $admin" -H "Content-Type: application/json" \

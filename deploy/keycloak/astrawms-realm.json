@@ -54,6 +54,10 @@
       {
         "name": "WMS_SERVICE",
         "description": "AstraWMS service account (trusted subsystem)"
+      },
+      {
+        "name": "PLATFORM_ADMIN",
+        "description": "Operator: manages the tenant registry (ADR-0030); not tied to a tenant"
       }
     ]
   },
@@ -459,7 +463,20 @@
       "directAccessGrantsEnabled": false,
       "implicitFlowEnabled": false,
       "protocol": "openid-connect",
-      "protocolMappers": []
+      "protocolMappers": [
+        {
+          "name": "audience astrawms-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "astrawms-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
@@ -497,7 +514,10 @@
           "view-users",
           "view-realm"
         ]
-      }
+      },
+      "realmRoles": [
+        "PLATFORM_ADMIN"
+      ]
     }
   ],
   "components": {

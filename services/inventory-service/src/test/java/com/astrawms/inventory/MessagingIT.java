@@ -28,6 +28,8 @@ class MessagingIT extends IntegrationTest {
     JsonMapper json;
     @Autowired
     com.astrawms.common.messaging.MessagingHousekeeping housekeeping;
+    @Autowired
+    com.astrawms.common.tenancy.TenantRegistry registry;
 
     @Test
     void goodsMovementIsRelayedToKafkaInCanonicalEnvelope_IFINV001() throws Exception {
@@ -240,6 +242,44 @@ class MessagingIT extends IntegrationTest {
                 .containsExactly(oldUnpublished);   // never published: must stay for the relay
         assertThat(queryAsTenant(() -> jdbc.sql("select count(*) from inbox where message_id = :id")
                 .param("id", tenant + "-old").query(Integer.class).single())).isZero();
+    }
+
+    /**
+     * ADR-0030 A: a message of a suspended tenant is not applied but dead-lettered at once, for replay after
+     * reactivation; once the tenant is active again its messages are applied.
+     */
+    @Test
+    void messagesOfASuspendedTenantAreDeadLetteredForReplay() throws Exception {
+        kafka.send(com.astrawms.common.contracts.PlatformContracts.TOPIC_TENANTS, tenant + ":tenant", tenantEvent("SUSPENDED", 1)).get();
+        awaitCondition(() -> registry.loaded() && registry.tenant(tenant).map(t -> "SUSPENDED".equals(t.status())).orElse(false));
+        registry.mode(com.astrawms.common.tenancy.TenantRegistry.Mode.ENFORCE);
+        try {
+            kafka.send("wms.masterdata.events.v1", tenant + ":SKU-SUSP", itemEvent(UUID.randomUUID(), "SKU-SUSP", "EA", Instant.now())).get();
+            ConsumerRecord<String, String> dead = awaitRecord("wms.masterdata.events.v1.dlq", tenant + ":SKU-SUSP");
+            assertThat(header(dead, "kafka_dlt-exception-message")).contains("TENANT_SUSPENDED");
+            assertThat(queryAsTenant(() -> jdbc.sql("select count(*) from ref_item where item_no = 'SKU-SUSP'")
+                    .query(Integer.class).single())).isZero();
+
+            kafka.send(com.astrawms.common.contracts.PlatformContracts.TOPIC_TENANTS, tenant + ":tenant", tenantEvent("ACTIVE", 2)).get();
+            awaitCondition(() -> registry.tenant(tenant).map(t -> "ACTIVE".equals(t.status())).orElse(false));
+            kafka.send("wms.masterdata.events.v1", tenant + ":SKU-BACK", itemEvent(UUID.randomUUID(), "SKU-BACK", "EA", Instant.now())).get();
+            awaitCondition(() -> queryAsTenant(() -> jdbc.sql("select count(*) from ref_item where item_no = 'SKU-BACK'")
+                    .query(Integer.class).single()) == 1);
+        } finally {
+            registry.mode(com.astrawms.common.tenancy.TenantRegistry.Mode.REPORT);
+        }
+    }
+
+    private String tenantEvent(String status, long version) {
+        Map<String, Object> payload = Map.of("tenantId", tenant, "displayName", tenant, "status", status, "plan", "STANDARD",
+                "cell", "main", "timeZone", "UTC", "reportingCurrency", "USD", "version", version,
+                "changedAt", Instant.now().toString());
+        Map<String, Object> envelope = Map.ofEntries(
+                Map.entry("messageId", UUID.randomUUID().toString()), Map.entry("messageType", "TenantChanged"),
+                Map.entry("schemaVersion", "1.0"), Map.entry("sourceSystem", "ASTRAWMS"), Map.entry("tenantId", tenant),
+                Map.entry("businessKey", "tenant"), Map.entry("correlationId", "test"), Map.entry("sequence", version),
+                Map.entry("createdAtUtc", Instant.now().toString()), Map.entry("payload", payload));
+        return json.writeValueAsString(envelope);
     }
 
     private String itemEvent(UUID messageId, String itemNo, String baseUom, Instant changedAt) {
