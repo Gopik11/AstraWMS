@@ -20,6 +20,8 @@ It fails (--check) when:
   python3 scripts/tenant_tables.py            # regenerate the map
   python3 scripts/tenant_tables.py --check    # CI
   python3 scripts/tenant_tables.py --rls-free # tenant tables without RLS, one per line (scripts/check-architecture.sh)
+  python3 scripts/tenant_tables.py --plan     # per database: tenant tables and their sequence columns (JSON), which
+                                              # deploy/vps/tenant-data.py must find in a migrated database (TenantDataIT)
 """
 import collections
 import pathlib
@@ -297,6 +299,11 @@ def render(databases):
 
 def main():
     databases = scan()
+    if "--plan" in sys.argv:
+        import json
+        print(json.dumps({db: {name: sorted(t.sequence_columns) for name, t in sorted(tables.items()) if t.tenant}
+                          for db, (_, tables) in databases.items()}, indent=2, sort_keys=True))
+        return
     if "--rls-free" in sys.argv:
         names = {t.name for _, tables in databases.values() for t in tables.values() if t.tenant and not t.rls}
         print("\n".join(sorted(names)))

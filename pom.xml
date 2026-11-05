@@ -27,6 +27,7 @@
         <module>services/task-service</module>
         <module>services/outbound-service</module>
         <module>adapters/sap-adapter</module>
+        <module>platform/ops-tests</module>
     </modules>
 
     <properties>
