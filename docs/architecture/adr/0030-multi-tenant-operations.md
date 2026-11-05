@@ -263,20 +263,30 @@ Each one is independent, and the plan at the end orders them.
 
 - **Quotas in the services.** The gateway does not validate tokens, so a tenant claim it reads could be forged to
   spend another tenant's quota.
-  - `TenantFilter` applies a per-tenant token bucket after token validation, in memory per replica, with the rate
-    from the tenant's plan.
-  - Above the limit it answers 429 `TENANT_RATE_LIMITED` with `Retry-After`.
+  - `TenantFilter` applies a per-tenant token bucket (`TenantQuotas`) after token validation, in memory per replica,
+    with the rate from the tenant's plan in the registry. Plans are configured under `astra.tenancy.quotas.plans`:
+    `STANDARD` 100 requests per second with bursts of 200 (the fallback for a plan not configured), `LARGE` 400 and
+    800.
+  - Above the limit it answers 429 `TENANT_RATE_LIMITED` with `Retry-After` (whole seconds until a token is back).
+  - It counts the tenant's own callers (users, the ERP integration), not the services' calls on their behalf: those
+    belong to a request already counted, and refusing one would break that request halfway.
+  - Modes as for the registry: `ENFORCE` (default) or `REPORT`, which only counts. The VPS starts in REPORT
+    (`TENANT_QUOTA_MODE` in `.env`), so the rates can be set from real traffic before anyone is refused.
   - The per-address limit of the gateway stays as the outer guard.
 - **Relay fair share.** Within a relay partition, a batch takes at most `astra.outbox.tenant-share` (default 50%) of
   its rows from one tenant while other tenants have rows waiting. Order per key is unchanged, because a key never
   spans tenants.
 - **Bulkhead share.** `ServiceClients` lets one tenant hold at most half of a client's concurrent calls, so one
   tenant's slow chain cannot fill the bulkhead.
-- **Visibility.**
-  - The outbox backlog, relay send time, consumer processing time, 429s and downstream calls gain a `tenant` tag.
-  - Cardinality is acceptable up to a few hundred tenants. Above that, only the top N tenants are reported by name
-    and the rest as `other`.
-  - The Operations page shows the platform view to `PLATFORM_ADMIN`.
+- **Visibility (increment 2).**
+  - `astra_tenant_requests_total{tenant}`, `astra_tenant_rate_limited_total{tenant,enforced}` and the outbox backlog
+    per tenant, `astra_outbox_pending_tenant{tenant}` (the 20 largest by name, the rest as `other`).
+  - Only tenants the registry knows are named; anything else is `unregistered`. The tenant comes from a token or a
+    message, and naming any value would let a caller create as many time series as it liked.
+  - Alerts: `TenantRateLimited` (over 100 refusals in 10 minutes) and `TenantRefused` (the registry refuses, or would).
+  - The Operations status shows the quota mode and the plans next to the registry.
+  - Still open (phase 5, with the fair shares): tenant tags on relay send time, consumer processing time and
+    downstream calls, and a platform view for `PLATFORM_ADMIN` on the Operations page.
 
 ### F. Staff who serve several tenants (G6)
 
@@ -317,7 +327,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | Phase | Work | Size | Done when |
 | --- | --- | --- | --- |
 | **0. Guard rails** | G: tenancy rules in CI. D (part): `tenant_tables.py` and the data map. | S | CI fails on a planted table without RLS, and on an unfiltered read of `reservation_compensation` or `webhook_delivery`. The data map is generated and checked. |
-| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2); Keycloak provisioning of a tenant's first administrator (increment 3). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
+| **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2, done); Keycloak provisioning of a tenant's first administrator (increment 3). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
 | **2. Data-layer owner isolation** | C, table by table, ledger first. Done: every table with `owner_id` (34) has the policy. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
 | **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |

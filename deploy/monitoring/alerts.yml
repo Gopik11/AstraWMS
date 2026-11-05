@@ -25,6 +25,20 @@ groups:
           summary: "{{ $labels.service }} dead-lettered messages from {{ $labels.topic }}"
           description: "Open Operations in the web UI: read the error, fix the cause, then replay."
 
+      - alert: TenantRateLimited
+        expr: sum by (service, tenant) (increase(astra_tenant_rate_limited_total[10m])) > 100
+        labels: { severity: warning }
+        annotations:
+          summary: "Tenant {{ $labels.tenant }} is over its request rate on {{ $labels.service }}"
+          description: "ADR-0030 E. With enforced=\"true\" its callers get 429; in REPORT mode they would. Check for a runaway integration, or give the tenant a larger plan (platform API)."
+
+      - alert: TenantRefused
+        expr: sum by (service, reason) (increase(astra_tenant_refusals_total[10m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }} refused (or, in REPORT mode, would refuse) tenants: {{ $labels.reason }}"
+          description: "ADR-0030 A. UNKNOWN: register the tenant (platform API). SUSPENDED: expected while a tenant is suspended; its messages are in the dead-letter topics for replay after reactivation."
+
       - alert: ConsumerLagGrowing
         expr: max by (service, client_id) (kafka_consumer_fetch_manager_records_lag_max) > 1000
         for: 10m
