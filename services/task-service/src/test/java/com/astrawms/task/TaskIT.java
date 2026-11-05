@@ -1116,6 +1116,75 @@ class TaskIT {
 
     // ------------------------------------------------------------------ helpers
 
+    /**
+     * ADR-0030 C: a receive task of a document with several owners is seen only by users unrestricted by owner, and a
+     * scanned return unit must be of an owner the RF user may work (the inbound service takes the call unrestricted).
+     */
+    @Test
+    void receiveTasksOfSeveralOwnersAndBlindReturnsKeepOwnersApart_ADR0030() throws Exception {
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:1800009", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("ASN", "1800009",
+                        com.astrawms.common.contracts.ReceivingContracts.SEVERAL_OWNERS, "V-100", Instant.now(),
+                        List.of(new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.Line("000010", "SKU-1",
+                                new BigDecimal("2"), "EA", null)), 40));
+        send(OutboundContracts.TOPIC_TASK_REQUESTS, com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE,
+                "DC1:9000009", new com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested("RMA", "9000009",
+                        null, "Walk-in", null, List.of(), 40));
+        await(() -> receiveTasks("1800009", "RELEASED") == 1 && receiveTasks("9000009", "RELEASED") == 1);
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-rcv").roles(Roles.RECEIVER).owners("BETA").sign());
+        var acme = TestTokens.bearer(TestTokens.token().tenant(tenant).user("acme-rcv").roles(Roles.RECEIVER).owners("ACME").sign());
+
+        // BETA gets the blind return (no single owner), never the ASN of several owners
+        String rma = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(beta))
+                .andExpect(jsonPath("$.docNo", is("9000009"))).andReturn().getResponse().getContentAsString(), "$.id");
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(acme)).andExpect(status().isNoContent());
+        String unit = """
+                {"scanId":"%s","docNo":"9000009","itemNo":"SKU-1","qty":1,"uom":"EA","ownerId":"%s","conditionGrade":"A",
+                 "locationId":"DOCK-1","checkDigit":"11"}""";
+        receive(beta, rma, unit.formatted("u1", "ACME"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+        assertThat(inbound.calls).isEmpty();
+        receive(beta, rma, unit.formatted("u2", "BETA")).andExpect(status().isOk());
+        assertThat(inbound.calls.getLast().body().get("ownerId")).isEqualTo("BETA");
+        // an unrestricted receiver gets the ASN of several owners
+        mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(TestTokens.as(tenant, "rita", Roles.RECEIVER)))
+                .andExpect(jsonPath("$.docNo", is("1800009")));
+
+        // in the database: BETA's session sees the shared task, not the one of several owners
+        List<String> docs = TenantContext.callAs(new TenantContext.Scope(tenant, "beta", "TEST",
+                        new com.astrawms.common.security.AccessScope(null, java.util.Set.of("BETA"), null, null)),
+                () -> tx.execute(st -> jdbc.sql("select doc_no from task where task_type = 'RECEIVE' order by doc_no")
+                        .query(String.class).list()));
+        assertThat(docs).containsExactly("9000009");
+        List<String> missing = asTenant(() -> jdbc.sql("""
+                        select c.table_name from information_schema.columns c
+                        where c.table_schema = 'public' and c.column_name = 'owner_id'
+                          and not exists (select 1 from pg_policies p where p.schemaname = 'public'
+                                            and p.tablename = c.table_name and p.policyname = 'owner_isolation'
+                                            and p.permissive = 'RESTRICTIVE')""").query(String.class).list());
+        assertThat(missing).isEmpty();
+    }
+
+    /** ADR-0030 C: whether a location can take an LPN depends on everything in it, whoever owns that stock. */
+    @Test
+    void aLocationFullOfAnotherOwnersStockIsFullForAnOwnerScopedOperator() throws Exception {
+        send(InventoryContracts.TOPIC, InventoryChanged.TYPE, "DC1:SKU-B", new InventoryChanged(UUID.randomUUID(), "W1", "TEST",
+                "BETA", "SKU-B", List.of(new InventoryChanged.Line("RECEIPT", "", "LPN-B", "A-01", "AVAILABLE",
+                new BigDecimal("5"), new BigDecimal("5"))), Instant.now()));
+        await(() -> asTenant(() -> jdbc.sql("select count(*) from stock_projection where lpn_id = 'LPN-B'")
+                .query(Integer.class).single()) == 1);
+        received("LPN-1", "SKU-1");
+        awaitTask("LPN-1", "RELEASED");
+        var acme = TestTokens.bearer(TestTokens.token().tenant(tenant).user("acme-op").roles(Roles.RECEIVER).owners("ACME").sign());
+        String id = JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/tasks/next").with(acme))
+                .andExpect(jsonPath("$.targetLocation", is("A-02"))).andReturn().getResponse().getContentAsString(), "$.id");
+        // A-01 holds BETA's LPN, which this operator cannot see: it is still full
+        mvc.perform(post("/api/v1/sites/DC1/tasks/" + id + "/confirm").with(acme).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"lpnId\":\"LPN-1\",\"locationId\":\"A-01\",\"checkDigit\":\"33\",\"overrideReason\":\"LOCATION_FULL\"}"))
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.code", is("TSK_LOCATION_FULL")));
+    }
+
     private void received(String lpn, String item) throws Exception {
         stockEvent(UUID.randomUUID(), item, "RECEIPT", lpn, "DOCK-1", "10", "10");
     }

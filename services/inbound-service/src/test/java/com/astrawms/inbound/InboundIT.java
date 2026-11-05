@@ -382,6 +382,11 @@ class InboundIT {
                         new com.astrawms.common.security.AccessScope(null, java.util.Set.of("BETA"), null, null)),
                 () -> tx.execute(s -> jdbc.sql("select distinct owner_id from receipt_expectation_line").query(String.class).list()));
         assertThat(owners).containsExactly("BETA");
+        // the RF receive task of the mixed receipt belongs to several owners, so no owner-scoped receiver gets it
+        List<String> taskOwners = outbox(com.astrawms.common.contracts.ReceivingContracts.ReceiveRequested.TYPE).stream()
+                .map(e -> e.get("payload")).filter(pl -> mixed.equals(pl.get("docNo").asString()) || betaOnly.equals(pl.get("docNo").asString()))
+                .map(pl -> pl.get("docNo").asString() + "=" + pl.get("ownerId").asString()).sorted().toList();
+        assertThat(taskOwners).containsExactly(mixed + "=*", betaOnly + "=BETA");
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + mixed).with(beta)).andExpect(status().isNotFound());
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + betaOnly).with(beta)).andExpect(status().isOk());
         mvc.perform(get("/api/v1/sites/DC1/receipts").with(beta))

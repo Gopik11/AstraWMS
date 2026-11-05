@@ -1,6 +1,5 @@
 package com.astrawms.outbound.api;
 
-import com.astrawms.common.security.AccessScope;
 import com.astrawms.outbound.service.OrderScope;
 import com.astrawms.outbound.service.OutboundService;
 import com.astrawms.outbound.service.ReleasePolicy;
@@ -100,7 +99,6 @@ public class WaveController {
     @PutMapping("/owner-policies/{ownerId}")
     public Map<String, Object> putOwnerPolicy(@PathVariable String siteId, @PathVariable String ownerId,
                                               @RequestBody OwnerPolicyRequest body) {
-        AccessScope.current().requireOwner(ownerId);
         return policy.putOwnerPolicy(ownerId, body.shipComplete(), body.packList(), body.labelTemplate());
     }
 

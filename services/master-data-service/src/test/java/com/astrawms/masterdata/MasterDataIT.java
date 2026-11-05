@@ -177,6 +177,39 @@ class MasterDataIT {
                 .andExpect(status().isOk());
     }
 
+    /** ADR-0030 C: owner isolation on the item master, in the endpoints and in the database. */
+    @Test
+    void itemsAreOwnerIsolated() throws Exception {
+        call(put("/api/v1/items/ACME/SKU-8"), ITEM.formatted("036000291452")).andExpect(status().isOk());
+        call(put("/api/v1/items/BETA/SKU-8"), ITEM.formatted("036000291452")).andExpect(status().isOk());  // GTIN per owner
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-admin").roles(Roles.SOLUTION_ADMIN)
+                .owners("BETA").sign());
+        mvc.perform(get("/api/v1/items/ACME/SKU-8").with(beta))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+        mvc.perform(get("/api/v1/items/ACME").with(beta)).andExpect(status().isForbidden());
+        mvc.perform(put("/api/v1/items/ACME/SKU-8").with(beta).contentType(MediaType.APPLICATION_JSON)
+                .content(ITEM.formatted("036000291452"))).andExpect(status().isForbidden());
+        mvc.perform(get("/api/v1/items/BETA/SKU-8").with(beta)).andExpect(status().isOk());
+        // item labels name the owner in the body, not the path
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/api/v1/sites/DC1/labels/items")
+                        .with(beta).contentType(MediaType.APPLICATION_JSON).content("{\"ownerId\":\"ACME\",\"itemNos\":[\"SKU-8\"]}"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+
+        java.util.function.Function<java.util.Set<String>, List<String>> ownersSeen = owners -> TenantContext.callAs(
+                new TenantContext.Scope(tenant, "scoped", "TEST", new com.astrawms.common.security.AccessScope(null, owners, null, null)),
+                () -> tx.execute(st -> jdbc.sql("select distinct owner_id from item_uom order by 1").query(String.class).list()));
+        assertThat(ownersSeen.apply(java.util.Set.of("BETA"))).containsExactly("BETA");
+        assertThat(ownersSeen.apply(java.util.Set.of())).isEmpty();
+        List<String> missing = TenantContext.callAs(new TenantContext.Scope(tenant, "test", "TEST"), () -> tx.execute(st ->
+                jdbc.sql("""
+                        select c.table_name from information_schema.columns c
+                        where c.table_schema = 'public' and c.column_name = 'owner_id'
+                          and not exists (select 1 from pg_policies p where p.schemaname = 'public'
+                                            and p.tablename = c.table_name and p.policyname = 'owner_isolation'
+                                            and p.permissive = 'RESTRICTIVE')""").query(String.class).list()));
+        assertThat(missing).isEmpty();
+    }
+
     @Test
     void standardCostIsStoredAndPublished() throws Exception {
         call(put("/api/v1/items/ACME/SKU-COST"), ITEM.formatted("036000291452").replace("\"status\":\"ACTIVE\",",

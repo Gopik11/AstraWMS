@@ -1,5 +1,6 @@
 package com.astrawms.masterdata.api;
 
+import com.astrawms.common.security.AccessScope;
 import com.astrawms.masterdata.service.LabelService;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,10 @@ public class LabelController {
     @PreAuthorize("hasAnyRole('SOLUTION_ADMIN','SUPERVISOR','INV_MANAGER','INV_ANALYST','RECEIVER')")
     @PostMapping("/items")
     public LabelService.Labels items(@PathVariable String siteId, @RequestBody LabelService.ItemLabelRequest body) {
+        // the owner comes in the body, which the {ownerId} path check (PathScopeInterceptor) does not see
+        if (body.ownerId() != null) {
+            AccessScope.current().requireOwner(body.ownerId());
+        }
         return labels.items(body, siteId);
     }
 
