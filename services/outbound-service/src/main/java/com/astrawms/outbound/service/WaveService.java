@@ -1,6 +1,7 @@
 package com.astrawms.outbound.service;
 
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import jakarta.validation.constraints.Positive;
@@ -205,7 +206,9 @@ public class WaveService {
 
     private WavePlan select(String siteId, WaveCriteria c, boolean lock) {
         WaveCriteria criteria = resolve(c);
-        List<PlannedOrder> pool = jdbc.sql("""
+        // all-owners: an order joins a scoped user's wave only when no line belongs to another owner, so the filter
+        // must see those lines (with owner RLS they are hidden); only orders wholly in scope come back
+        List<PlannedOrder> pool = OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select o.erp_doc_no, o.order_type, o.carrier_scac, o.planned_gi_utc,
                                (select count(*) from outbound_line l where l.order_id = o.id) as lines,
                                o.cutoff_at, o.priority, o.ship_complete
@@ -227,7 +230,7 @@ public class WaveService {
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(), rs.getInt(5),
                         rs.getTimestamp(6) == null ? null : rs.getTimestamp(6).toInstant(), rs.getInt(7),
                         rs.getBoolean(8)))
-                .list();
+                .list());
         List<PlannedOrder> selected = new java.util.ArrayList<>();
         int lines = 0;
         for (PlannedOrder o : pool) {

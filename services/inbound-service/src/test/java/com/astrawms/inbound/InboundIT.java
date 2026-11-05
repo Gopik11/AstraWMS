@@ -364,6 +364,48 @@ class InboundIT {
         mvc.perform(get("/api/v1/sites/DC1/receipts/" + DOC).with(acme)).andExpect(status().isOk());
     }
 
+    /**
+     * ADR-0030 C: owner RLS on the expectation lines. A receipt with a line of another owner stays invisible to an
+     * owner-scoped user although the database shows that user its own line: the rule sees every owner's lines.
+     */
+    @Test
+    void aReceiptWithALineOfAnotherOwnerStaysInvisibleUnderOwnerRls() throws Exception {
+        String mixed = "18" + (System.nanoTime() % 100_000_000L);
+        String betaOnly = "19" + (System.nanoTime() % 100_000_000L);
+        expectationOf(mixed, "ACME", "BETA");
+        expectationOf(betaOnly, "BETA");
+        await(() -> expectationStatus(mixed) != null && expectationStatus(betaOnly) != null);
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-clerk").roles(Roles.RECEIVER)
+                .owners("BETA").sign());
+
+        List<String> owners = TenantContext.callAs(new TenantContext.Scope(tenant, "beta", "TEST",
+                        new com.astrawms.common.security.AccessScope(null, java.util.Set.of("BETA"), null, null)),
+                () -> tx.execute(s -> jdbc.sql("select distinct owner_id from receipt_expectation_line").query(String.class).list()));
+        assertThat(owners).containsExactly("BETA");
+        mvc.perform(get("/api/v1/sites/DC1/receipts/" + mixed).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/sites/DC1/receipts/" + betaOnly).with(beta)).andExpect(status().isOk());
+        mvc.perform(get("/api/v1/sites/DC1/receipts").with(beta))
+                .andExpect(jsonPath("$[*].erpDocNo", org.hamcrest.Matchers.contains(betaOnly)));
+        List<String> missing = asTenant(() -> jdbc.sql("""
+                        select c.table_name from information_schema.columns c
+                        where c.table_schema = 'public' and c.column_name = 'owner_id'
+                          and not exists (select 1 from pg_policies p where p.schemaname = 'public'
+                                            and p.tablename = c.table_name and p.policyname = 'owner_isolation'
+                                            and p.permissive = 'RESTRICTIVE')""").query(String.class).list());
+        assertThat(missing).isEmpty();
+    }
+
+    private void expectationOf(String doc, String... owners) throws Exception {
+        List<ReceiptExpectation.Line> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < owners.length; i++) {
+            lines.add(new ReceiptExpectation.Line("0000%d0".formatted(i + 1), owners[i], "SKU-1", new BigDecimal("2"), "EA",
+                    null, null, null, "AVAILABLE", null, null));
+        }
+        send(IntegrationContracts.TOPIC_RECEIPT_EXPECTATIONS, ReceiptExpectation.TYPE, "SAP_S4_DEV_100",
+                new ReceiptExpectation(doc, "VENDOR_ASN", "CREATE", 1, "IDOC-" + doc, "V-100", null, null, "UPSN",
+                        Instant.now(), null, null, null, null, lines, List.of(), Instant.now()));
+    }
+
     // ------------------------------------------------------------------ ADR-0023 transfers started in the WMS
 
     @Test

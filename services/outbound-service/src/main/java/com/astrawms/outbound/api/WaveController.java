@@ -1,5 +1,7 @@
 package com.astrawms.outbound.api;
 
+import com.astrawms.common.security.AccessScope;
+import com.astrawms.outbound.service.OrderScope;
 import com.astrawms.outbound.service.OutboundService;
 import com.astrawms.outbound.service.ReleasePolicy;
 import com.astrawms.outbound.service.WaveService;
@@ -31,11 +33,13 @@ public class WaveController {
     private final WaveService waves;
     private final OutboundService outbound;
     private final ReleasePolicy policy;
+    private final OrderScope scope;
 
-    public WaveController(WaveService waves, OutboundService outbound, ReleasePolicy policy) {
+    public WaveController(WaveService waves, OutboundService outbound, ReleasePolicy policy, OrderScope scope) {
         this.waves = waves;
         this.outbound = outbound;
         this.policy = policy;
+        this.scope = scope;
     }
 
     /** Any field may be omitted to keep its current value. */
@@ -96,6 +100,7 @@ public class WaveController {
     @PutMapping("/owner-policies/{ownerId}")
     public Map<String, Object> putOwnerPolicy(@PathVariable String siteId, @PathVariable String ownerId,
                                               @RequestBody OwnerPolicyRequest body) {
+        AccessScope.current().requireOwner(ownerId);
         return policy.putOwnerPolicy(ownerId, body.shipComplete(), body.packList(), body.labelTemplate());
     }
 
@@ -118,6 +123,7 @@ public class WaveController {
     @PutMapping("/orders/{erpDocNo}/policy")
     public Map<String, Object> orderPolicy(@PathVariable String siteId, @PathVariable String erpDocNo,
                                            @RequestBody OrderPolicyRequest body) {
+        scope.require(siteId, erpDocNo);
         return outbound.setOrderPolicy(siteId, erpDocNo, body.priority(), body.shipComplete(), body.criticality(),
                 body.distanceKm());
     }
@@ -139,6 +145,7 @@ public class WaveController {
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/waves/{waveNo}/release")
     public Map<String, Object> release(@PathVariable String siteId, @PathVariable String waveNo) {
+        scope.requireWave(siteId, waveNo);
         return waves.release(siteId, waveNo);
     }
 
@@ -146,12 +153,14 @@ public class WaveController {
     @PostMapping("/waves/{waveNo}/hold")
     public Map<String, Object> hold(@PathVariable String siteId, @PathVariable String waveNo,
                                     @RequestBody(required = false) HoldRequest body) {
+        scope.requireWave(siteId, waveNo);
         return waves.hold(siteId, waveNo, true, body == null ? null : body.reason());
     }
 
     @PreAuthorize("hasRole('SUPERVISOR')")
     @PostMapping("/waves/{waveNo}/unhold")
     public Map<String, Object> unhold(@PathVariable String siteId, @PathVariable String waveNo) {
+        scope.requireWave(siteId, waveNo);
         return waves.hold(siteId, waveNo, false, null);
     }
 
@@ -167,11 +176,12 @@ public class WaveController {
 
     @GetMapping("/waves")
     public List<Map<String, Object>> list(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return waves.list(siteId, status);
+        return scope.filterWaves(siteId, waves.list(siteId, status), w -> (String) w.get("wave_no"));
     }
 
     @GetMapping("/waves/{waveNo}")
     public Map<String, Object> detail(@PathVariable String siteId, @PathVariable String waveNo) {
+        scope.requireWave(siteId, waveNo);
         return waves.detail(siteId, waveNo);
     }
 }

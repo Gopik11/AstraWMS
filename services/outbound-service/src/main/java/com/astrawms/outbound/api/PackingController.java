@@ -71,12 +71,14 @@ public class PackingController {
 
     @GetMapping("/cartons/{sscc}")
     public Map<String, Object> carton(@PathVariable String siteId, @PathVariable String sscc) {
+        scope.requireCarton(siteId, sscc);
         return packing.carton(siteId, sscc);
     }
 
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")
     @PostMapping("/cartons/{sscc}/items")
     public Map<String, Object> pack(@PathVariable String siteId, @PathVariable String sscc, @Valid @RequestBody PackRequest body) {
+        scope.requireCarton(siteId, sscc);
         return packing.pack(siteId, sscc, body.erpLineRef(), body.qty());
     }
 
@@ -84,16 +86,18 @@ public class PackingController {
     @PostMapping("/cartons/{sscc}/close")
     public Map<String, Object> closeCarton(@PathVariable String siteId, @PathVariable String sscc,
                                            @Valid @RequestBody(required = false) CloseCartonRequest body) {
+        scope.requireCarton(siteId, sscc);
         return packing.close(siteId, sscc, body == null ? null : body.weightKg());
     }
 
     @GetMapping("/loads")
     public List<Map<String, Object>> loads(@PathVariable String siteId, @RequestParam(required = false) String status) {
-        return loads.list(siteId, status);
+        return scope.filterLoads(siteId, loads.list(siteId, status), l -> (String) l.get("load_no"));
     }
 
     @GetMapping("/loads/{loadNo}")
     public Map<String, Object> load(@PathVariable String siteId, @PathVariable String loadNo) {
+        scope.requireLoad(siteId, loadNo);
         return loads.detail(siteId, loadNo);
     }
 
@@ -107,8 +111,12 @@ public class PackingController {
     @PreAuthorize("hasAnyRole('PICKER','SUPERVISOR')")
     @PostMapping("/loads/{loadNo}/orders")
     public Map<String, Object> loadOrder(@PathVariable String siteId, @PathVariable String loadNo, @RequestBody LoadOrderRequest body) {
+        scope.requireLoad(siteId, loadNo);
         if (body.erpDocNo() != null && !body.erpDocNo().isBlank()) {
             scope.require(siteId, body.erpDocNo());
+        }
+        if (body.sscc() != null && !body.sscc().isBlank()) {
+            scope.requireCarton(siteId, body.sscc());
         }
         return loads.addOrder(siteId, loadNo, body.erpDocNo(), body.sscc());
     }
@@ -116,6 +124,7 @@ public class PackingController {
     @PreAuthorize("hasRole('SUPERVISOR')")
     @DeleteMapping("/loads/{loadNo}/orders/{erpDocNo}")
     public Map<String, Object> unloadOrder(@PathVariable String siteId, @PathVariable String loadNo, @PathVariable String erpDocNo) {
+        scope.requireLoad(siteId, loadNo);
         return loads.removeOrder(siteId, loadNo, erpDocNo);
     }
 
@@ -126,6 +135,7 @@ public class PackingController {
     @PreAuthorize("hasAnyRole('SUPERVISOR','ERP_INTEGRATION')")
     @PostMapping("/loads/{loadNo}/tracking")
     public Map<String, Object> track(@PathVariable String siteId, @PathVariable String loadNo, @RequestBody TrackingRequest body) {
+        scope.requireLoad(siteId, loadNo);
         return loads.track(siteId, loadNo, body.status(), body.trackingNo(), body.detail());
     }
 
@@ -133,6 +143,7 @@ public class PackingController {
     @PostMapping("/loads/{loadNo}/close")
     public Map<String, Object> closeLoad(@PathVariable String siteId, @PathVariable String loadNo,
                                          @RequestBody(required = false) CloseLoadRequest body) {
+        scope.requireLoad(siteId, loadNo);
         return loads.close(siteId, loadNo, body == null ? null : body.sealNo());
     }
 }

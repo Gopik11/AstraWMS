@@ -190,6 +190,45 @@ class ReturnsIT {
         mvc.perform(get("/api/v1/sites/DC1/returns/" + rma).with(receiver())).andExpect(jsonPath("$.status", is("CLOSED")));
     }
 
+    /**
+     * ADR-0030 C: owner RLS on return lines and units. A return is worked only when its lines and its units all belong to
+     * the user's owners, checked across owners; units count because a blind return has no expected lines.
+     */
+    @Test
+    void returnsHoldingAnotherOwnersLinesOrUnitsAreInvisibleUnderOwnerRls() throws Exception {
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-clerk").roles(Roles.RECEIVER)
+                .owners("BETA").sign());
+        // a blind return with one ACME unit: no lines at all, so only the units say whose it is
+        String blind = com.jayway.jsonpath.JsonPath.read(mvc.perform(post("/api/v1/sites/DC1/returns").with(receiver())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"customerName\":\"Walk-in\"}"))
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.rma_no");
+        rma = blind;
+        unit("b-1", """
+                {"itemNo":"SKU-1","ownerId":"ACME","qty":1,"uom":"EA","conditionGrade":"C","locationId":"RET-01"}""", receiver())
+                .andExpect(status().isCreated());
+        mvc.perform(get("/api/v1/sites/DC1/returns/" + blind).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(post("/api/v1/sites/DC1/returns/" + blind + "/close").with(beta)).andExpect(status().isNotFound());
+        unit("b-2", """
+                {"itemNo":"SKU-1","ownerId":"BETA","qty":1,"uom":"EA","conditionGrade":"C","locationId":"RET-01"}""", beta)
+                .andExpect(status().isNotFound());
+        assertThat(rmaStatus()).isNotEqualTo("CLOSED");
+
+        // an RMA with an ACME and a BETA line
+        rma = "07" + (System.nanoTime() % 100_000_000L);
+        send(ReturnsContracts.TOPIC_RETURN_EXPECTATIONS, ReturnExpectation.TYPE, new ReturnExpectation(rma, "CREATE", 1,
+                "IDOC-R2", "CUSTOMER", null, new ReturnExpectation.Customer("C-1", "Customer One"), Instant.now(), List.of(),
+                List.of(new ReturnExpectation.Line("000010", "ACME", "SKU-1", new BigDecimal("1"), "EA", "DEFECTIVE", null, false),
+                        new ReturnExpectation.Line("000020", "BETA", "SKU-1", new BigDecimal("1"), "EA", "DEFECTIVE", null, false)),
+                Instant.now()));
+        await(() -> rmaStatus() != null);
+        mvc.perform(get("/api/v1/sites/DC1/returns/" + rma).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/sites/DC1/returns").with(beta))
+                .andExpect(jsonPath("$[*].rma_no", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItems(rma, blind))));
+        // an unrestricted user still sees and closes them
+        mvc.perform(get("/api/v1/sites/DC1/returns/" + rma).with(receiver())).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/sites/DC1/returns/" + blind + "/close").with(receiver())).andExpect(status().isOk());
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private String rmaStatus() {
