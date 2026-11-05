@@ -20,6 +20,7 @@ for v in PG_SUPERUSER_PASSWORD DB_OWNER_PASSWORD DB_APP_PASSWORD KC_DB_PASSWORD 
 done
 # ADR-0030 A: the tenant registry reports first; switch to ENFORCE in .env once every tenant in use is registered.
 grep -q '^TENANT_REGISTRY_MODE=' .env || { echo 'TENANT_REGISTRY_MODE=REPORT' >> .env; echo "Set TENANT_REGISTRY_MODE=REPORT"; }
+grep -q '^TENANT_QUOTA_MODE=' .env || { echo 'TENANT_QUOTA_MODE=REPORT' >> .env; echo "Set TENANT_QUOTA_MODE=REPORT"; }
 # Deployment parameters (not secrets) are refreshed on every run.
 sed -i '/^IMAGE_TAG=/d;/^PUBLIC_URL=/d;/^PUBLIC_PORT=/d;/^PUBLIC_BIND=/d' .env
 printf 'IMAGE_TAG=%s\nPUBLIC_URL=%s\nPUBLIC_PORT=%s\nPUBLIC_BIND=%s\n' "$TAG" "$PUBLIC_URL" "$PUBLIC_PORT" "$PUBLIC_BIND" >> .env

@@ -45,6 +45,7 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @AutoConfiguration(afterName = "org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration")
 @EnableScheduling
+@org.springframework.boot.context.properties.EnableConfigurationProperties(com.astrawms.common.tenancy.TenantQuotaProperties.class)
 public class AstraCommonAutoConfiguration {
 
     @Bean
@@ -102,6 +103,21 @@ public class AstraCommonAutoConfiguration {
             ConsumerFactory<?, ?> consumers, JsonMapper json, @Value("${spring.application.name:service}") String service,
             @Value("${astra.tenancy.registry.mode:ENFORCE}") com.astrawms.common.tenancy.TenantRegistry.Mode mode) {
         return new com.astrawms.common.tenancy.TenantRegistry(consumers, json, service, mode);
+    }
+
+    @Bean
+    com.astrawms.common.tenancy.TenantTags astraTenantTags(
+            org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry) {
+        return new com.astrawms.common.tenancy.TenantTags(registry.getIfAvailable());
+    }
+
+    /** Per-tenant request quotas by plan (ADR-0030 E); only where the tenant registry, which knows the plans, exists. */
+    @Bean
+    @ConditionalOnBean(com.astrawms.common.tenancy.TenantRegistry.class)
+    @ConditionalOnMissingBean
+    com.astrawms.common.tenancy.TenantQuotas astraTenantQuotas(com.astrawms.common.tenancy.TenantQuotaProperties properties,
+                                                               com.astrawms.common.tenancy.TenantTags tags) {
+        return new com.astrawms.common.tenancy.TenantQuotas(properties, tags);
     }
 
     @Bean
@@ -173,13 +189,15 @@ public class AstraCommonAutoConfiguration {
     @ConditionalOnBean(DeadLetters.class)
     OpsController astraOpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
                                      ObjectProvider<OutboxRelay> relay,
-                                     ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry) {
-        return new OpsController(deadLetters, jdbc, clock, relay.getIfAvailable(), registry.getIfAvailable());
+                                     ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry,
+                                     ObjectProvider<com.astrawms.common.tenancy.TenantQuotas> quotas) {
+        return new OpsController(deadLetters, jdbc, clock, relay.getIfAvailable(), registry.getIfAvailable(),
+                quotas.getIfAvailable());
     }
 
     @Bean
     @ConditionalOnClass(name = "io.micrometer.core.instrument.binder.MeterBinder")
-    MessagingMetrics astraMessagingMetrics(JdbcClient jdbc, Clock clock) {
-        return new MessagingMetrics(jdbc, clock);
+    MessagingMetrics astraMessagingMetrics(JdbcClient jdbc, Clock clock, com.astrawms.common.tenancy.TenantTags tags) {
+        return new MessagingMetrics(jdbc, clock, tags);
     }
 }

@@ -56,6 +56,8 @@ class PlatformIT {
     @Autowired
     TenantDirectory directory;
     @Autowired
+    com.astrawms.common.tenancy.TenantQuotas quotas;
+    @Autowired
     JdbcClient jdbc;
     @Autowired
     TransactionTemplate tx;
@@ -153,6 +155,36 @@ class PlatformIT {
         call(get("/api/v1/ops/status"), userOf(tenant), null)
                 .andExpect(jsonPath("$.tenantRegistry.mode", is("ENFORCE")))
                 .andExpect(jsonPath("$.tenantRegistry.loaded", is(true)));
+    }
+
+    /** ADR-0030 E: one tenant over its plan's rate is refused; another tenant and the services' calls continue. */
+    @Test
+    void aTenantOverItsRateIsRefusedWhileOthersAndServiceCallsContinue() throws Exception {
+        String other = "t-" + UUID.randomUUID().toString().substring(0, 8);
+        registry.apply(new TenantChanged(tenant, tenant, "ACTIVE", "TINY", "main", "UTC", "USD", 1, Instant.now()));
+        registry.apply(new TenantChanged(other, other, "ACTIVE", "STANDARD", "main", "UTC", "USD", 1, Instant.now()));
+        quotas.plan("TINY", 0.01, 2);            // two requests, then one per 100 s
+        quotas.mode(TenantRegistry.Mode.ENFORCE);
+        try {
+            call(get("/api/v1/items/ACME"), userOf(tenant), null).andExpect(status().isOk());
+            call(get("/api/v1/items/ACME"), userOf(tenant), null).andExpect(status().isOk());
+            call(get("/api/v1/items/ACME"), userOf(tenant), null)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(jsonPath("$.code", is("TENANT_RATE_LIMITED")))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                            .string("Retry-After", org.hamcrest.Matchers.matchesPattern("[0-9]+")));
+            call(get("/api/v1/items/ACME"), userOf(other), null).andExpect(status().isOk());
+            // a service acting for the tenant is part of a request already counted
+            mvc.perform(get("/api/v1/items/ACME").with(TestTokens.service("astra-task")).header("X-Tenant-Id", tenant))
+                    .andExpect(status().isOk());
+            call(get("/api/v1/ops/status"), userOf(other), null)
+                    .andExpect(jsonPath("$.tenantQuotas.mode", is("ENFORCE")))
+                    .andExpect(jsonPath("$.tenantQuotas.plans.TINY.burst", is(2)));
+            quotas.mode(TenantRegistry.Mode.REPORT);
+            call(get("/api/v1/items/ACME"), userOf(tenant), null).andExpect(status().isOk());
+        } finally {
+            quotas.mode(TenantRegistry.Mode.REPORT);
+        }
     }
 
     @Test

@@ -101,7 +101,8 @@ public class AstraSecurityAutoConfiguration {
     @Bean
     SecurityFilterChain astraSecurityFilterChain(HttpSecurity http, AstraJwtAuthenticationConverter converter,
                                                  AstraSecurityProperties properties,
-                                                 org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry)
+                                                 org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantRegistry> registry,
+                                                 org.springframework.beans.factory.ObjectProvider<com.astrawms.common.tenancy.TenantQuotas> quotas)
             throws Exception {
         AuthenticationEntryPoint unauthenticated = unauthenticated();
         AccessDeniedHandler forbidden = (request, response, e) -> Problems.write(response, HttpStatus.FORBIDDEN,
@@ -122,7 +123,8 @@ public class AstraSecurityAutoConfiguration {
                         .authenticationEntryPoint(unauthenticated)
                         .accessDeniedHandler(forbidden))
                 .exceptionHandling(ex -> ex.authenticationEntryPoint(unauthenticated).accessDeniedHandler(forbidden))
-                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant(), converter, registry.getIfAvailable()),
+                .addFilterAfter(new TenantFilter(properties.getClaims().getTenant(), converter, registry.getIfAvailable(),
+                                quotas.getIfAvailable()),
                         BearerTokenAuthenticationFilter.class);
         return http.build();
     }

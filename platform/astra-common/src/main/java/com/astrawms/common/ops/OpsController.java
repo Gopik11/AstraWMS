@@ -28,19 +28,22 @@ public class OpsController {
     private final Clock clock;
     private final com.astrawms.common.messaging.OutboxRelay relay;
     private final com.astrawms.common.tenancy.TenantRegistry registry;
+    private final com.astrawms.common.tenancy.TenantQuotas quotas;
 
     public OpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
                          com.astrawms.common.messaging.OutboxRelay relay) {
-        this(deadLetters, jdbc, clock, relay, null);
+        this(deadLetters, jdbc, clock, relay, null, null);
     }
 
     public OpsController(DeadLetters deadLetters, JdbcClient jdbc, Clock clock,
-                         com.astrawms.common.messaging.OutboxRelay relay, com.astrawms.common.tenancy.TenantRegistry registry) {
+                         com.astrawms.common.messaging.OutboxRelay relay, com.astrawms.common.tenancy.TenantRegistry registry,
+                         com.astrawms.common.tenancy.TenantQuotas quotas) {
         this.deadLetters = deadLetters;
         this.jdbc = jdbc;
         this.clock = clock;
         this.relay = relay;
         this.registry = registry;
+        this.quotas = quotas;
     }
 
     /** {@code force} and {@code reason}: only for a dead letter older than the inbox retention (ADR-0029). */
@@ -68,6 +71,8 @@ public class OpsController {
         out.put("relayEnabled", relay != null);
         // ADR-0030 A: whether this service enforces the tenant registry, has read it, and how many tenants per status
         out.put("tenantRegistry", registry == null ? Map.of("mode", "NONE") : registry.snapshot());
+        // ADR-0030 E: whether per-tenant quotas are enforced, and each plan's rate (per replica)
+        out.put("tenantQuotas", quotas == null ? Map.of("mode", "NONE") : quotas.snapshot());
         out.put("at", clock.instant());
         return out;
     }

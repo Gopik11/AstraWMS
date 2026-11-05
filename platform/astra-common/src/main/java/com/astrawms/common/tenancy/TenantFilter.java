@@ -47,16 +47,27 @@ public class TenantFilter extends OncePerRequestFilter {
     private final String tenantClaim;
     private final AstraJwtAuthenticationConverter converter;
     private final TenantRegistry registry;
+    private final TenantQuotas quotas;
 
     public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter) {
-        this(tenantClaim, converter, null);
+        this(tenantClaim, converter, null, null);
     }
 
-    /** @param registry the tenant registry; null where none is configured (no Kafka), then tenants are not checked */
     public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter, TenantRegistry registry) {
+        this(tenantClaim, converter, registry, null);
+    }
+
+    /**
+     * @param registry the tenant registry; null where none is configured (no Kafka), then tenants are not checked
+     * @param quotas   per-tenant request quotas (ADR-0030 E); null for none. Applied to the tenant's own callers, not to
+     *                 service calls made on their behalf
+     */
+    public TenantFilter(String tenantClaim, AstraJwtAuthenticationConverter converter, TenantRegistry registry,
+                        TenantQuotas quotas) {
         this.tenantClaim = tenantClaim;
         this.converter = converter;
         this.registry = registry;
+        this.quotas = quotas;
     }
 
     @Override
@@ -101,6 +112,16 @@ public class TenantFilter extends OncePerRequestFilter {
             var refusal = registry.refusal(tenant, write);
             if (refusal.isPresent()) {
                 refuse(response, tenant, refusal.get());
+                return;
+            }
+        }
+        if (quotas != null && !isService(token)) {
+            String plan = registry == null ? null : registry.tenant(tenant).map(t -> t.plan()).orElse(null);
+            var wait = quotas.acquire(tenant, plan);
+            if (wait.isPresent()) {
+                response.setHeader("Retry-After", String.valueOf(Math.max(1, (wait.get().toMillis() + 999) / 1000)));
+                Problems.write(response, HttpStatus.TOO_MANY_REQUESTS, "TENANT_RATE_LIMITED",
+                        "Tenant " + tenant + " is over its request rate; retry after the time in Retry-After");
                 return;
             }
         }
