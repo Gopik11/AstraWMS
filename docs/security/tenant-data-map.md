@@ -18,11 +18,11 @@ reviewed as RLS-free.
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 | 3 | 0 |
 | `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 20 |
-| `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 0 |
+| `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 3 |
 | `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 0 |
-| `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 0 |
+| `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 2 |
 | `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 | 0 | 0 |
-| **All** | | **111** | **84** | **14** | **13** | **34** | **20** |
+| **All** | | **111** | **84** | **14** | **13** | **34** | **25** |
 
 ## Reviewed exceptions
 
@@ -115,12 +115,12 @@ Load order: `allocation`, `allocation_policy`, `billing_capture`, `billing_event
 | `outbox_key_sequence` |  |  |  |  |  |  |
 | `receipt_damage` | yes | yes |  |  |  |  |
 | `receipt_expectation` | yes | yes |  |  |  |  |
-| `receipt_expectation_line` | yes | yes | yes |  |  | `receipt_expectation` |
+| `receipt_expectation_line` | yes | yes | yes | yes |  | `receipt_expectation` |
 | `receipt_txn` | yes | yes |  |  |  | `receipt_expectation` |
 | `receive_request` | yes | yes |  |  |  |  |
-| `return_line` | yes | yes | yes |  |  | `return_order` |
+| `return_line` | yes | yes | yes | yes |  | `return_order` |
 | `return_order` | yes | yes |  |  |  |  |
-| `return_unit` | yes | yes | yes |  |  | `return_order` |
+| `return_unit` | yes | yes | yes | yes |  | `return_order` |
 
 Load order: `dlq_replay`, `dock_appointment`, `outbox`, `receipt_damage`, `receipt_expectation`, `expectation_change_log`, `expected_hu`, `receipt_expectation_line`, `receipt_txn`, `receive_request`, `return_order`, `return_line`, `return_unit`.
 
@@ -159,9 +159,9 @@ Load order: `automation_zone`, `dlq_replay`, `label_check_bypass`, `label_check_
 | `inbox` |  |  |  |  |  |  |
 | `outbound_allocation` | yes | yes |  |  |  | `outbound_order` |
 | `outbound_carrier_cutoff` | yes | yes |  |  |  |  |
-| `outbound_line` | yes | yes | yes |  |  | `outbound_order` |
+| `outbound_line` | yes | yes | yes | yes |  | `outbound_order` |
 | `outbound_order` | yes | yes |  |  |  | `outbound_wave`, `shipment_load` |
-| `outbound_owner_policy` | yes | yes | yes |  |  |  |
+| `outbound_owner_policy` | yes | yes | yes | yes |  |  |
 | `outbound_recovery` | yes | yes |  |  | `id` | `outbound_order` |
 | `outbound_site_config` | yes | yes |  |  |  |  |
 | `outbound_wave` | yes | yes |  |  |  |  |

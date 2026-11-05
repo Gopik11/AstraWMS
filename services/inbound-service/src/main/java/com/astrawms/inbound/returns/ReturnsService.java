@@ -10,6 +10,7 @@ import com.astrawms.common.ids.WmsTxnId;
 import com.astrawms.common.messaging.EventEnvelope;
 import com.astrawms.common.messaging.OutboxWriter;
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inbound.inventory.InventoryClient;
@@ -67,10 +68,12 @@ public class ReturnsService {
     private final OutboxWriter outbox;
     private final Clock clock;
     private final com.astrawms.inbound.receiving.ReceivingWork work;
+    private final ReturnScope returnScope;
 
     public ReturnsService(JdbcClient jdbc, InventoryClient inventory, OutboxWriter outbox, Clock clock,
-                          com.astrawms.inbound.receiving.ReceivingWork work) {
+                          com.astrawms.inbound.receiving.ReceivingWork work, ReturnScope returnScope) {
         this.work = work;
+        this.returnScope = returnScope;
         this.jdbc = jdbc;
         this.inventory = inventory;
         this.outbox = outbox;
@@ -188,6 +191,7 @@ public class ReturnsService {
 
     @Transactional
     public Map<String, Object> receive(String siteId, String rmaNo, String idempotencyKey, ReceiveUnit r) {
+        returnScope.require(siteId, rmaNo);
         Header h = header(siteId, rmaNo, true).orElseThrow(() -> unknown(rmaNo));
         Optional<Map<String, Object>> replay = jdbc.sql("select * from return_unit where return_id = :r and idempotency_key = :k")
                 .param("r", h.id()).param("k", idempotencyKey).query().listOfRows().stream().findFirst();
@@ -280,6 +284,7 @@ public class ReturnsService {
 
     @Transactional
     public Map<String, Object> close(String siteId, String rmaNo) {
+        returnScope.require(siteId, rmaNo);
         Header h = header(siteId, rmaNo, true).orElseThrow(() -> unknown(rmaNo));
         if (!"IN_PROGRESS".equals(h.status())) {
             throw ApiException.conflict("RET_NOT_CLOSABLE", "Return " + rmaNo + " is " + h.status() + "; receive units first");
@@ -298,6 +303,7 @@ public class ReturnsService {
 
     @Transactional
     public Map<String, Object> repost(String siteId, String rmaNo) {
+        returnScope.require(siteId, rmaNo);
         Header h = header(siteId, rmaNo, true).orElseThrow(() -> unknown(rmaNo));
         if (!"POSTING_FAILED".equals(h.status())) {
             throw ApiException.conflict("RET_NOT_REPOSTABLE", "Only POSTING_FAILED returns can be reposted; status is " + h.status());
@@ -371,25 +377,29 @@ public class ReturnsService {
     public List<Map<String, Object>> list(String siteId, String status, String q) {
         AccessScope scope = AccessScope.current();
         String like = q == null || q.isBlank() ? null : "%" + q.trim().toUpperCase() + "%";
-        return jdbc.sql("""
+        // all-owners: a scoped user sees only returns with no line or unit of another owner, so the filter must see
+        // those rows (with owner RLS they are hidden); only returns wholly in scope come back
+        return OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select r.rma_no, r.return_type, r.status, r.customer_name, r.expected_arrival_utc, r.erp_document,
                                r.erp_error_text, r.created_at, r.updated_at,
                                (select count(*) from return_line l where l.return_id = r.id) as lines,
                                (select coalesce(sum(u.qty), 0) from return_unit u where u.return_id = r.id) as units
                         from return_order r
                         where r.site_id = :site and (cast(:status as text) is null or r.status = :status)
-                          and (:all or not exists (select 1 from return_line l where l.return_id = r.id and l.owner_id not in (:owners)))
+                          and (:all or\s""" + ReturnScope.ALL_IN_SCOPE + """
+                          )
                           and (cast(:q as text) is null or upper(r.rma_no) like :q or upper(coalesce(r.customer_name, '')) like :q
                                or exists (select 1 from return_line l where l.return_id = r.id and upper(l.item_no) like :q)
                                or exists (select 1 from return_unit u where u.return_id = r.id and upper(coalesce(u.lpn_id, '')) like :q))
                         order by r.created_at desc limit 500""")
                 .param("site", siteId).param("status", status).param("all", scope.ownersAll()).param("owners", scope.ownerList())
                 .param("q", like)
-                .query().listOfRows();
+                .query().listOfRows());
     }
 
     @Transactional(readOnly = true)
     public Map<String, Object> detail(String siteId, String rmaNo) {
+        returnScope.require(siteId, rmaNo);
         Map<String, Object> h = jdbc.sql("""
                         select id, rma_no, return_type, status, campaign_id, customer_id, customer_name, expected_arrival_utc,
                                receipt_txn_id, disposition_txn_id, erp_document, erp_error_class, erp_error_text, created_at, closed_at
@@ -403,10 +413,6 @@ public class ReturnsService {
                                   and u.erp_line_ref = l.erp_line_ref) as qty_received
                         from return_line l where l.return_id = :id order by erp_line_ref""")
                 .param("id", h.get("id")).query().listOfRows();
-        AccessScope scope = AccessScope.current();
-        if (lines.stream().anyMatch(l -> !scope.allowsOwner(String.valueOf(l.get("owner_id"))))) {
-            throw unknown(rmaNo);
-        }
         Map<String, Object> out = new HashMap<>(h);
         out.put("lines", lines);
         out.put("units", jdbc.sql("select * from return_unit where return_id = :id order by received_at")

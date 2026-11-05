@@ -846,6 +846,98 @@ class OutboundIT {
     }
 
 
+    /**
+     * ADR-0030 C: owner RLS on the order lines, and the gates that keep it from ever showing or working part of an
+     * order. The document rule (all lines in scope) sees every owner's lines, and every carton, wave and load holding
+     * an order the user may not work is refused, so a wave is never released or a load closed with orders left out.
+     */
+    @Test
+    void mixedOwnerOrdersAndTheWavesLoadsAndCartonsHoldingThemAreGated_ADR0030() throws Exception {
+        call(put("/api/v1/sites/DC1/outbound/config"), """
+                {"releaseMode":"WAVE"}""").andExpect(status().isOk());
+        String mixed = doc;
+        String betaOnly = "09" + (System.nanoTime() % 100_000_000L);
+        orderOf(mixed, "ACME", "BETA");
+        orderOf(betaOnly, "BETA");
+        await(() -> "POOLED".equals(statusOf(mixed)) && "POOLED".equals(statusOf(betaOnly)));
+        var beta = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-sup")
+                .roles(Roles.SUPERVISOR, Roles.PICKER).owners("BETA").sign());
+
+        // in the database BETA sees only BETA's lines, one of them on the mixed order
+        List<String> owners = TenantContext.callAs(new TenantContext.Scope(tenant, "beta", "TEST",
+                        new com.astrawms.common.security.AccessScope(null, java.util.Set.of("BETA"), null, null)),
+                () -> tx.execute(s -> jdbc.sql("select distinct owner_id from outbound_line").query(String.class).list()));
+        assertThat(owners).containsExactly("BETA");
+        // yet the mixed order stays invisible: the rule sees ACME's line too
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders/" + mixed).with(beta)).andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders/" + betaOnly).with(beta)).andExpect(status().isOk());
+        mvc.perform(get("/api/v1/sites/DC1/outbound/orders").with(beta))
+                .andExpect(jsonPath("$[*].erp_doc_no", org.hamcrest.Matchers.contains(betaOnly)));
+
+        // a wave of both orders, built by an unrestricted supervisor
+        String wave = JsonPath.read(call(post("/api/v1/sites/DC1/outbound/waves"), "{}")
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString(), "$.wave_no");
+        mvc.perform(get("/api/v1/sites/DC1/outbound/waves").with(beta))
+                .andExpect(jsonPath("$[*].wave_no", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem(wave))));
+        for (var r : List.of(get("/api/v1/sites/DC1/outbound/waves/" + wave),
+                post("/api/v1/sites/DC1/outbound/waves/" + wave + "/release"),
+                post("/api/v1/sites/DC1/outbound/waves/" + wave + "/hold"))) {
+            mvc.perform(r.with(beta).contentType(MediaType.APPLICATION_JSON).content("{}"))
+                    .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("OUT_WAVE_OTHER_OWNERS")));
+        }
+
+        // a load and a carton holding the mixed order
+        String sscc = "006141410000000017";
+        asTenant(() -> {
+            UUID load = UUID.randomUUID();
+            jdbc.sql("""
+                            insert into shipment_load (id, tenant_id, site_id, load_no, status, created_by, created_at)
+                            values (:id, :t, 'DC1', 'L-MIX', 'OPEN', 'test', now())""").param("id", load).param("t", tenant).update();
+            jdbc.sql("update outbound_order set load_id = :l where erp_doc_no = :d").param("l", load).param("d", mixed).update();
+            return jdbc.sql("""
+                            insert into carton (id, tenant_id, site_id, order_id, sscc, carton_type, status, packed_by, created_at)
+                            select :id, :t, 'DC1', o.id, :sscc, 'BOX', 'OPEN', 'test', now() from outbound_order o
+                            where o.erp_doc_no = :d""")
+                    .param("id", UUID.randomUUID()).param("t", tenant).param("sscc", sscc).param("d", mixed).update();
+        });
+        mvc.perform(get("/api/v1/sites/DC1/outbound/loads").with(beta))
+                .andExpect(jsonPath("$[*].load_no", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem("L-MIX"))));
+        for (var r : List.of(get("/api/v1/sites/DC1/outbound/loads/L-MIX"),
+                post("/api/v1/sites/DC1/outbound/loads/L-MIX/close"),
+                post("/api/v1/sites/DC1/outbound/loads/L-MIX/tracking"))) {
+            mvc.perform(r.with(beta).contentType(MediaType.APPLICATION_JSON).content("{\"status\":\"IN_TRANSIT\"}"))
+                    .andExpect(status().isNotFound()).andExpect(jsonPath("$.code", is("OUT_LOAD_UNKNOWN")));
+        }
+        for (var r : List.of(get("/api/v1/sites/DC1/outbound/cartons/" + sscc),
+                post("/api/v1/sites/DC1/outbound/cartons/" + sscc + "/items"),
+                post("/api/v1/sites/DC1/outbound/cartons/" + sscc + "/close"))) {
+            mvc.perform(r.with(beta).contentType(MediaType.APPLICATION_JSON).content("{\"erpLineRef\":\"000020\",\"qty\":1}"))
+                    .andExpect(status().isNotFound()).andExpect(jsonPath("$.code", is("OUT_CARTON_UNKNOWN")));
+        }
+
+        // an unrestricted supervisor still works the wave
+        call(post("/api/v1/sites/DC1/outbound/waves/" + wave + "/release"), "{}").andExpect(status().isOk());
+    }
+
+    @Test
+    void anOwnerScopedAdminSetsOnlyItsOwnersPolicyAndEveryOwnerTableHasARestrictivePolicy() throws Exception {
+        var betaAdmin = TestTokens.bearer(TestTokens.token().tenant(tenant).user("beta-admin")
+                .roles(Roles.SOLUTION_ADMIN).owners("BETA").sign());
+        mvc.perform(put("/api/v1/sites/DC1/outbound/owner-policies/ACME").with(betaAdmin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"packList\":true}"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.code", is("SCOPE_OWNER_DENIED")));
+        mvc.perform(put("/api/v1/sites/DC1/outbound/owner-policies/BETA").with(betaAdmin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"packList\":true}"))
+                .andExpect(status().isOk());
+        List<String> missing = asTenant(() -> jdbc.sql("""
+                        select c.table_name from information_schema.columns c
+                        where c.table_schema = 'public' and c.column_name = 'owner_id'
+                          and not exists (select 1 from pg_policies p where p.schemaname = 'public'
+                                            and p.tablename = c.table_name and p.policyname = 'owner_isolation'
+                                            and p.permissive = 'RESTRICTIVE')""").query(String.class).list());
+        assertThat(missing).isEmpty();
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void order(long revision, String action, String qty10, String qty20) throws Exception {
@@ -854,6 +946,17 @@ class OutboundIT {
                 List.of(new OutboundOrder.Line("000010", "ACME", "SKU-1", new BigDecimal(qty10), "EA", null),
                         new OutboundOrder.Line("000020", "ACME", "SKU-SER", new BigDecimal(qty20), "EA", null)),
                 Instant.now());
+        send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
+    }
+
+    /** An order with one line of SKU-1 per owner given (lines 000010, 000020, ...). */
+    private void orderOf(String erpDocNo, String... owners) throws Exception {
+        List<OutboundOrder.Line> lines = new java.util.ArrayList<>();
+        for (int i = 0; i < owners.length; i++) {
+            lines.add(new OutboundOrder.Line("0000%d0".formatted(i + 1), owners[i], "SKU-1", new BigDecimal("2"), "EA", null));
+        }
+        OutboundOrder o = new OutboundOrder(erpDocNo, "CUSTOMER", "CREATE", 1, "IDOC-" + erpDocNo,
+                new OutboundOrder.ShipTo("C-1", "Customer One", "Dallas", "US"), "UPSN", Instant.now(), lines, Instant.now());
         send(OutboundContracts.TOPIC_OUTBOUND_ORDERS, OutboundOrder.TYPE, "SAP_S4_DEV_100", o);
     }
 
