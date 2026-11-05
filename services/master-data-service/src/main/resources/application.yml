@@ -50,3 +50,11 @@ astra:
       audience: astrawms-api
   outbox:
     relay-interval-ms: 500
+  identity:
+    # ADR-0030 A: the platform API creates a tenant's first administrator in Keycloak, signed in as the provisioner.
+    # Defaults: the local Keycloak and its development secret.
+    keycloak:
+      url: ${KEYCLOAK_ADMIN_URL:http://localhost:8180}
+      realm: astrawms
+      client-id: astra-provisioner
+      client-secret: ${PROVISIONER_CLIENT_SECRET:provisioner-dev-secret}

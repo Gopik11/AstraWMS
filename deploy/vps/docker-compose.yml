@@ -156,6 +156,9 @@ services:
       <<: *service-env
       SPRING_KAFKA_PROPERTIES_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="master-data-service" password="${KAFKA_MASTERDATA_PASSWORD}";
       DB_NAME: masterdata
+      # ADR-0030 A: the platform API creates a tenant's first administrator in Keycloak, as the provisioner
+      KEYCLOAK_ADMIN_URL: http://keycloak:8080
+      PROVISIONER_CLIENT_SECRET: ${PROVISIONER_CLIENT_SECRET}
 
   inventory-service:
     <<: *service

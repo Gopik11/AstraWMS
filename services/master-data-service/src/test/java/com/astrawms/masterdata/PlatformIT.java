@@ -1,10 +1,14 @@
 package com.astrawms.masterdata;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -13,6 +17,7 @@ import com.astrawms.common.contracts.PlatformContracts.TenantChanged;
 import com.astrawms.common.security.Roles;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.tenancy.TenantRegistry;
+import com.astrawms.masterdata.platform.IdentityProvisioner;
 import com.astrawms.masterdata.platform.TenantDirectory;
 import com.astrawms.test.AstraContainers;
 import com.astrawms.test.AstraMockMvc;
@@ -20,12 +25,16 @@ import com.astrawms.test.TestTokens;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -61,6 +70,8 @@ class PlatformIT {
     JdbcClient jdbc;
     @Autowired
     TransactionTemplate tx;
+    @Autowired
+    StubIdentity identity;
 
     MockMvc mvc;
     String tenant;
@@ -200,6 +211,99 @@ class PlatformIT {
         List<Long> published = jdbc.sql("select published_version from tenant where tenant_id = :t").param("t", tenant)
                 .query(Long.class).list();
         assertThat(published).containsExactly(1L);
+    }
+
+    /** Stands in for Keycloak (KeycloakIdentityIT covers the real one): records calls, or fails as told. */
+    static class StubIdentity implements IdentityProvisioner {
+        final List<String> calls = new CopyOnWriteArrayList<>();
+        volatile RuntimeException failure;
+
+        @Override
+        public CreatedAdmin createTenantAdmin(String tenantId, NewAdmin admin) {
+            calls.add(tenantId + "/" + admin.username());
+            if (failure != null) {
+                throw failure;
+            }
+            return new CreatedAdmin("kc-" + admin.username(), admin.username(), "Temp0rary-Passw0rd");
+        }
+    }
+
+    @TestConfiguration
+    static class Identity {
+        @Bean
+        @Primary
+        StubIdentity stubIdentity() {
+            return new StubIdentity();
+        }
+    }
+
+    @Test
+    void aPlatformAdminCreatesTheFirstAdministratorOfAnActiveTenantAndThePasswordIsShownOnce() throws Exception {
+        identity.failure = null;
+        call(post("/api/v1/platform/tenants"), platform, "{\"tenantId\":\"%s\"}".formatted(tenant)).andExpect(status().isCreated());
+
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform,
+                "{\"username\":\" Ada.Admin \",\"email\":\"ada@acme.example\",\"firstName\":\"Ada\"}")
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Cache-Control", containsString("no-store")))
+                .andExpect(jsonPath("$.username", is("ada.admin")))
+                .andExpect(jsonPath("$.roles[0]", is("SOLUTION_ADMIN"))).andExpect(jsonPath("$.roles.length()", is(1)))
+                .andExpect(jsonPath("$.temporaryPassword", is("Temp0rary-Passw0rd")))
+                .andExpect(jsonPath("$.passwordChangeRequired", is(true)));
+        assertThat(identity.calls).contains(tenant + "/ada.admin");
+
+        // the record says who made which account, never a password
+        call(get("/api/v1/platform/tenants/" + tenant + "/admins"), platform, null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$[0].username", is("ada.admin")))
+                .andExpect(jsonPath("$[0].identity_user_id", is("kc-ada.admin")))
+                .andExpect(jsonPath("$[0].created_by", is("ops")))
+                .andExpect(content().string(not(containsString("Temp0rary"))));
+    }
+
+    @Test
+    void tenantUsersAndServicesCannotCreateAdministrators() throws Exception {
+        call(post("/api/v1/platform/tenants"), platform, "{\"tenantId\":\"%s\"}".formatted(tenant)).andExpect(status().isCreated());
+        int before = identity.calls.size();
+        String body = "{\"username\":\"intruder\"}";
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), userOf(tenant), body).andExpect(status().isForbidden());
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), TestTokens.service("astra-task"), body)
+                .andExpect(status().isForbidden());
+        call(get("/api/v1/platform/tenants/" + tenant + "/admins"), userOf(tenant), null).andExpect(status().isForbidden());
+        assertThat(identity.calls).hasSize(before);
+    }
+
+    @Test
+    void administratorsAreRefusedForUnknownOrInactiveTenantsAndInvalidOrTakenNames() throws Exception {
+        identity.failure = null;
+        int before = identity.calls.size();
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"ada\"}")
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code", is("PLATFORM_TENANT_UNKNOWN")));
+        call(post("/api/v1/platform/tenants"), platform, "{\"tenantId\":\"%s\"}".formatted(tenant)).andExpect(status().isCreated());
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"a b\"}")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("PLATFORM_USERNAME_INVALID")));
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"ada\",\"email\":\"nope\"}")
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code", is("PLATFORM_EMAIL_INVALID")));
+        call(post("/api/v1/platform/tenants/" + tenant + "/status"), platform,
+                "{\"status\":\"SUSPENDED\",\"reason\":\"Invoice overdue\"}").andExpect(status().isOk());
+        call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"ada\"}")
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("PLATFORM_TENANT_NOT_ACTIVE")));
+        assertThat(identity.calls).hasSize(before);
+
+        call(post("/api/v1/platform/tenants/" + tenant + "/status"), platform,
+                "{\"status\":\"ACTIVE\",\"reason\":\"Paid\"}").andExpect(status().isOk());
+        try {
+            identity.failure = new IdentityProvisioner.UserExists("ada");
+            call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"ada\"}")
+                    .andExpect(status().isConflict()).andExpect(jsonPath("$.code", is("PLATFORM_USERNAME_TAKEN")));
+            identity.failure = new IdentityProvisioner.Unavailable("down", null);
+            call(post("/api/v1/platform/tenants/" + tenant + "/admins"), platform, "{\"username\":\"ada\"}")
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.code", is("PLATFORM_IDENTITY_UNAVAILABLE")));
+        } finally {
+            identity.failure = null;
+        }
+        call(get("/api/v1/platform/tenants/" + tenant + "/admins"), platform, null)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()", is(0)));
     }
 
     private static void await(BooleanSupplier condition) throws InterruptedException {

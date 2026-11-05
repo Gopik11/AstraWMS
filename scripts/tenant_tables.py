@@ -48,6 +48,7 @@ RLS_FREE = {
     "webhook_delivery": "The webhook dispatcher delivers every tenant's signed bodies (ADR-0025).",
     "tenant": "The tenant registry (ADR-0030 A): the platform API reads and changes every tenant.",
     "tenant_status_change": "The registry's status history (ADR-0030 A), across tenants like the registry.",
+    "tenant_admin_account": "Accounts the platform API created in Keycloak (ADR-0030 A), across tenants like the registry.",
 }
 
 IDENT = r"[a-z_][a-z0-9_]*"

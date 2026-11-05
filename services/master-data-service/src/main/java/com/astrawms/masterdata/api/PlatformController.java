@@ -1,11 +1,13 @@
 package com.astrawms.masterdata.api;
 
 import com.astrawms.masterdata.platform.TenantDirectory;
+import com.astrawms.masterdata.platform.TenantDirectory.AdminRequest;
 import com.astrawms.masterdata.platform.TenantDirectory.StatusRequest;
 import com.astrawms.masterdata.platform.TenantDirectory.TenantRequest;
 import java.security.Principal;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -66,5 +68,23 @@ public class PlatformController {
     @PostMapping("/{tenantId}/status")
     public Map<String, Object> status(@PathVariable String tenantId, @RequestBody StatusRequest body, Principal user) {
         return tenants.changeStatus(tenantId, body, user.getName());
+    }
+
+    /**
+     * Creates an administrator of the tenant in Keycloak (role SOLUTION_ADMIN, never PLATFORM_ADMIN). The response holds
+     * the temporary password, once: it is not stored, and the user must change it at first sign-in.
+     */
+    @PreAuthorize("hasRole('PLATFORM_ADMIN')")
+    @PostMapping("/{tenantId}/admins")
+    public ResponseEntity<Map<String, Object>> createAdmin(@PathVariable String tenantId, @RequestBody AdminRequest body,
+                                                           Principal user) {
+        return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
+                .body(tenants.createAdmin(tenantId, body, user.getName()));
+    }
+
+    @PreAuthorize("hasRole('PLATFORM_ADMIN')")
+    @GetMapping("/{tenantId}/admins")
+    public List<Map<String, Object>> admins(@PathVariable String tenantId) {
+        return tenants.admins(tenantId);
     }
 }
