@@ -17,12 +17,12 @@ reviewed as RLS-free.
 | Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) | With owner_id | Owner RLS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `masterdata` | `services/master-data-service` | 14 | 9 | 2 | 3 | 3 | 0 |
-| `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 4 |
+| `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 20 |
 | `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 0 |
 | `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 0 |
 | `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 0 |
 | `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 | 0 | 0 |
-| **All** | | **111** | **84** | **14** | **13** | **34** | **4** |
+| **All** | | **111** | **84** | **14** | **13** | **34** | **20** |
 
 ## Reviewed exceptions
 
@@ -62,10 +62,10 @@ Load order: `dlq_replay`, `label_printer`, `lpn_series`, `outbox`, `printed_labe
 | Table | tenant_id | RLS | owner_id | Owner RLS | Sequence id | References |
 | --- | --- | --- | --- | --- | --- | --- |
 | `allocation` | yes | yes | yes | yes |  |  |
-| `allocation_policy` | yes | yes | yes |  |  |  |
+| `allocation_policy` | yes | yes | yes | yes |  |  |
 | `billing_capture` | yes | yes |  |  |  |  |
-| `billing_event` | yes | yes | yes |  | `id` |  |
-| `billing_rate` | yes | yes | yes |  |  |  |
+| `billing_event` | yes | yes | yes | yes | `id` |  |
+| `billing_rate` | yes | yes | yes | yes |  |  |
 | `cost_object` | yes | yes |  |  |  |  |
 | `count_frequency` | yes | yes |  |  |  |  |
 | `dlq_replay` | yes |  |  |  |  |  |
@@ -74,31 +74,31 @@ Load order: `dlq_replay`, `label_printer`, `lpn_series`, `outbox`, `printed_labe
 | `inventory_balance` | yes | yes | yes | yes | `id` |  |
 | `inventory_operation` | yes | yes |  |  |  |  |
 | `inventory_txn` | yes | yes | yes | yes | `id` | `inventory_operation` |
-| `item_slotting` | yes | yes | yes |  |  |  |
+| `item_slotting` | yes | yes | yes | yes |  |  |
 | `location_freeze` | yes | yes |  |  |  | `physical_inventory` |
 | `lpn` | yes | yes | yes | yes |  |  |
-| `material_issue` | yes | yes | yes |  |  |  |
+| `material_issue` | yes | yes | yes | yes |  |  |
 | `material_issue_line` | yes | yes |  |  |  | `material_issue` |
 | `material_issue_move` | yes | yes |  |  | `id` | `material_issue` |
 | `outbox` | yes |  |  |  | `id` |  |
 | `outbox_key_sequence` |  |  |  |  |  |  |
-| `owner_profile` | yes | yes | yes |  |  |  |
+| `owner_profile` | yes | yes | yes | yes |  |  |
 | `physical_inventory` | yes | yes |  |  |  |  |
 | `reason_code` | yes | yes |  |  |  |  |
-| `ref_item` | yes | yes | yes |  |  |  |
-| `ref_item_uom` | yes | yes | yes |  |  |  |
+| `ref_item` | yes | yes | yes | yes |  |  |
+| `ref_item_uom` | yes | yes | yes | yes |  |  |
 | `ref_location` | yes | yes |  |  |  |  |
-| `replen_rule` | yes | yes | yes |  |  |  |
-| `replenishment` | yes | yes | yes |  |  | `allocation` |
-| `rfid_tag` | yes | yes | yes |  |  |  |
-| `serial_number` | yes | yes | yes |  |  | `inventory_operation` |
+| `replen_rule` | yes | yes | yes | yes |  |  |
+| `replenishment` | yes | yes | yes | yes |  | `allocation` |
+| `rfid_tag` | yes | yes | yes | yes |  |  |
+| `serial_number` | yes | yes | yes | yes |  | `inventory_operation` |
 | `stock_count` | yes | yes |  |  |  | `physical_inventory` |
 | `stock_count_result` | yes | yes |  |  |  | `stock_count` |
-| `stock_count_variance` | yes | yes | yes |  |  | `stock_count` |
-| `stock_in_transit` | yes | yes | yes |  | `id` |  |
-| `store_replenishment` | yes | yes | yes |  |  |  |
+| `stock_count_variance` | yes | yes | yes | yes |  | `stock_count` |
+| `stock_in_transit` | yes | yes | yes | yes | `id` |  |
+| `store_replenishment` | yes | yes | yes | yes |  |  |
 | `store_site_setting` | yes | yes |  |  |  |  |
-| `store_stock_policy` | yes | yes | yes |  |  |  |
+| `store_stock_policy` | yes | yes | yes | yes |  |  |
 
 Load order: `allocation`, `allocation_policy`, `billing_capture`, `billing_event`, `billing_rate`, `cost_object`, `count_frequency`, `dlq_replay`, `inventory_balance`, `inventory_operation`, `erp_movement`, `inventory_txn`, `item_slotting`, `lpn`, `material_issue`, `material_issue_line`, `material_issue_move`, `outbox`, `owner_profile`, `physical_inventory`, `location_freeze`, `reason_code`, `ref_item`, `ref_item_uom`, `ref_location`, `replen_rule`, `replenishment`, `rfid_tag`, `serial_number`, `stock_count`, `stock_count_result`, `stock_count_variance`, `stock_in_transit`, `store_replenishment`, `store_site_setting`, `store_stock_policy`.
 

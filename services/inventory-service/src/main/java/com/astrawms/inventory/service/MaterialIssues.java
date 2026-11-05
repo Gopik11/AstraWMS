@@ -3,6 +3,7 @@ package com.astrawms.inventory.service;
 import com.astrawms.common.barcode.Gs1;
 import com.astrawms.common.contracts.IntegrationContracts.GoodsMovement;
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.api.InventoryDtos.OperationResult;
@@ -138,8 +139,9 @@ public class MaterialIssues {
             }
         }
         UUID id = UUID.randomUUID();
-        long seq = jdbc.sql("select count(*) + 1 from material_issue where site_id = :site").param("site", siteId)
-                .query(Long.class).single();
+        // all-owners: an issue number is unique in the site whoever the issue is for; only a count comes back
+        long seq = OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("select count(*) + 1 from material_issue where site_id = :site")
+                .param("site", siteId).query(Long.class).single());
         String no = "MI%06d".formatted(seq);
         Timestamp now = Timestamp.from(clock.instant());
         jdbc.sql("""

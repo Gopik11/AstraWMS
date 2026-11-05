@@ -127,11 +127,12 @@ public class Slotting {
                 .param("site", siteId).param("since", Timestamp.from(clock.instant().minus(HISTORY)))
                 .query().listOfRows();
         List<Slot> golden = freeGoldenSlots(siteId);
-        List<Map<String, Object>> faces = jdbc.sql("""
+        // all-owners: a face's rank on the travel path counts every owner's faces; only ranks are used below
+        List<Map<String, Object>> faces = OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select r.location_id, l.pick_seq from replen_rule r
                         join ref_location l on l.site_id = r.site_id and l.location_id = r.location_id
                         where r.site_id = :site and r.active and l.pick_seq is not null order by l.pick_seq""")
-                .param("site", siteId).query().listOfRows();
+                .param("site", siteId).query().listOfRows());
         long aItems = rows.stream().filter(r -> "A".equals(effective(r, computed))).count();
         int goldenSlotsUsed = 0;
         List<Map<String, Object>> out = new ArrayList<>();
@@ -255,11 +256,12 @@ public class Slotting {
         if (old.stream().anyMatch(r -> r.location().equals(to))) {
             throw ApiException.unprocessable("INV_RESLOT_SAME_LOCATION", to + " is already the pick face of " + itemNo);
         }
-        boolean taken = jdbc.sql("""
+        // all-owners: a location is one item's pick face whoever owns that item
+        boolean taken = OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         select exists (select 1 from replen_rule where site_id = :site and location_id = :loc and active
                                          and (owner_id, item_no) <> (:owner, :item))""")
                 .param("site", siteId).param("loc", to).param("owner", ownerId).param("item", itemNo)
-                .query(Boolean.class).single();
+                .query(Boolean.class).single());
         if (taken) {
             throw ApiException.conflict("INV_RESLOT_LOCATION_TAKEN", to + " is the pick face of another item");
         }

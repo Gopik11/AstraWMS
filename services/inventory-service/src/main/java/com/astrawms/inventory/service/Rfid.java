@@ -2,6 +2,7 @@ package com.astrawms.inventory.service;
 
 import com.astrawms.common.rfid.Epc;
 import com.astrawms.common.security.AccessScope;
+import com.astrawms.common.tenancy.OwnerVisibility;
 import com.astrawms.common.tenancy.TenantContext;
 import com.astrawms.common.web.ApiException;
 import com.astrawms.inventory.persistence.SerialRepository;
@@ -420,8 +421,13 @@ public class Rfid {
             }
         }
         if (lpn != null) {
-            jdbc.sql("select owner_id from lpn where site_id = :s and lpn_id = :l").param("s", siteId).param("l", lpn)
-                    .query(String.class).optional().ifPresent(o -> AccessScope.current().requireOwner(o));
+            // all-owners: an LPN of another owner must be refused, not mistaken for an LPN that does not exist yet
+            Optional<String> lpnOwner = OwnerVisibility.allOwners(jdbc, () -> jdbc.sql(
+                            "select owner_id from lpn where site_id = :s and lpn_id = :l")
+                    .param("s", siteId).param("l", lpn).query(String.class).optional());
+            if (lpnOwner.isPresent() && !AccessScope.current().allowsOwner(lpnOwner.get())) {
+                throw ApiException.unprocessable("INV_LPN_OWNER_MISMATCH", "LPN " + lpn + " belongs to another owner");
+            }
         }
 
         Epc.Tag tag;
@@ -439,7 +445,8 @@ public class Rfid {
         }
         String scheme = tag == null ? "RAW" : tag.scheme().name();
 
-        Optional<TagView> existing = tag(hex);
+        // all-owners: an EPC is one physical tag; an active tag of another owner is refused, a retired one reused
+        Optional<TagView> existing = OwnerVisibility.allOwners(jdbc, () -> tag(hex));
         if (existing.isPresent() && "ACTIVE".equals(existing.get().status())) {
             TagView e = existing.get();
             if (siteId.equals(e.siteId()) && java.util.Objects.equals(e.ownerId(), item == null ? null : owner)
@@ -447,11 +454,14 @@ public class Rfid {
                     && java.util.Objects.equals(e.lpnId(), lpn) && java.util.Objects.equals(e.locationId(), location)) {
                 return e;
             }
-            throw ApiException.conflict("INV_RFID_TAG_IN_USE", "Tag " + hex + " is already commissioned to "
-                    + describe(e) + "; retire it first");
+            String to = e.ownerId() == null || AccessScope.current().allowsOwner(e.ownerId()) ? describe(e) : "another owner";
+            throw ApiException.conflict("INV_RFID_TAG_IN_USE", "Tag " + hex + " is already commissioned to " + to
+                    + "; retire it first");
         }
         String user = TenantContext.require().userId();
-        jdbc.sql("""
+        // all-owners: re-commissioning a retired tag replaces its row, whoever it was for; the new row's owner was
+        // checked against the user's scope above
+        OwnerVisibility.allOwners(jdbc, () -> jdbc.sql("""
                         insert into rfid_tag (tenant_id, epc, scheme, site_id, owner_id, item_no, serial_no, lpn_id,
                             location_id, status, commissioned_by, commissioned_at)
                         values (:t, :epc, :scheme, :site, :owner, :item, :serial, :lpn, :loc, 'ACTIVE', :user, :now)
@@ -464,7 +474,7 @@ public class Rfid {
                 .param("owner", item == null ? null : owner).param("item", item).param("serial", serial)
                 .param("lpn", lpn).param("loc", location).param("user", user)
                 .param("now", Timestamp.from(clock.instant()))
-                .update();
+                .update());
         return tag(hex).orElseThrow();
     }
 
