@@ -3,6 +3,7 @@
 #
 #   sudo bash vps-audit.sh            # writes /root/vps-audit-<stamp>/ and /root/vps-audit-<stamp>.tar.gz
 #   sudo bash vps-audit.sh --quick    # skips the slow parts (filesystem-wide du/find, 60 s sampling)
+#   nohup bash vps-audit.sh > /root/vps-audit.log 2>&1 &   # survives an SSH disconnect; follow with tail -f
 #
 # It changes nothing: no prune, no restart, no writes outside its own output directory. Secrets are redacted:
 # environment values of containers and .env files are never written, only variable NAMES. Review the output before
@@ -21,6 +22,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # run "<section file>" "<title>" <command...>  — appends a titled block, never aborts the script
 run() {
   local f="$OUT/$1"; shift; local title="$1"; shift
+  printf '[%s] %s: %s\n' "$(date +%T)" "${f##*/}" "$title" >&2   # progress (also keeps SSH sessions from idling out)
   { echo; echo "===== $title"; echo "\$ $*"; $T bash -c "$*" 2>&1; echo "[exit $?]"; } >>"$f"
 }
 # KEY=value and YAML "KEY: value" are redacted; ${VAR} references are kept (they reveal no secret).
