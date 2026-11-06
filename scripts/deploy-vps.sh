@@ -58,13 +58,13 @@ done
 
 echo "== Copying deployment files to /opt/astrawms"
 tar -C "$ROOT/deploy" -cf - vps/docker-compose.yml vps/postgres-init vps/remote-deploy.sh vps/kafka-acls.sh \
-    vps/pg-backup.sh vps/pg-restore-drill.sh kafka/acls.txt keycloak/astrawms-realm.json monitoring \
+    vps/pg-backup.sh vps/pg-restore-drill.sh vps/tenant-data.py kafka/acls.txt keycloak/astrawms-realm.json monitoring \
   | "${SSH[@]}" 'set -e; mkdir -p /opt/astrawms && chmod 711 /opt/astrawms && cd /opt/astrawms
       t=$(mktemp -d); tar -xf - -C "$t"
       cp "$t/vps/docker-compose.yml" "$t/vps/remote-deploy.sh" "$t/vps/kafka-acls.sh" "$t/vps/pg-backup.sh" \
-         "$t/vps/pg-restore-drill.sh" .
+         "$t/vps/pg-restore-drill.sh" "$t/vps/tenant-data.py" .
       cp "$t/kafka/acls.txt" kafka-acls.txt
-      chmod 700 kafka-acls.sh pg-backup.sh pg-restore-drill.sh
+      chmod 700 kafka-acls.sh pg-backup.sh pg-restore-drill.sh tenant-data.py
       rm -rf postgres-init && cp -r "$t/vps/postgres-init" postgres-init && chmod 755 postgres-init postgres-init/*.sh
       mkdir -p gateway keycloak-template && chmod 700 keycloak-template
       cp "$t/keycloak/astrawms-realm.json" keycloak-template/

@@ -93,6 +93,11 @@ Each one is independent, and the plan at the end orders them.
     are only logged (once per tenant and reason every ten minutes) and counted in `astra_tenant_refusals_total`. The
     VPS starts in REPORT (`TENANT_REGISTRY_MODE` in `.env`): register what the log names, then switch to ENFORCE.
     The Operations status shows each service's mode, whether it has read the registry, and tenants per status.
+  - **A registry that does not load says so.** It retries quietly while the topic is missing or unreadable, so a
+    service that has not loaded it a minute after start logs `Tenant registry not loaded …` at WARN (every five minutes,
+    with the reason), and `astra_tenant_registry_loaded` is 0; the alert `TenantRegistryNotLoaded` fires after five
+    minutes. Found on the VPS before switching to ENFORCE: one service's loaded line had rotated out of its log, and
+    nothing else told a healthy registry from one stuck retrying.
 - **Migration.** Master data V9 creates the registry and registers every tenant master data already holds, `ACTIVE`.
   It runs as the schema owner, which forced RLS filters like any role, so it lifts the force on the tables it reads
   for that transaction only. Tenants used only in other services are found by REPORT mode and registered by hand.
@@ -239,22 +244,36 @@ Each one is independent, and the plan at the end orders them.
   - CI fails when it is stale, as for the permission matrix.
   - A table without `tenant_id` must be on a reviewed list of global tables (`uom_catalogue`, `flyway_schema_history`,
     `inbox`, `outbox_key_sequence`).
-- **Export.**
-  - `deploy/vps/tenant-export.sh <tenant>` runs `COPY (select … where tenant_id = $1)` for every table on the map,
-    as the schema owner, in foreign-key order.
-  - It also exports the tenant's Keycloak users (without credentials).
-  - It writes one archive encrypted with `BACKUP_PASSPHRASE`, with a manifest of row counts and checksums.
-- **Import.** `tenant-import.sh <archive>` loads an archive into a deployment where the tenant does not exist. It
-  checks the counts against the manifest.
+- **Export (phase 4, increment 1: done).** `deploy/vps/tenant-data.py export <tenant>` (copied to `/opt/astrawms`).
+  - The tables come from the database catalog when it runs: every table with `tenant_id`, parents first. TenantDataIT
+    checks on migrated databases that this is exactly the tables and sequence columns of the data map
+    (`tenant_tables.py --plan`).
+  - Per database, one `REPEATABLE READ, READ ONLY` transaction (one snapshot) copies every table's rows of the tenant
+    to files in the PostgreSQL container, as the superuser, with the row counts and every sequence's last value.
+  - It refuses while the tenant has unpublished outbox messages, and the outbox is not exported. For an exact copy,
+    suspend the tenant first: an active tenant keeps writing, and the databases are read one after another.
+  - It writes one archive (tar, gzip, encrypted with `BACKUP_PASSPHRASE` exactly like the backups) with
+    `manifest.json` (per table: row count, sha256, columns; per database: schema version, sequences), a `.sha256`
+    file, and a line in `BACKUP_DIR/tenant-exports.log`.
+  - Keycloak users (without credentials) are added in increment 2.
+- **Import.** `tenant-data.py import <archive>` loads an archive into a deployment where the tenant has no rows.
+  - Before any write it checks the checksums, that every database is at the archive's schema version with the same
+    columns, and that the tenant has no rows there.
+  - Per database, one transaction loads every table in foreign-key order and compares every count with the manifest;
+    any difference rolls that database back. The databases are loaded one after another; a failure names those
+    already loaded.
   - Most ids are UUIDs or are scoped by tenant, so those rows do not collide.
-  - Eight tables use a database sequence for their id; the data map lists them under "Sequence id". They include the
+  - Some tables use a database sequence for their id; the data map lists them under "Sequence id". They include the
     stock ledger (`inventory_balance`, `inventory_txn`), `stock_in_transit`, `billing_event` and `task_event`.
-    - The import leaves these ids out and lets the target assign new ones.
-    - It inserts each such table's rows in id order, so the new ids keep the order the code relies on (for example
-      the oldest transit line first).
+    - The export leaves these ids out and writes each such table's rows in id order, so the target assigns new ids
+      in the order the code relies on (for example the oldest transit line first).
     - No table refers to these ids, and the data map fails CI if one starts to. The code uses them only within a
       transaction, never in an API path.
-  - The outbox is not exported. A tenant is exported only after its outbox has drained.
+  - Every sequence is raised to at least the source's value, so numbers handed out from a sequence
+    (`blind_return_seq`, `carton_serial_seq`) are not handed out again.
+  - The registry rows (`tenant`, its history and admin accounts) are loaded only when the tenant is not registered in
+    the target, and then published again on the tenants topic. A registered tenant keeps its registry row and status,
+    as in a point restore. Either way the import is recorded in the tenant's status history.
 - **Point restore of one tenant.**
   1. Restore the backup into a throwaway container. The restore drill already does this.
   2. Export the tenant from it.
@@ -342,7 +361,7 @@ Each phase can ship on its own. Sizes are relative: S is a few days, M one to tw
 | **1. Registry and fairness** | A: registry, platform API, `TenantChanged`, enforcement in every service, seed migration (increment 1, done); E: per-tenant quotas, tenant metrics (increment 2, done); Keycloak provisioning of a tenant's first administrator (increment 3, done). | L | An unknown or suspended tenant is refused in every service, and its messages are dead-lettered for replay. One tenant over its quota gets 429 while another continues. The metrics show both. |
 | **2. Data-layer owner isolation** | C, table by table, ledger first. Done: every table with `owner_id` (34) has the policy. | M | For each covered table, an owner-scoped user with no `WHERE` clause sees only its owners' rows, and a write for another owner is refused. p95 latency changes by at most 10% on the covered endpoints. |
 | **3. ERP per tenant** | B: `erp_connection`, per-tenant resolution and validation of `sourceSystem`. | M | Two tenants with different logical systems post and receive acknowledgements in one deployment (simulated SAP). A message whose `sourceSystem` is not its tenant's is refused. |
-| **4. Data lifecycle** | D: export, import, point restore, purge. H: cell move procedure. | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
+| **4. Data lifecycle** | D: export and import (increment 1, done); Keycloak users and purge (increment 2); point restore (increment 3). H: cell move procedure (increment 4). | L | A tenant is exported and imported into an empty deployment with matching counts. One tenant is restored to last night's state while another keeps today's data. A purged tenant has no rows on the map. |
 | **5. Multi-tenant staff** | F. Fair share in the relay and the bulkhead (rest of E). | M | A user with two tenants switches between them in the web and RF clients; a third tenant is refused. A flood from one tenant leaves another tenant's relay latency within its normal range. |
 
 Phase 0 has no dependencies. Phases 2 and 3 depend on nothing in phase 1 and can run alongside it. Phase 4 needs
