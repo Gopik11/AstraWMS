@@ -5,7 +5,7 @@ import type { User } from 'oidc-client-ts'
 import './index.css'
 import App from './App.tsx'
 import { setTokenSource } from './api.ts'
-import { AuthProvider, toSession, userManager } from './auth.tsx'
+import { AuthProvider, isPlatformOperator, toSession, userManager } from './auth.tsx'
 import { loadConfig } from './config.ts'
 import { SiteProvider } from './ui.tsx'
 
@@ -48,6 +48,20 @@ async function start() {
   setTokenSource(() => current.access_token)
 
   const session = toSession(user)
+  if (isPlatformOperator(session)) {
+    // ADR-0031: the operator's console, without any tenant's screens (and without the site context they need)
+    const { default: PlatformApp } = await import('./PlatformApp.tsx')
+    root.render(
+      <StrictMode>
+        <AuthProvider config={config} manager={manager} initial={user}>
+          <BrowserRouter>
+            <PlatformApp environment={config.environment} />
+          </BrowserRouter>
+        </AuthProvider>
+      </StrictMode>,
+    )
+    return
+  }
   if (!session.tenant) {
     fatal(`User ${session.userName} is not assigned to a tenant. Ask an administrator to set tenant_id.`)
     return

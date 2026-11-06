@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { User } from 'oidc-client-ts'
-import { toSession } from './auth'
+import { isPlatformOperator, toSession } from './auth'
 import { query } from './api'
 
 function tokenWith(claims: Record<string, unknown>): string {
@@ -27,6 +27,21 @@ describe('toSession', () => {
     const s = toSession({ access_token: tokenWith({ sub: 'x', tenant_id: 't' }) } as User)
     expect(s.sites).toEqual([])
     expect(s.roles).toEqual([])
+  })
+})
+
+describe('platform operator (ADR-0031)', () => {
+  it('is a sign-in without a tenant that holds PLATFORM_ADMIN', () => {
+    const operator = toSession({ access_token: tokenWith({ preferred_username: 'ops', realm_access: { roles: ['PLATFORM_ADMIN'] } }) } as User)
+    expect(operator.roles).toEqual(['PLATFORM_ADMIN'])
+    expect(isPlatformOperator(operator)).toBe(true)
+  })
+
+  it('is not a tenant user, nor a user without a tenant and without the role', () => {
+    const tenantUser = toSession({ access_token: tokenWith({ tenant_id: 'demo', realm_access: { roles: ['PLATFORM_ADMIN', 'SOLUTION_ADMIN'] } }) } as User)
+    const nobody = toSession({ access_token: tokenWith({ realm_access: { roles: ['SOLUTION_ADMIN'] } }) } as User)
+    expect(isPlatformOperator(tenantUser)).toBe(false)
+    expect(isPlatformOperator(nobody)).toBe(false)
   })
 })
 

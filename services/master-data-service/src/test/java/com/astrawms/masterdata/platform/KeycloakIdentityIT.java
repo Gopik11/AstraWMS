@@ -137,6 +137,71 @@ class KeycloakIdentityIT {
         assertThat(usersNamed(username)).isEmpty();
     }
 
+    // ------------------------------------------------------------------ the accounts of a tenant (ADR-0031)
+
+    private static TenantUsers.Spec spec(String username, List<String> roles, List<String> sites) {
+        return new TenantUsers.Spec(username, null, "Pat", "Picker", null, roles, sites,
+                sites == null ? null : List.of("*"), sites == null ? null : List.of("*"), null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void aTenantSeesCreatesChangesAndResetsOnlyItsOwnAccounts() {
+        String tenant = "T" + UUID.randomUUID().toString().substring(0, 6);
+        String other = "O" + UUID.randomUUID().toString().substring(0, 6);
+        TenantUsers users = provisioner();
+        TenantUsers.Created pat = users.create(tenant, spec(username(), List.of("PICKER", "RECEIVER"), List.of("DC1")));
+        TenantUsers.Created olga = users.create(other, spec(username(), List.of("PICKER"), List.of("*")));
+
+        assertThat(pat.temporaryPassword()).hasSize(20);
+        assertThat(pat.user().roles()).containsExactly("PICKER", "RECEIVER");
+        assertThat(pat.user().sites()).containsExactly("DC1");
+        assertThat(pat.user().passwordChangeRequired()).isTrue();
+        assertThat(pat.user().managed()).isTrue();
+        assertThat(users.users(tenant)).extracting(TenantUsers.User::id).containsExactly(pat.user().id());
+        assertThat(users.user(tenant, olga.user().id())).isEmpty();
+        assertThatThrownBy(() -> users.update(tenant, olga.user().id(), spec(null, List.of("SUPERVISOR"), null)))
+                .isInstanceOf(TenantUsers.NoSuchUser.class);
+        assertThatThrownBy(() -> users.resetPassword(tenant, olga.user().id())).isInstanceOf(TenantUsers.NoSuchUser.class);
+
+        // roles added and removed and the sites changed; the owners, zones and the tenant binding are kept
+        TenantUsers.User changed = users.update(tenant, pat.user().id(), new TenantUsers.Spec(null, "pat@acme.example",
+                null, null, null, List.of("PICKER", "SUPERVISOR"), List.of("DC1", "DC2"), null, null, "500"));
+        assertThat(changed.roles()).containsExactly("PICKER", "SUPERVISOR");
+        assertThat(changed.sites()).containsExactly("DC1", "DC2");
+        assertThat(changed.approvalLimit()).isEqualTo("500");
+        assertThat(changed.email()).isEqualTo("pat@acme.example");
+        Map<String, Object> raw = admin().get().uri("/users/{id}", pat.user().id()).retrieve().body(Map.class);
+        Map<String, List<String>> attributes = (Map<String, List<String>>) raw.get("attributes");
+        assertThat(attributes.get("tenant_id")).containsExactly(tenant);
+        assertThat(attributes.get("wms_owners")).containsExactly("*");
+        assertThat(attributes.get("wms_zones")).containsExactly("*");
+
+        // disabled, then a new temporary password
+        assertThat(users.update(tenant, pat.user().id(), new TenantUsers.Spec(null, null, null, null, false, null, null,
+                null, null, null)).enabled()).isFalse();
+        String password = users.resetPassword(tenant, pat.user().id());
+        assertThat(password).hasSize(20).isNotEqualTo(pat.temporaryPassword());
+        assertThat(users.user(tenant, pat.user().id()).orElseThrow().passwordChangeRequired()).isTrue();
+    }
+
+    @Test
+    void anIntegrationAccountIsListedButNotChanged() {
+        String tenant = "T" + UUID.randomUUID().toString().substring(0, 6);
+        TenantUsers users = provisioner();
+        TenantUsers.Created erp = users.create(tenant, spec(username(), List.of("RECEIVER"), List.of("*")));
+        Map<?, ?> role = admin().get().uri("/roles/ERP_INTEGRATION").retrieve().body(Map.class);
+        admin().post().uri("/users/{id}/role-mappings/realm", erp.user().id()).contentType(MediaType.APPLICATION_JSON)
+                .body(List.of(role)).retrieve().toBodilessEntity();
+
+        TenantUsers.User listed = users.user(tenant, erp.user().id()).orElseThrow();
+        assertThat(listed.managed()).isFalse();
+        assertThat(listed.roles()).contains("ERP_INTEGRATION");
+        assertThatThrownBy(() -> users.update(tenant, erp.user().id(), spec(null, List.of("PICKER"), null)))
+                .isInstanceOf(TenantUsers.NotManaged.class);
+        assertThatThrownBy(() -> users.resetPassword(tenant, erp.user().id())).isInstanceOf(TenantUsers.NotManaged.class);
+    }
+
     @Test
     void aWrongSecretOrAnUnreachableKeycloakIsUnavailableAndCreatesNothing() {
         String username = username();

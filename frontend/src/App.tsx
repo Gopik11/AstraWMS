@@ -28,6 +28,7 @@ const LabelsPage = lazy(() => import('./pages/Labels'))
 const Transfers = lazy(() => import('./pages/Transfers'))
 const Tasks = lazy(() => import('./pages/Tasks'))
 const MasterData = lazy(() => import('./pages/MasterData'))
+const Users = lazy(() => import('./pages/Users'))
 const ErpSimulator = lazy(() => import('./pages/ErpSimulator'))
 const Operations = lazy(() => import('./pages/Operations'))
 const Network = lazy(() => import('./pages/Network'))
@@ -122,6 +123,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/inventory" element={<Inventory />} />
           <Route path="/adjust" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER']}><Adjust /></Guard>} />
           <Route path="/master-data" element={<Guard roles={['SOLUTION_ADMIN']}><MasterData /></Guard>} />
+          <Route path="/users" element={<Guard roles={['SOLUTION_ADMIN']}><Users /></Guard>} />
           <Route path="/operations" element={<Guard roles={['SOLUTION_ADMIN']}><Operations /></Guard>} />
           <Route path="/erp" element={<Guard roles={['ERP_INTEGRATION', 'SOLUTION_ADMIN']}><ErpSimulator /></Guard>} />
           <Route path="/auth/callback" element={<Navigate to="/" replace />} />

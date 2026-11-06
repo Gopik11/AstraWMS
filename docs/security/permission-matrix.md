@@ -21,7 +21,7 @@ Generated from the source by `scripts/permission_matrix.py`; CI fails when it is
 | INV_MANAGER | 42 | inventory-service, master-data-service, outbound-service, task-service |
 | SUPERVISOR | 109 | inbound-service, inventory-service, master-data-service, outbound-service, task-service |
 | QA_MANAGER | 5 | inbound-service, inventory-service |
-| SOLUTION_ADMIN | 44 | all services (astra-common), inventory-service, master-data-service, outbound-service, sap-adapter, task-service |
+| SOLUTION_ADMIN | 47 | all services (astra-common), inventory-service, master-data-service, outbound-service, sap-adapter, task-service |
 | ERP_INTEGRATION | 10 | inbound-service, inventory-service, master-data-service, outbound-service, sap-adapter |
 | AUTOMATION | 6 | inventory-service, task-service |
 | WMS_SERVICE | 11 | inventory-service |
@@ -191,6 +191,13 @@ Generated from the source by `scripts/permission_matrix.py`; CI fails when it is
 | `/api/v1/sites/{siteId}/locations/{locationId}` | PUT | SOLUTION_ADMIN | MasterDataController |
 | `/api/v1/sites/{siteId}/zones/{zoneId}` | PUT | SOLUTION_ADMIN | MasterDataController |
 | `/api/v1/sites/{siteId}/zones/{zoneId}/locations/generate` | POST | SOLUTION_ADMIN | MasterDataController |
+| `/api/v1/users` | GET | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users` | POST | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users/audit` | GET | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users/roles` | GET | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users/{userId}` | GET | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users/{userId}` | PUT | SOLUTION_ADMIN | UserAdminController |
+| `/api/v1/users/{userId}/password` | POST | SOLUTION_ADMIN | UserAdminController |
 
 ## outbound-service
 

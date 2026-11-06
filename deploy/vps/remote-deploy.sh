@@ -141,13 +141,16 @@ docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
   rm -f /tmp/kcadm.cfg /tmp/astra-mobile.json; exit $rc' || { echo "FAILED: could not create the astra-mobile client" >&2; exit 1; }
 
 # ADR-0030 A: the PLATFORM_ADMIN role, and the provisioner's audience and role so the provisioning scripts can register
-# tenants through the platform API (realms imported before this release lack them).
+# tenants through the platform API (realms imported before this release lack them). ADR-0031: the provisioner lists,
+# creates and changes the tenants' accounts for the users API (manage-users, view-users).
 docker exec -e KCPW="$KC_ADMIN_PASSWORD" "$(dc ps -q keycloak)" sh -c '
   K=/opt/keycloak/bin/kcadm.sh; C="--config /tmp/kcadm.cfg"
   $K config credentials --server http://localhost:8080 --realm master --user admin --password "$KCPW" $C >/dev/null 2>&1 &&
   { $K get roles/PLATFORM_ADMIN -r astrawms $C >/dev/null 2>&1 ||
     $K create roles -r astrawms -s name=PLATFORM_ADMIN -s "description=Operator: manages the tenant registry (ADR-0030)" $C; } &&
   $K add-roles -r astrawms --uusername service-account-astra-provisioner --rolename PLATFORM_ADMIN $C &&
+  $K add-roles -r astrawms --uusername service-account-astra-provisioner --cclientid realm-management \
+    --rolename manage-users --rolename view-users $C &&
   id=$($K get clients -r astrawms -q clientId=astra-provisioner --fields id $C | grep -o "[0-9a-f-]\{36\}") &&
   { $K get clients/$id/protocol-mappers/models -r astrawms $C | grep -q "audience astrawms-api" ||
     $K create clients/$id/protocol-mappers/models -r astrawms -s "name=audience astrawms-api" -s protocol=openid-connect \
