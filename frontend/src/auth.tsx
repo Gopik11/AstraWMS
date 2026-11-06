@@ -6,6 +6,8 @@ import type { AppConfig } from './config'
 export type Role =
   | 'RECEIVER' | 'PICKER' | 'INV_ANALYST' | 'INV_MANAGER' | 'SUPERVISOR' | 'QA_MANAGER' | 'SOLUTION_ADMIN'
   | 'ERP_INTEGRATION'
+  /** The operator (ADR-0030, ADR-0031): manages tenants, sees no tenant's data. Its accounts carry no tenant. */
+  | 'PLATFORM_ADMIN'
 
 /** What the UI needs from the access token. The services validate the token themselves; this is for display. */
 export interface Session {
@@ -50,7 +52,7 @@ function scope(value: unknown): string[] | '*' {
 export function toSession(user: User): Session {
   const c = claims(user.access_token)
   const known: Role[] = ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER', 'SOLUTION_ADMIN',
-    'ERP_INTEGRATION']
+    'ERP_INTEGRATION', 'PLATFORM_ADMIN']
   // Only AstraWMS roles; Keycloak's own (default-roles-*, offline_access, …) are irrelevant here.
   const realmRoles = ((c.realm_access as { roles?: string[] } | undefined)?.roles ?? [])
     .filter((r): r is Role => known.includes(r as Role))
@@ -63,6 +65,14 @@ export function toSession(user: User): Session {
     owners: scope(c.wms_owners),
     approvalLimit: c.approval_limit == null ? undefined : String(c.approval_limit),
   }
+}
+
+/**
+ * The operator's platform administrator (ADR-0031): no tenant, role PLATFORM_ADMIN. Such a sign-in gets the platform
+ * console only, never a tenant's screens.
+ */
+export function isPlatformOperator(s: Session): boolean {
+  return !s.tenant && s.roles.includes('PLATFORM_ADMIN')
 }
 
 interface AuthContextValue {

@@ -210,6 +210,25 @@ export function Success({ children }: { children: ReactNode }) {
   return children ? <div className="alert ok" role="status">{children}</div> : null
 }
 
+/**
+ * A temporary password, shown once (ADR-0031): the server does not keep it, so it cannot be shown again. The user must
+ * change it at first sign-in.
+ */
+export function OneTimeSecret({ username, secret, onDone }: { username: string; secret: string; onDone: () => void }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="alert ok one-time" role="status">
+      <p><strong>Temporary password for {username}</strong> — shown only now. Hand it over securely; it must be changed at
+        first sign-in.</p>
+      <p><code className="secret">{secret}</code>{' '}
+        <button type="button" className="small" onClick={() => void navigator.clipboard?.writeText(secret).then(() => setCopied(true))}>
+          {copied ? 'Copied' : 'Copy'}</button>{' '}
+        <button type="button" className="small" onClick={onDone}>Done, hide it</button>
+      </p>
+    </div>
+  )
+}
+
 /** Search input for list pages: searches on Enter or when cleared (the page keeps the term in the URL). */
 export function SearchBox({ value, onSearch, placeholder }: { value: string; onSearch: (v: string) => void; placeholder?: string }) {
   const [text, setText] = useState(value)

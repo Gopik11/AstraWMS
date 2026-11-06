@@ -214,3 +214,10 @@ a.button { display: inline-block; padding: 7px 14px; border-radius: 6px; border:
 .toast.ok { background: var(--good-bg); color: var(--good); border: 1px solid var(--good); }
 .toast.error { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad); }
 .confirm-inline { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.one-time code.secret { font-size: 1.1rem; padding: 4px 8px; background: var(--surface, #fff); border-radius: 4px; user-select: all; }
+.checklist { list-style: none; padding-left: 0; }
+.checklist li { margin: 6px 0; }
+.checklist .done::before { content: "\2713  "; color: var(--good); }
+.checklist .todo::before { content: "\25CB  "; color: var(--muted); }
+.role-picks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.role-picks label { display: inline-flex; gap: 4px; align-items: center; }

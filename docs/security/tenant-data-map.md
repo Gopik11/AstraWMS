@@ -16,13 +16,13 @@ reviewed as RLS-free.
 
 | Database | Module | Tables | Tenant, with RLS | Tenant, RLS-free (reviewed) | Global (reviewed) | With owner_id | Owner RLS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `masterdata` | `services/master-data-service` | 17 | 9 | 5 | 3 | 3 | 3 |
+| `masterdata` | `services/master-data-service` | 18 | 10 | 5 | 3 | 3 | 3 |
 | `inventory` | `services/inventory-service` | 38 | 34 | 2 | 2 | 20 | 20 |
 | `inbound` | `services/inbound-service` | 15 | 11 | 2 | 2 | 3 | 3 |
 | `tasks` | `services/task-service` | 18 | 14 | 2 | 2 | 6 | 6 |
 | `outbound` | `services/outbound-service` | 16 | 11 | 3 | 2 | 2 | 2 |
 | `sapadapter` | `adapters/sap-adapter` | 10 | 5 | 3 | 2 | 0 | 0 |
-| **All** | | **114** | **84** | **17** | **13** | **34** | **34** |
+| **All** | | **115** | **85** | **17** | **13** | **34** | **34** |
 
 ## Reviewed exceptions
 
@@ -58,10 +58,11 @@ reviewed as RLS-free.
 | `tenant` | yes |  |  |  |  |  |
 | `tenant_admin_account` | yes |  |  |  | `id` | `tenant` |
 | `tenant_status_change` | yes |  |  |  | `id` | `tenant` |
+| `tenant_user_audit` | yes | yes |  |  | `id` |  |
 | `uom_catalogue` |  |  |  |  |  |  |
 | `zone` | yes | yes |  |  |  | `site` |
 
-Load order: `dlq_replay`, `label_printer`, `lpn_series`, `outbox`, `printed_label`, `site`, `tenant`, `tenant_admin_account`, `tenant_status_change`, `item`, `item_site`, `item_uom`, `zone`, `location`.
+Load order: `dlq_replay`, `label_printer`, `lpn_series`, `outbox`, `printed_label`, `site`, `tenant`, `tenant_admin_account`, `tenant_status_change`, `tenant_user_audit`, `item`, `item_site`, `item_uom`, `zone`, `location`.
 
 ## `inventory` (services/inventory-service)
 
