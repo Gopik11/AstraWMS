@@ -298,7 +298,11 @@ Each one is independent, and the plan at the end orders them.
   - Alerts: `TenantRateLimited` (over 100 refusals in 10 minutes) and `TenantRefused` (the registry refuses, or would).
   - The Operations status shows the quota mode and the plans next to the registry.
   - Still open (phase 5, with the fair shares): tenant tags on relay send time, consumer processing time and
-    downstream calls, and a platform view for `PLATFORM_ADMIN` on the Operations page.
+    downstream calls.
+  - Platform view (done): the web client's *Tenants (platform)* page (`/platform`) lists the registry, creates tenants,
+    changes their status with a reason, shows the history and creates a tenant's first administrator (temporary
+    password shown once). An operator without `tenant_id` gets only this view. `deploy/vps/platform-admin.sh` creates
+    an operator account (PLATFORM_ADMIN only, new password and TOTP required at first sign-in).
 
 ### F. Staff who serve several tenants (G6)
 

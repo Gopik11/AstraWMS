@@ -36,6 +36,7 @@ const StoreReplenishment = lazy(() => import('./pages/StoreReplenishment'))
 const Recall = lazy(() => import('./pages/Recall'))
 const Management = lazy(() => import('./pages/Management'))
 const Integration = lazy(() => import('./pages/Integration'))
+const Platform = lazy(() => import('./pages/Platform'))
 
 function Guard({ roles, children }: { roles?: Role[]; children: ReactNode }) {
   const { hasRole } = useAuth()
@@ -123,6 +124,7 @@ export default function App({ environment }: { environment?: string }) {
           <Route path="/adjust" element={<Guard roles={['INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER']}><Adjust /></Guard>} />
           <Route path="/master-data" element={<Guard roles={['SOLUTION_ADMIN']}><MasterData /></Guard>} />
           <Route path="/operations" element={<Guard roles={['SOLUTION_ADMIN']}><Operations /></Guard>} />
+          <Route path="/platform" element={<Guard roles={['PLATFORM_ADMIN']}><Platform /></Guard>} />
           <Route path="/erp" element={<Guard roles={['ERP_INTEGRATION', 'SOLUTION_ADMIN']}><ErpSimulator /></Guard>} />
           <Route path="/auth/callback" element={<Navigate to="/" replace />} />
           <Route path="*" element={<div className="alert error">Page not found</div>} />

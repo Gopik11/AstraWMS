@@ -21,3 +21,12 @@ describe('menu at a store (ADR-0026)', () => {
     expect(picker).not.toContain('Billing')
   })
 })
+
+describe('platform menu (ADR-0030 A)', () => {
+  const labelsFor = (...roles: string[]) =>
+    visibleNav((...r) => r.some((x) => roles.includes(x)), false).flatMap((g) => g.items.map((i) => i.label))
+  it('shows the tenant registry to PLATFORM_ADMIN only', () => {
+    expect(labelsFor('PLATFORM_ADMIN')).toContain('Tenants (platform)')
+    expect(labelsFor('SOLUTION_ADMIN')).not.toContain('Tenants (platform)')
+  })
+})

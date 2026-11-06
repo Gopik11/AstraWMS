@@ -57,6 +57,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
       { to: '/erp', label: 'ERP simulator', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
       { to: '/integration', label: 'Integration', roles: ['ERP_INTEGRATION', 'SOLUTION_ADMIN'] },
       { to: '/operations', label: 'Operations', roles: ['SOLUTION_ADMIN'] },
+      { to: '/platform', label: 'Tenants (platform)', roles: ['PLATFORM_ADMIN'] },
     ],
   },
 ]

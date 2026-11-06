@@ -23,6 +23,12 @@ describe('toSession', () => {
     expect(s.approvalLimit).toBe('5000')
   })
 
+  it('keeps PLATFORM_ADMIN, which carries no tenant (ADR-0030 A)', () => {
+    const s = toSession({ access_token: tokenWith({ preferred_username: 'operator', realm_access: { roles: ['PLATFORM_ADMIN'] } }) } as User)
+    expect(s.roles).toEqual(['PLATFORM_ADMIN'])
+    expect(s.tenant).toBe('')
+  })
+
   it('treats missing scopes as none', () => {
     const s = toSession({ access_token: tokenWith({ sub: 'x', tenant_id: 't' }) } as User)
     expect(s.sites).toEqual([])

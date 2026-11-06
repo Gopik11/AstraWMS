@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import type { User } from 'oidc-client-ts'
 import './index.css'
 import App from './App.tsx'
+import PlatformApp from './PlatformApp.tsx'
 import { setTokenSource } from './api.ts'
 import { AuthProvider, toSession, userManager } from './auth.tsx'
 import { loadConfig } from './config.ts'
@@ -49,6 +50,19 @@ async function start() {
 
   const session = toSession(user)
   if (!session.tenant) {
+    if (session.roles.includes('PLATFORM_ADMIN')) {
+      // ADR-0030 A: the operator belongs to no tenant; only the platform view.
+      root.render(
+        <StrictMode>
+          <AuthProvider config={config} manager={manager} initial={user}>
+            <BrowserRouter>
+              <PlatformApp environment={config.environment} />
+            </BrowserRouter>
+          </AuthProvider>
+        </StrictMode>,
+      )
+      return
+    }
     fatal(`User ${session.userName} is not assigned to a tenant. Ask an administrator to set tenant_id.`)
     return
   }

@@ -6,6 +6,8 @@ import type { AppConfig } from './config'
 export type Role =
   | 'RECEIVER' | 'PICKER' | 'INV_ANALYST' | 'INV_MANAGER' | 'SUPERVISOR' | 'QA_MANAGER' | 'SOLUTION_ADMIN'
   | 'ERP_INTEGRATION'
+  /** The operator's role (ADR-0030 A): the tenant registry, across tenants. Not tied to a tenant. */
+  | 'PLATFORM_ADMIN'
 
 /** What the UI needs from the access token. The services validate the token themselves; this is for display. */
 export interface Session {
@@ -50,7 +52,7 @@ function scope(value: unknown): string[] | '*' {
 export function toSession(user: User): Session {
   const c = claims(user.access_token)
   const known: Role[] = ['RECEIVER', 'PICKER', 'INV_ANALYST', 'INV_MANAGER', 'SUPERVISOR', 'QA_MANAGER', 'SOLUTION_ADMIN',
-    'ERP_INTEGRATION']
+    'ERP_INTEGRATION', 'PLATFORM_ADMIN']
   // Only AstraWMS roles; Keycloak's own (default-roles-*, offline_access, …) are irrelevant here.
   const realmRoles = ((c.realm_access as { roles?: string[] } | undefined)?.roles ?? [])
     .filter((r): r is Role => known.includes(r as Role))
