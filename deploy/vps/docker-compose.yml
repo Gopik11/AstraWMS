@@ -1,7 +1,9 @@
-# AstraWMS on a shared VPS (test environment). Deployed by scripts/deploy-vps.sh into /opt/astrawms.
+# AstraWMS on a shared VPS (development/test environment). Deployed by scripts/deploy-vps.sh into /opt/astrawms.
 #
-# The host runs other production applications, so this stack is fenced in:
-#   - hard memory and CPU limits on every container (about 3.3 GB in total), small JVM heaps, log rotation;
+# The host is a 2 vCPU / 8 GB development server shared with other projects' test stacks, so this stack is fenced in
+# and kept quiet when idle:
+#   - hard memory and CPU limits on every container (about 3.6 GB in total), small JVM heaps, log rotation;
+#   - idle-friendly polling: the outbox relay runs every 2 s instead of 500 ms, small connection pools;
 #   - one published port: the gateway (${PUBLIC_PORT}) with the web UI and API; it also serves the Keycloak endpoints under
 #     /realms/. It is bound to ${PUBLIC_BIND} (127.0.0.1 by default): the host nginx terminates TLS for PUBLIC_URL
 #     (deploy/vps/host-nginx-astrawms.conf, Let's Encrypt) and proxies to it. Postgres, Kafka and the services stay on the private network; the Keycloak admin console is bound
@@ -28,6 +30,12 @@ x-service: &service
   environment: &service-env
     PORT: "8080"
     DB_HOST: postgres
+    # Idle cost (VPS audit 2026-11): at 500 ms the six relays ran ~380 SQL statements/s against an idle database.
+    # 2 s keeps end-to-end event latency acceptable for testing at a quarter of that load.
+    ASTRA_OUTBOX_RELAYINTERVALMS: "2000"
+    # 6 services x 5 + Keycloak 10 stays well under max_connections=60 (each Postgres backend costs ~2-5 MB).
+    SPRING_DATASOURCE_HIKARI_MAXIMUMPOOLSIZE: "5"
+    SPRING_DATASOURCE_HIKARI_MINIMUMIDLE: "1"
     DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
     DB_APP_PASSWORD: ${DB_APP_PASSWORD}
     KAFKA_BOOTSTRAP: kafka:9092
@@ -54,7 +62,9 @@ services:
     logging: *logging
     mem_limit: 192m
     cpus: 0.5
-    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=120", "-c", "work_mem=2MB"]
+    # max_connections sized to the pools above: 120 backends could never fit in 192 MB (the audit saw 67 processes
+    # at 87% of the limit).
+    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=60", "-c", "work_mem=2MB"]
     environment:
       POSTGRES_PASSWORD: ${PG_SUPERUSER_PASSWORD}
       DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD}
@@ -72,9 +82,22 @@ services:
     image: apache/kafka-native:3.8.0
     restart: unless-stopped
     logging: *logging
-    mem_limit: 320m
-    cpus: 0.5
+    # At cpus 0.5 the combined broker/controller was throttled long enough to miss its own heartbeats; the controller
+    # fenced it ~30 times an hour and every fence reloaded all partitions, which kept it pegged at the limit (audit
+    # 2026-11). One CPU of headroom plus longer heartbeat timeouts break that loop; it idles at a few percent.
+    mem_limit: 384m
+    cpus: 1.0
     environment:
+      KAFKA_BROKER_HEARTBEAT_INTERVAL_MS: 5000
+      KAFKA_BROKER_SESSION_TIMEOUT_MS: 30000
+      # Single broker: one partition per topic and for the offsets topic (default 50) is plenty and far cheaper.
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: 1
+      # Data on the volume (the image default is a directory inside the container, lost on every recreate).
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # The broker's own log files under /opt/kafka/logs roll hourly and are never deleted; keep them quiet.
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+      KAFKA_LOG4J_LOGGERS: "kafka=WARN,kafka.controller=WARN,state.change.logger=WARN,org.apache.kafka=WARN"
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       # Clients authenticate with SASL/PLAIN, one account per service; kafka/jaas.conf is rendered from .env by
@@ -128,6 +151,10 @@ services:
       # The services reach Keycloak by OIDC_JWK_SET_URI / OIDC_TOKEN_URI on the private network, not by discovery.
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
       KC_HEALTH_ENABLED: "true"
+      # Default pool is up to 100 connections; a test realm needs a handful.
+      KC_DB_POOL_INITIAL_SIZE: "2"
+      KC_DB_POOL_MIN_SIZE: "2"
+      KC_DB_POOL_MAX_SIZE: "10"
       JAVA_OPTS_KC_HEAP: "-XX:MaxRAMPercentage=60 -XX:InitialRAMPercentage=20"
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
@@ -220,7 +247,8 @@ services:
     image: prom/prometheus:v3.5.0
     restart: unless-stopped
     logging: *logging
-    mem_limit: 160m
+    # 160 MB was below its own TSDB size, so the page cache kept being evicted and re-read (62 GB read in 9 days).
+    mem_limit: 256m
     cpus: 0.25
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d",
               "--storage.tsdb.retention.size=500MB"]
