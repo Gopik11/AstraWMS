@@ -90,6 +90,11 @@ say "Pulling infrastructure images"
 dc pull -q postgres kafka keycloak prometheus
 
 say "Stage 1: Postgres and Kafka"
+# The broker runs as appuser (uid 1000) and writes KAFKA_LOG_DIRS on the kafkadata volume; a volume created earlier
+# (or by a different image) can be root-owned, and the broker then fails to format it and restarts forever.
+dc create -q kafka 2>/dev/null || dc create kafka >/dev/null   # creates the volume with compose's labels
+docker run --rm --user 0 --entrypoint chown -v astrawms_kafkadata:/var/lib/kafka/data apache/kafka-native:3.8.0 \
+  -R 1000:1000 /var/lib/kafka/data
 dc up -d postgres kafka
 wait_healthy postgres 120
 
