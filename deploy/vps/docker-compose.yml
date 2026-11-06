@@ -52,7 +52,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     logging: *logging
-    mem_limit: 192m
+    # 192m ran at ~88% with seven databases: at the limit the kernel kills PostgreSQL and every service loses its database.
+    mem_limit: 384m
     cpus: 0.5
     command: ["postgres", "-c", "shared_buffers=48MB", "-c", "max_connections=120", "-c", "work_mem=2MB"]
     environment:
@@ -72,8 +73,11 @@ services:
     image: apache/kafka-native:3.8.0
     restart: unless-stopped
     logging: *logging
-    mem_limit: 320m
-    cpus: 0.5
+    # The broker is its own controller and must heartbeat to it. With half a CPU on a shared host it missed the deadline
+    # every few minutes, was fenced, and every partition and consumer group lost its leader (NotCoordinatorException
+    # loops in every service). One CPU, more memory, and a session timeout that survives a short stall.
+    mem_limit: 640m
+    cpus: 1.0
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -97,6 +101,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # default 9 s; the broker is fenced (all leaderships dropped) when its heartbeats stop for this long
+      KAFKA_BROKER_SESSION_TIMEOUT_MS: 30000
       KAFKA_LOG_RETENTION_HOURS: 72
     volumes:
       - kafkadata:/var/lib/kafka/data

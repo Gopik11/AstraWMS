@@ -44,6 +44,7 @@ public class TenantRegistry implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(TenantRegistry.class);
     private static final Duration RETRY = Duration.ofSeconds(5);
     private static final Duration LOG_EVERY = Duration.ofMinutes(10);
+    private static final Duration SLOW_WARNING_EVERY = Duration.ofMinutes(5);
 
     public enum Mode { ENFORCE, REPORT }
 
@@ -57,6 +58,10 @@ public class TenantRegistry implements SmartLifecycle {
     private final Map<String, TenantChanged> tenants = new ConcurrentHashMap<>();
     private final Map<String, Instant> lastLogged = new ConcurrentHashMap<>();
     private volatile boolean loaded;
+    /** How long the registry may take to load before it says so at WARN (it retries quietly otherwise). */
+    private volatile Duration slowAfter = Duration.ofSeconds(60);
+    private volatile Instant startedAt = Instant.now();
+    private volatile Instant lastSlowWarning;
     private volatile boolean running;
     private volatile Consumer<String, String> consumer;
     private Thread thread;
@@ -66,6 +71,13 @@ public class TenantRegistry implements SmartLifecycle {
         this.json = json;
         this.service = service;
         this.mode = new AtomicReference<>(mode);
+        // 1 once the topic has been read to its end; 0 while every tenant is refused (alert TenantRegistryNotLoaded)
+        Metrics.gauge("astra.tenant.registry.loaded", this, r -> r.loaded ? 1 : 0);
+    }
+
+    /** For tests: warn sooner than after a minute. */
+    void slowAfter(Duration d) {
+        slowAfter = d;
     }
 
     public Mode mode() {
@@ -143,6 +155,7 @@ public class TenantRegistry implements SmartLifecycle {
     @Override
     public void start() {
         running = true;
+        startedAt = Instant.now();
         thread = new Thread(this::run, "tenant-registry");
         thread.setDaemon(true);
         thread.start();
@@ -169,6 +182,7 @@ public class TenantRegistry implements SmartLifecycle {
                 List<TopicPartition> partitions = partitions(c);
                 if (partitions.isEmpty()) {
                     log.debug("Tenant registry: {} does not exist yet; retrying", PlatformContracts.TOPIC_TENANTS);
+                    notLoadedYet("the topic was not found, or its metadata did not arrive in time");
                     sleep();
                     continue;
                 }
@@ -180,6 +194,8 @@ public class TenantRegistry implements SmartLifecycle {
                     if (!loaded && partitions.stream().allMatch(p -> c.position(p) >= end.get(p))) {
                         loaded = true;
                         log.info("Tenant registry loaded: {} tenant(s), mode {}", tenants.size(), mode.get());
+                    } else if (!loaded) {
+                        notLoadedYet("the topic has not been read to its end yet");
                     }
                 }
             } catch (WakeupException e) {
@@ -188,11 +204,29 @@ public class TenantRegistry implements SmartLifecycle {
                 }
             } catch (RuntimeException e) {
                 log.warn("Tenant registry: reading {} failed; retrying: {}", PlatformContracts.TOPIC_TENANTS, e.toString());
+                notLoadedYet("reading failed: " + e);
                 sleep();
             } finally {
                 consumer = null;
             }
         }
+    }
+
+    /**
+     * Says at WARN, every few minutes, that the registry has not loaded yet: until it has, ENFORCE refuses every tenant
+     * with 503, and the quiet retries above would otherwise leave no trace at the default log level.
+     */
+    private void notLoadedYet(String why) {
+        Instant now = Instant.now();
+        Instant last = lastSlowWarning;
+        if (loaded || now.isBefore(startedAt.plus(slowAfter)) || (last != null && now.isBefore(last.plus(SLOW_WARNING_EVERY)))) {
+            return;
+        }
+        lastSlowWarning = now;
+        log.warn("Tenant registry not loaded {} s after start ({}); mode {}: in ENFORCE mode every tenant is refused with 503 "
+                        + "TENANT_REGISTRY_UNAVAILABLE until it is. Check that {} exists, that this service's Kafka account may "
+                        + "READ and DESCRIBE it, and that the broker is healthy",
+                Duration.between(startedAt, now).toSeconds(), why, mode.get(), PlatformContracts.TOPIC_TENANTS);
     }
 
     private void apply(ConsumerRecord<String, String> record) {

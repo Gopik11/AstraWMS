@@ -93,6 +93,11 @@ Each one is independent, and the plan at the end orders them.
     are only logged (once per tenant and reason every ten minutes) and counted in `astra_tenant_refusals_total`. The
     VPS starts in REPORT (`TENANT_REGISTRY_MODE` in `.env`): register what the log names, then switch to ENFORCE.
     The Operations status shows each service's mode, whether it has read the registry, and tenants per status.
+  - **A registry that does not load says so.** It retries quietly while the topic is missing or unreadable, so a
+    service that has not loaded it a minute after start logs `Tenant registry not loaded …` at WARN (every five minutes,
+    with the reason), and `astra_tenant_registry_loaded` is 0; the alert `TenantRegistryNotLoaded` fires after five
+    minutes. Found on the VPS before switching to ENFORCE: one service's loaded line had rotated out of its log, and
+    nothing else told a healthy registry from one stuck retrying.
 - **Migration.** Master data V9 creates the registry and registers every tenant master data already holds, `ACTIVE`.
   It runs as the schema owner, which forced RLS filters like any role, so it lifts the force on the tables it reads
   for that transaction only. Tenants used only in other services are found by REPORT mode and registered by hand.

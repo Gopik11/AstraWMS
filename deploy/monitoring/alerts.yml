@@ -62,3 +62,18 @@ groups:
         annotations:
           summary: "{{ $labels.service }} answers with 5xx"
           description: "Check the service log for the stack trace (correlate with X-Request-Id)."
+
+      - alert: TenantRegistryNotLoaded
+        expr: astra_tenant_registry_loaded == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.service }} has not loaded the tenant registry"
+          description: "ADR-0030 A. In ENFORCE mode it refuses every tenant with 503 TENANT_REGISTRY_UNAVAILABLE. Its log says why (\"Tenant registry not loaded\"): the topic wms.platform.tenants.v1 is missing, its Kafka account lacks READ/DESCRIBE, or the broker is unhealthy (KafkaConsumerGroupsUnstable)."
+
+      - alert: KafkaConsumerGroupsUnstable
+        expr: sum by (service) (increase(kafka_consumer_coordinator_failed_rebalance_total[15m])) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.service }}: Kafka consumer groups keep failing to rebalance"
+          description: "Listeners stall while their groups rejoin; messages wait in Kafka. Usually the broker lost its group coordinators (log: NotCoordinatorException; broker log: repeated \"Finished unloading __consumer_offsets\", fencing). Check the broker's CPU and memory (docker stats) and its log."
