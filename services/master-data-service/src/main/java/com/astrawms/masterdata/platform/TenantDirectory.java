@@ -219,7 +219,20 @@ public class TenantDirectory {
                         where tenant_id = :t order by created_at, id""").param("t", tenantId).query().listOfRows();
     }
 
+    /**
+     * At every start, publishes every tenant's current state again, not only the unpublished ones. The registries read a
+     * compacted topic, and a broker that lost its data (a recreated container without its volume, a restored broker)
+     * would otherwise leave it empty for good: every service would load 0 tenants and, in ENFORCE mode, refuse every
+     * tenant as unknown. Republishing a version a registry already holds changes nothing there (it keeps the highest).
+     */
     @EventListener(ApplicationReadyEvent.class)
+    public void republishAll() {
+        // cross-tenant: mark every tenant's latest version as not yet published
+        int n = tx.execute(s -> jdbc.sql("update tenant set published_version = 0").update());
+        publishAllPending();
+        log.info("Tenant registry: republished all {} tenant(s) at start", n);
+    }
+
     @Scheduled(fixedDelayString = "${astra.tenancy.publish-interval-ms:60000}", initialDelayString = "${astra.tenancy.publish-interval-ms:60000}")
     public void publishAllPending() {
         // cross-tenant: tenants whose latest version has not been published yet

@@ -93,6 +93,11 @@ Each one is independent, and the plan at the end orders them.
     are only logged (once per tenant and reason every ten minutes) and counted in `astra_tenant_refusals_total`. The
     VPS starts in REPORT (`TENANT_REGISTRY_MODE` in `.env`): register what the log names, then switch to ENFORCE.
     The Operations status shows each service's mode, whether it has read the registry, and tenants per status.
+  - **An emptied topic heals at the next start.** Master data publishes every tenant's state again whenever it
+    starts, not only versions it has not published: a broker that lost its data would otherwise leave the compacted
+    topic empty for good, every registry would load 0 tenants, and ENFORCE would refuse every tenant as unknown. The
+    VPS broker kept its data inside the container until the 2026-11 audit (`KAFKA_LOG_DIRS` now points at its volume),
+    so every recreate of the broker container emptied every topic.
   - **A registry that does not load says so.** It retries quietly while the topic is missing or unreadable, so a
     service that has not loaded it a minute after start logs `Tenant registry not loaded …` at WARN (every five minutes,
     with the reason), and `astra_tenant_registry_loaded` is 0; the alert `TenantRegistryNotLoaded` fires after five
