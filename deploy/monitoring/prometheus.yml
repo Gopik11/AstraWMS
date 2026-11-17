@@ -1,8 +1,9 @@
 # Prometheus for AstraWMS (ADR-0018). Scrapes every service's /actuator/prometheus on the private Docker network;
 # the gateway never routes /actuator, so the metrics are not reachable from outside.
 global:
-  scrape_interval: 30s
-  evaluation_interval: 30s
+  # 60 s: every alert window is 5 min or longer (alerts.yml), and it halves scrape load on the shared dev VPS.
+  scrape_interval: 60s
+  evaluation_interval: 60s
 
 rule_files:
   - /etc/prometheus/alerts.yml

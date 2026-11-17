@@ -306,6 +306,23 @@ class PlatformIT {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.length()", is(0)));
     }
 
+    @Test
+    void everyTenantIsPublishedAgainAtStartSoAnEmptiedTopicHeals() throws Exception {
+        call(post("/api/v1/platform/tenants"), platform, "{\"tenantId\":\"%s\"}".formatted(tenant)).andExpect(status().isCreated());
+        awaitStatus(tenant, PlatformContracts.ACTIVE);
+        String count = "select count(*) from outbox where topic = '" + PlatformContracts.TOPIC_TENANTS + "' and tenant_id = :t";
+        long before = jdbc.sql(count).param("t", tenant).query(Long.class).single();
+
+        // already published, so only a republish of every tenant puts it on the topic again (as after a broker lost its data)
+        directory.publishAllPending();
+        assertThat(jdbc.sql(count).param("t", tenant).query(Long.class).single()).isEqualTo(before);
+        directory.republishAll();
+
+        assertThat(jdbc.sql(count).param("t", tenant).query(Long.class).single()).isEqualTo(before + 1);
+        assertThat(jdbc.sql("select published_version = version from tenant where tenant_id = :t").param("t", tenant)
+                .query(Boolean.class).single()).isTrue();
+    }
+
     private static void await(BooleanSupplier condition) throws InterruptedException {
         Instant deadline = Instant.now().plusSeconds(30);
         while (Instant.now().isBefore(deadline)) {
